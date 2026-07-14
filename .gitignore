@@ -1,0 +1,36 @@
+# Rust language server
+/target/
+**/*.rs.bk
+
+# IntelliJ Platform / Gradle
+**/.gradle/
+**/.intellijPlatform/
+**/.kotlin/
+**/build/
+**/out/
+.idea/
+*.iml
+
+# VS Code extension
+**/node_modules/
+**/*.vsix
+**/.vscode-test/
+coverage/
+
+# Local editor and environment state
+.vscode/
+.env
+.env.*
+!.env.example
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*.swo
+*~

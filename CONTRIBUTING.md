@@ -1,0 +1,47 @@
+# Contributing
+
+Thank you for helping improve Doria's IDE experience.
+
+## Source of truth
+
+The Doria compiler and its accepted specification and decisions define language behavior. This repository presents that behavior to editors; it must not invent a second parser, type system, diagnostic meaning, or feature-status authority.
+
+TextMate and IntelliJ highlighting may include clearly planned vocabulary so documentation and future-looking examples remain readable. Highlighting alone never means that `doriac` implements a construct.
+
+## Before making a change
+
+- Check whether the change belongs to the language server, both editor clients, or only one editor-specific adapter.
+- For language syntax changes, confirm the corresponding compiler specification or accepted decision first.
+- Keep VS Code and IntelliJ highlighting aligned unless a platform limitation is documented.
+- Add or update a shared fixture under `editors/fixtures/` for syntax changes.
+- Keep client code thin: diagnostics, completion meaning, hover meaning, and fixits should come from `doria-lsp` wherever the protocol supports them.
+
+## Validation
+
+Run the repository guardrails:
+
+```bash
+php scripts/check_editor_highlighting.php
+node --check editors/vscode/doria/extension.js
+```
+
+Build and test the JetBrains plugin:
+
+```bash
+cd editors/intellij/doria
+./gradlew test buildPlugin
+```
+
+When language-server source changes after its migration, also run its Rust formatting, Clippy, build, and test commands documented beside the server crate.
+
+## Pull requests
+
+Keep pull requests focused and include:
+
+- the user-visible IDE behavior being changed;
+- the Doria language version or decision that supports it;
+- tests or fixtures covering the behavior;
+- which editor clients were exercised;
+- screenshots only when the visual result cannot be verified adequately by tests.
+
+Release and version changes must update the VS Code manifest, IntelliJ plugin version, documentation, and changelog together.
