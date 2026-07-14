@@ -19,14 +19,16 @@ The plugin registers the lower-case `doria` language id so Markdown fenced block
 
 ## Build the language server
 
-During the repository split, build `doria-lsp` from the Doria compiler checkout:
+During the repository split, build `doria-lsp` from a Doria compiler checkout located anywhere on your system:
 
 ```bash
-cd /path/to/doria
-cargo build -p doriac --bin doria-lsp
+cargo build \
+  --manifest-path "/absolute/path/to/compiler-checkout/Cargo.toml" \
+  -p doriac \
+  --bin doria-lsp
 ```
 
-Point the plugin setting or `DORIA_LSP_PATH` at the resulting executable. Once the standalone server source moves into this repository, the root README will own the repository-local build command.
+Point the plugin setting or `DORIA_LSP_PATH` at the resulting executable. If `doria-lsp` is already on `PATH`, no explicit configuration is required. If `CARGO_TARGET_DIR` is set, use the executable from that target directory. Once the standalone server source moves into this repository, the root README will own the repository-local build command.
 
 ## Build the plugin
 

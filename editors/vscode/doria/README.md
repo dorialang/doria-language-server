@@ -10,15 +10,17 @@ The TextMate grammar is editor support only. It highlights accepted and planned 
 
 Double-quoted interpolation uses the ordinary Doria expression grammar, so expressions such as `{left() + right()}` receive normal token scopes inside the string. Literal opening braces use `\{`; single-quoted strings remain non-interpolating.
 
-During the repository split, build the language server from the Doria compiler checkout and expose it through `DORIA_LSP_PATH`:
+During the repository split, build the language server from a Doria compiler checkout located anywhere on your system and expose the resulting executable through `DORIA_LSP_PATH`:
 
 ```bash
-cd /path/to/doria
-cargo build -p doriac --bin doria-lsp
-export DORIA_LSP_PATH="$PWD/target/debug/doria-lsp"
+cargo build \
+  --manifest-path "/absolute/path/to/compiler-checkout/Cargo.toml" \
+  -p doriac \
+  --bin doria-lsp
+export DORIA_LSP_PATH="/absolute/path/to/compiler-checkout/target/debug/doria-lsp"
 ```
 
-Once the standalone server source moves into this repository, the root README will replace this transition command with the repository-local build command.
+If `doria-lsp` is already on `PATH`, no environment variable is required. If `CARGO_TARGET_DIR` is set, point `DORIA_LSP_PATH` at the executable in that target directory. Once the standalone server source moves into this repository, the root README will replace this transition command with the repository-local build command.
 
 The extension resolves the server from:
 

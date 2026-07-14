@@ -33,15 +33,22 @@ docs/                Architecture and release documentation
 
 ## Use the language server during the split
 
-Build `doria-lsp` from a sibling checkout of the compiler repository:
+If `doria-lsp` is already on `PATH`, no additional setup is required. Otherwise, build it from a Doria compiler checkout located anywhere on your system:
 
 ```bash
-cd ../doria
-cargo build -p doriac --bin doria-lsp
-export DORIA_LSP_PATH="$PWD/target/debug/doria-lsp"
+cargo build \
+  --manifest-path "/absolute/path/to/compiler-checkout/Cargo.toml" \
+  -p doriac \
+  --bin doria-lsp
 ```
 
-On Windows, set `DORIA_LSP_PATH` to the full path of `doria-lsp.exe`.
+Then set `DORIA_LSP_PATH` to the executable produced by that checkout. With Cargo's default target directory:
+
+```bash
+export DORIA_LSP_PATH="/absolute/path/to/compiler-checkout/target/debug/doria-lsp"
+```
+
+On Windows, configure the full path to `doria-lsp.exe`. If `CARGO_TARGET_DIR` is set, use the executable from that target directory instead. The checkout and this repository do not need to be adjacent.
 
 Both editor clients resolve the server in this order:
 
