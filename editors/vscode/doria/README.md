@@ -10,17 +10,14 @@ The TextMate grammar is editor support only. It highlights accepted and planned 
 
 Double-quoted interpolation uses the ordinary Doria expression grammar, so expressions such as `{left() + right()}` receive normal token scopes inside the string. Literal opening braces use `\{`; single-quoted strings remain non-interpolating.
 
-During the repository split, build the language server from a Doria compiler checkout located anywhere on your system and expose the resulting executable through `DORIA_LSP_PATH`:
+Build the language server from the root of this repository and expose the resulting executable through `DORIA_LSP_PATH`:
 
 ```bash
-cargo build \
-  --manifest-path "/absolute/path/to/compiler-checkout/Cargo.toml" \
-  -p doriac \
-  --bin doria-lsp
-export DORIA_LSP_PATH="/absolute/path/to/compiler-checkout/target/debug/doria-lsp"
+cargo build --locked --bin doria-lsp
+export DORIA_LSP_PATH="/absolute/path/to/doria-language-server/target/debug/doria-lsp"
 ```
 
-If `doria-lsp` is already on `PATH`, no environment variable is required. If `CARGO_TARGET_DIR` is set, point `DORIA_LSP_PATH` at the executable in that target directory. Once the standalone server source moves into this repository, the root README will replace this transition command with the repository-local build command.
+If `doria-lsp` from a GitHub release is already on `PATH`, no environment variable is required. On Windows, use the full path to `doria-lsp.exe`.
 
 The extension resolves the server from:
 
@@ -31,7 +28,7 @@ The extension resolves the server from:
 4. doria-lsp on PATH
 ```
 
-No npm dependencies are required for the development extension.
+Run `npm ci` to install the pinned VS Code packaging tools. Use `npm run package` to produce a VSIX.
 
 After changing the TextMate grammar, reload the VS Code window or restart the Extension Development Host so VS Code reads the updated grammar.
 

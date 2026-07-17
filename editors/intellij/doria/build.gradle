@@ -8,11 +8,14 @@ group = 'dev.doria'
 version = '2026.03.1-canary'
 
 dependencies {
+    testImplementation 'junit:junit:4.13.2'
+
     intellijPlatform {
         create(
             providers.gradleProperty('platformType'),
             providers.gradleProperty('platformVersion')
         )
+        testFramework(org.jetbrains.intellij.platform.gradle.TestFrameworkType.Platform.INSTANCE)
     }
 }
 

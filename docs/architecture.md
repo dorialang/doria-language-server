@@ -39,8 +39,8 @@ The TextMate grammar and IntelliJ lexer are deliberately local and fast. They cl
 
 Both editor implementations must be checked against the same fixtures and token inventory.
 
-## Server extraction
+## Compiler dependency
 
-The current server implementation remains in the compiler repository during the split. The extraction should move only the protocol layer and its tests. Compiler services stay in `doriac` and are consumed through a deliberate library dependency or stable compiler-service boundary.
+The standalone server depends on `doriac` at an exact Git commit recorded in `Cargo.toml` and `Cargo.lock`. Default compiler runtime bundling is disabled because the language server needs reusable frontend services, not native runtime artifacts.
 
-The coordinated compiler change should remove the old `doria-lsp` binary only after this repository builds, tests, and packages its replacement.
+Compiler updates are deliberate compatibility changes: update the pinned revision, run the complete server and editor validation, and confirm the advertised Doria toolchain version before release. The server source may adapt compiler diagnostics to LSP structures, but compiler-owned syntax and semantic behavior must stay in `doriac`.

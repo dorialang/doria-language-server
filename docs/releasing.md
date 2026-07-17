@@ -14,8 +14,11 @@ Use the canonical zero-padded form in user-facing Doria version text. When a pac
 4. Update the IntelliJ plugin version.
 5. Run the cross-editor guardrails and JavaScript syntax check.
 6. Build and test the IntelliJ plugin with the Gradle wrapper.
-7. Once the server lives here, run its complete Rust validation and build release binaries for supported platforms.
+7. Run Rust formatting, Clippy with warnings denied, tests, and a locked release build.
 8. Smoke-test diagnostics, completion, hover, fixits, function-call highlighting, and interpolation in both editor families.
-9. Tag and publish only after all artifacts report compatible versions.
+9. Push a `v*` tag only after all manifests report compatible versions.
+10. Confirm the GitHub release contains server archives for Linux, macOS, and Windows on x64 and arm64, plus the VSIX, IntelliJ ZIP, and `SHA256SUMS`.
 
 Publishing Marketplace extensions, JetBrains plugins, binaries, tags, or GitHub releases is always an explicit maintainer action.
+
+`workflow_dispatch` builds and retains every artifact without publishing a GitHub release. A pushed `v*` tag builds the same matrix and publishes those artifacts after every platform job succeeds.

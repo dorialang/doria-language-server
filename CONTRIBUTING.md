@@ -22,7 +22,17 @@ Run the repository guardrails:
 
 ```bash
 php scripts/check_editor_highlighting.php
-node --check editors/vscode/doria/extension.js
+npm --prefix editors/vscode/doria ci --ignore-scripts
+npm --prefix editors/vscode/doria run check
+```
+
+Validate the standalone server:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+cargo build --workspace --locked
 ```
 
 Build and test the JetBrains plugin:
@@ -32,7 +42,7 @@ cd editors/intellij/doria
 ./gradlew test buildPlugin
 ```
 
-When language-server source changes after its migration, also run its Rust formatting, Clippy, build, and test commands documented beside the server crate.
+When changing the pinned `doriac` revision, run all Rust and editor checks and verify `doria-lsp --version` reports the intended canonical Doria toolchain release.
 
 ## Pull requests
 

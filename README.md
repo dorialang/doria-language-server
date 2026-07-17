@@ -8,7 +8,7 @@ This repository is the home of `doria-lsp`, syntax highlighting, and IDE integra
 
 ## Repository status
 
-The editor clients and shared syntax fixtures have been moved here. During the repository split, the `doria-lsp` Rust implementation still builds from the Doria compiler repository; [server/README.md](server/README.md) records the boundary for moving it without duplicating compiler semantics.
+This repository owns the standalone `doria-lsp` binary, editor clients, shared syntax fixtures, and their release artifacts. The server consumes a commit-pinned `doriac` library dependency; it does not duplicate the compiler's lexer, parser, semantic checker, or diagnostics.
 
 Current editor support includes:
 
@@ -27,28 +27,27 @@ editors/
   vscode/doria/      VS Code extension
 res/images/          Canonical Doria artwork
 scripts/             Repository guardrails
-server/              Language-server migration boundary
+server/              Standalone language-server crate and tests
 docs/                Architecture and release documentation
 ```
 
-## Use the language server during the split
+## Build the language server
 
-If `doria-lsp` is already on `PATH`, no additional setup is required. Otherwise, build it from a Doria compiler checkout located anywhere on your system:
-
-```bash
-cargo build \
-  --manifest-path "/absolute/path/to/compiler-checkout/Cargo.toml" \
-  -p doriac \
-  --bin doria-lsp
-```
-
-Then set `DORIA_LSP_PATH` to the executable produced by that checkout. With Cargo's default target directory:
+Build the standalone server from this repository:
 
 ```bash
-export DORIA_LSP_PATH="/absolute/path/to/compiler-checkout/target/debug/doria-lsp"
+cargo build --locked --bin doria-lsp
 ```
 
-On Windows, configure the full path to `doria-lsp.exe`. If `CARGO_TARGET_DIR` is set, use the executable from that target directory instead. The checkout and this repository do not need to be adjacent.
+The executable is written to `target/debug/doria-lsp` (`target\debug\doria-lsp.exe` on Windows). Set `DORIA_LSP_PATH` to that file, install a release archive's executable on `PATH`, or choose it in the editor's Doria language-server setting.
+
+Confirm the server and compatible compiler versions with:
+
+```bash
+doria-lsp --version
+```
+
+CI builds and tests the server on Linux, macOS, and Windows. GitHub release workflows build native archives for all three operating systems on x64 and arm64, and package the VS Code extension and IntelliJ Platform plugin.
 
 Both editor clients resolve the server in this order:
 
@@ -63,7 +62,11 @@ Run the cross-editor consistency checks from this repository root:
 
 ```bash
 php scripts/check_editor_highlighting.php
-node --check editors/vscode/doria/extension.js
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+npm --prefix editors/vscode/doria ci --ignore-scripts
+npm --prefix editors/vscode/doria run check
 ```
 
 Build the IntelliJ plugin with its checked-in Gradle wrapper:

@@ -14,6 +14,57 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  server:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Build
+        run: cargo build --workspace --locked
+
+  server-platforms:
+    name: server (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2025]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Build
+        run: cargo build --workspace --locked
+
   editor-guardrails:
     runs-on: ubuntu-latest
 
@@ -34,11 +85,16 @@ jobs:
         with:
           node-version-file: editors/vscode/doria/.node-version
 
+      - name: Install VS Code packaging dependencies
+        working-directory: editors/vscode/doria
+        run: npm ci --ignore-scripts
+
       - name: Check cross-editor highlighting
         run: php scripts/check_editor_highlighting.php
 
       - name: Check VS Code client syntax
-        run: node --check editors/vscode/doria/extension.js
+        working-directory: editors/vscode/doria
+        run: npm run check
 
   intellij:
     runs-on: ubuntu-latest

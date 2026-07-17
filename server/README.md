@@ -1,14 +1,15 @@
-# Language-server migration target
+# Doria language server
 
-This directory is reserved for the standalone `doria-lsp` implementation.
+This crate builds the standalone `doria-lsp` executable. It owns LSP transport, document state, UTF-16 position mapping, compiler-diagnostic adaptation, completion, hover, and code actions.
 
-During the repository split, the active server remains in the Doria compiler repository at:
+Language behavior comes from the exact `doriac` revision pinned by the workspace manifest and lockfile. Do not copy compiler parsing or semantic rules into this crate.
 
-```text
-crates/doriac/src/lsp.rs
-crates/doriac/src/bin/doria-lsp.rs
+From the repository root:
+
+```bash
+cargo build --locked --bin doria-lsp
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
-The migration should move the LSP transport, document-state, position-mapping, completion, hover, diagnostics-adaptation, and code-action code here. Lexer, parser, semantic checker, type system, and diagnostic definitions remain compiler services and must not be copied into this repository.
-
-Before deleting the compiler-owned binary, the standalone server must preserve its tests and successfully serve both editor clients from this repository.
+Without arguments, `doria-lsp` serves LSP over stdin/stdout. Use `doria-lsp --version` to inspect the server package and compatible canonical Doria toolchain versions.

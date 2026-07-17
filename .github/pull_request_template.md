@@ -8,6 +8,7 @@ Link the relevant Doria specification, decision, compiler change, or explain why
 
 ## Validation
 
+- [ ] Rust formatting, Clippy, build, and server tests passed when affected
 - [ ] Cross-editor highlighting guard passed
 - [ ] VS Code client syntax check passed
 - [ ] IntelliJ plugin tests/build passed when affected

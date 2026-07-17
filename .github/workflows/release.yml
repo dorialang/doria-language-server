@@ -1,0 +1,164 @@
+name: release-artifacts
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  server-binaries:
+    name: ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            artifact: doria-lsp-linux-x86_64
+            archive: tar
+            filename: doria-lsp-linux-x86_64.tar.gz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: doria-lsp-linux-aarch64
+            archive: tar
+            filename: doria-lsp-linux-aarch64.tar.gz
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact: doria-lsp-macos-x86_64
+            archive: tar
+            filename: doria-lsp-macos-x86_64.tar.gz
+          - os: macos-15
+            target: aarch64-apple-darwin
+            artifact: doria-lsp-macos-aarch64
+            archive: tar
+            filename: doria-lsp-macos-aarch64.tar.gz
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            artifact: doria-lsp-windows-x86_64
+            archive: zip
+            filename: doria-lsp-windows-x86_64.zip
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            artifact: doria-lsp-windows-aarch64
+            archive: zip
+            filename: doria-lsp-windows-aarch64.zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add "${{ matrix.target }}"
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin doria-lsp
+
+      - name: Smoke-test release binary
+        if: runner.os != 'Windows'
+        run: target/${{ matrix.target }}/release/doria-lsp --version
+
+      - name: Smoke-test release binary on Windows
+        if: runner.os == 'Windows'
+        run: target/${{ matrix.target }}/release/doria-lsp.exe --version
+
+      - name: Package Unix archive
+        if: matrix.archive == 'tar'
+        shell: bash
+        run: |
+          mkdir -p "dist/${{ matrix.artifact }}"
+          cp "target/${{ matrix.target }}/release/doria-lsp" "dist/${{ matrix.artifact }}/"
+          cp README.md LICENSE "dist/${{ matrix.artifact }}/"
+          tar -czf "dist/${{ matrix.artifact }}.tar.gz" -C dist "${{ matrix.artifact }}"
+
+      - name: Package Windows archive
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "dist/${{ matrix.artifact }}"
+          Copy-Item "target/${{ matrix.target }}/release/doria-lsp.exe" "dist/${{ matrix.artifact }}/"
+          Copy-Item README.md, LICENSE "dist/${{ matrix.artifact }}/"
+          Compress-Archive -Path "dist/${{ matrix.artifact }}/*" -DestinationPath "dist/${{ matrix.artifact }}.zip"
+
+      - name: Upload server archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.filename }}
+          if-no-files-found: error
+
+  editor-packages:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: editors/vscode/doria/.node-version
+
+      - name: Package VS Code extension
+        working-directory: editors/vscode/doria
+        run: |
+          npm ci --ignore-scripts
+          npm run package -- --out doria-language-support.vsix
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Package IntelliJ plugin
+        working-directory: editors/intellij/doria
+        run: ./gradlew test buildPlugin --no-daemon
+
+      - name: Upload VS Code extension
+        uses: actions/upload-artifact@v4
+        with:
+          name: doria-vscode
+          path: editors/vscode/doria/doria-language-support.vsix
+          if-no-files-found: error
+
+      - name: Upload IntelliJ plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: doria-intellij
+          path: editors/intellij/doria/build/distributions/*.zip
+          if-no-files-found: error
+
+  github-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [server-binaries, editor-packages]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "Doria Language Server $GITHUB_REF_NAME"

@@ -8,27 +8,25 @@ It provides:
 
 - `.doria` file recognition.
 - Basic syntax highlighting for Doria keywords, variables, types, attributes, strings, string interpolation, comments, numbers, operators, punctuation, accepted OOP declaration vocabulary, namespace/import/include/directive vocabulary, and rejected strict-comparison/preprocessor spellings.
+- Doria code-style settings and formatting for tabs, indentation, continuation indentation, spacing, braces, and preserved blank lines.
 - A Doria settings page for configuring the language server path.
 - `doria-lsp` integration through the IntelliJ Platform LSP API.
 
 The initial plugin targets IntelliJ Platform `2025.2.1+`, where JetBrains exposes the LSP module as `com.intellij.modules.lsp`.
 
-This is first-pass Doria support for IntelliJ / JetBrains IDEs. The local IntelliJ highlighter is syntax highlighting only: it does not provide a semantic PSI tree, formatter, inspections, refactors, or compiler diagnostics. Compiler-backed diagnostics, completion, and hover remain separate and come from `doria-lsp` when the language server is configured and available.
+This is first-pass Doria support for IntelliJ / JetBrains IDEs. Local syntax highlighting and formatting do not provide semantic inspections or refactors. Compiler-backed diagnostics, completion, and hover remain separate and come from `doria-lsp` when the language server is configured and available.
 
 The plugin registers the lower-case `doria` language id so Markdown fenced blocks using the `doria` info string can resolve to the Doria highlighter where the JetBrains Markdown plugin performs language injection. Planned keywords are highlighted for documentation readability only; compiler support still follows the staged plan.
 
 ## Build the language server
 
-During the repository split, build `doria-lsp` from a Doria compiler checkout located anywhere on your system:
+From the root of this repository:
 
 ```bash
-cargo build \
-  --manifest-path "/absolute/path/to/compiler-checkout/Cargo.toml" \
-  -p doriac \
-  --bin doria-lsp
+cargo build --locked --bin doria-lsp
 ```
 
-Point the plugin setting or `DORIA_LSP_PATH` at the resulting executable. If `doria-lsp` is already on `PATH`, no explicit configuration is required. If `CARGO_TARGET_DIR` is set, use the executable from that target directory. Once the standalone server source moves into this repository, the root README will own the repository-local build command.
+Point the plugin setting or `DORIA_LSP_PATH` at `target/debug/doria-lsp` (`target\debug\doria-lsp.exe` on Windows). If a release binary is already on `PATH`, no explicit configuration is required.
 
 ## Build the plugin
 

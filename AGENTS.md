@@ -23,7 +23,8 @@ For highlighting or editor-client changes, run:
 
 ```bash
 php scripts/check_editor_highlighting.php
-node --check editors/vscode/doria/extension.js
+npm --prefix editors/vscode/doria ci --ignore-scripts
+npm --prefix editors/vscode/doria run check
 ```
 
 For IntelliJ plugin changes, also run:
@@ -33,4 +34,11 @@ cd editors/intellij/doria
 ./gradlew test buildPlugin
 ```
 
-Once the Rust server source is migrated here, run formatting, Clippy with warnings denied, build, and tests for every server change.
+For server or compiler-dependency changes, run:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+cargo build --workspace --locked
+```
