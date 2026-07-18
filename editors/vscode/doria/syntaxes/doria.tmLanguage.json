@@ -68,48 +68,78 @@
           },
           "patterns": [
             {
-              "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(:)",
-              "captures": {
-                "1": {
-                  "name": "variable.parameter.attribute.doria"
-                },
-                "2": {
-                  "name": "punctuation.separator.key-value.doria"
-                }
-              }
-            },
-            {
               "name": "entity.name.type.attribute.doria",
               "match": "(?:\\\\?[A-Z][A-Za-z0-9_]*)(?:\\\\[A-Za-z_][A-Za-z0-9_]*)*(?=\\s*(?:\\(|,|\\]))"
             },
             {
-              "include": "#strings"
-            },
-            {
-              "include": "#types"
-            },
-            {
-              "include": "#accessors"
-            },
-            {
-              "include": "#variables"
-            },
-            {
-              "include": "#numbers"
-            },
-            {
-              "include": "#keywords"
-            },
-            {
-              "include": "#invalid"
-            },
-            {
-              "include": "#operators"
-            },
-            {
-              "include": "#punctuation"
+              "include": "#attributeExpression"
             }
           ]
+        }
+      ]
+    },
+    "attributeExpression": {
+      "patterns": [
+        {
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(:)",
+          "captures": {
+            "1": {
+              "name": "variable.parameter.attribute.doria"
+            },
+            "2": {
+              "name": "punctuation.separator.key-value.doria"
+            }
+          }
+        },
+        {
+          "include": "#attributeBrackets"
+        },
+        {
+          "include": "#strings"
+        },
+        {
+          "include": "#types"
+        },
+        {
+          "include": "#accessors"
+        },
+        {
+          "include": "#variables"
+        },
+        {
+          "include": "#numbers"
+        },
+        {
+          "include": "#keywords"
+        },
+        {
+          "include": "#invalid"
+        },
+        {
+          "include": "#operators"
+        },
+        {
+          "include": "#punctuation"
+        }
+      ]
+    },
+    "attributeBrackets": {
+      "name": "meta.brackets.attribute.doria",
+      "begin": "\\[",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.section.brackets.begin.doria"
+        }
+      },
+      "end": "\\]",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.brackets.end.doria"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#attributeExpression"
         }
       ]
     },

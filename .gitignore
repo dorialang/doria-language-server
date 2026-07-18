@@ -1,5 +1,6 @@
 # Rust language server
 /target/
+/dist/
 **/*.rs.bk
 
 # IntelliJ Platform / Gradle

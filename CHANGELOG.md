@@ -12,3 +12,5 @@ This project follows the Doria toolchain CalVer.
 - Migrated `doria-lsp` and its protocol tests from the compiler repository onto a commit-pinned `doriac` dependency.
 - Added Linux, macOS, and Windows CI plus native release archives for x64 and arm64, with packaged VS Code and IntelliJ artifacts.
 - Added functional IntelliJ formatting for language-specific indentation, tabs, spacing, braces, and preserved blank lines, with platform regression tests.
+- Kept nested list and dictionary expressions inside attribute highlighting in both VS Code and JetBrains editors, with shared fixture and lexer regression coverage.
+- Added one target-based build command that prints server, VS Code, and IntelliJ artifact paths and can install `doria-lsp` globally through Cargo.

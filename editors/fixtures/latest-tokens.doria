@@ -35,6 +35,14 @@ echo HARD_LIMIT;
 #[Module(host: "localhost", port: 3306)]
 #[App\Routing\Route(path: "/parser", name: "parser.show")]
 #[Test]
+#[Module(
+    imports: [
+        ORMModule::forRoot(
+            entities: [],
+            synchronize: true,
+        ),
+    ],
+)]
 class Parser
 {
     internal int $position = 0;

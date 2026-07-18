@@ -31,21 +31,76 @@ server/              Standalone language-server crate and tests
 docs/                Architecture and release documentation
 ```
 
-## Build the language server
+## Build and package artifacts
 
-Build the standalone server from this repository:
-
-```bash
-cargo build --locked --bin doria-lsp
-```
-
-The executable is written to `target/debug/doria-lsp` (`target\debug\doria-lsp.exe` on Windows). Set `DORIA_LSP_PATH` to that file, install a release archive's executable on `PATH`, or choose it in the editor's Doria language-server setting.
-
-Confirm the server and compatible compiler versions with:
+Use one command from the repository root instead of remembering each ecosystem's build invocation:
 
 ```bash
-doria-lsp --version
+php scripts/build.php help
+php scripts/build.php <target>
 ```
+
+| Target | Result |
+| --- | --- |
+| `server` | Debug `doria-lsp` executable |
+| `server-release` | Optimized `doria-lsp` executable |
+| `install-server` | Install `doria-lsp` into Cargo's global bin directory |
+| `vscode` | `dist/doria-language-support.vsix` |
+| `intellij` | JetBrains plugin ZIP under `editors/intellij/doria/build/distributions/` |
+| `editors` | Both editor packages |
+| `all` | Debug server and both editor packages |
+
+Every target prints the absolute path of each artifact it creates. PHP and Rust/Cargo are needed for the server target; the VS Code target additionally needs Node.js/npm, and the IntelliJ target needs Java 21.
+
+## Build the language server step by step
+
+1. Open a terminal at the repository root—the directory containing the top-level `Cargo.toml`.
+2. Build the debug server:
+
+   ```bash
+   php scripts/build.php server
+   ```
+
+   The underlying Cargo command is `cargo build --locked --bin doria-lsp`.
+
+3. Find the executable at:
+
+   ```text
+   Linux/macOS: target/debug/doria-lsp
+   Windows:     target\debug\doria-lsp.exe
+   ```
+
+   `target/` is at the repository root, not inside `server/`. If `CARGO_TARGET_DIR` is configured, the wrapper reports the actual absolute output path.
+
+4. Verify the local executable:
+
+   ```bash
+   ./target/debug/doria-lsp --version
+   ```
+
+   On Windows PowerShell:
+
+   ```powershell
+   .\target\debug\doria-lsp.exe --version
+   ```
+
+5. To make the server globally available, install it through Cargo:
+
+   ```bash
+   php scripts/build.php install-server
+   doria-lsp --version
+   ```
+
+   Cargo normally installs it as `$HOME/.cargo/bin/doria-lsp` on Linux/macOS or `%USERPROFILE%\.cargo\bin\doria-lsp.exe` on Windows. Rustup normally adds that directory to `PATH`. If it did not, add the relevant directory to your shell or system `PATH`:
+
+   ```bash
+   export PATH="$HOME/.cargo/bin:$PATH"
+   doria-lsp --version
+   ```
+
+   Add that `export` line to your shell startup file to keep it across terminals. On Windows, add `%USERPROFILE%\.cargo\bin` through **System Properties → Environment Variables → Path**. Restart the IDE after changing `PATH`.
+
+For GUI-launched IDEs that do not inherit your shell environment, set the editor's explicit Doria language-server path or set `DORIA_LSP_PATH` to the absolute executable path. In VS Code this is the `doria.languageServer.path` setting; in JetBrains IDEs use **Settings → Languages & Frameworks → Doria → Language server path**. An explicit path is the most deterministic development setup.
 
 CI builds and tests the server on Linux, macOS, and Windows. GitHub release workflows build native archives for all three operating systems on x64 and arm64, and package the VS Code extension and IntelliJ Platform plugin.
 

@@ -10,14 +10,42 @@ The TextMate grammar is editor support only. It highlights accepted and planned 
 
 Double-quoted interpolation uses the ordinary Doria expression grammar, so expressions such as `{left() + right()}` receive normal token scopes inside the string. Literal opening braces use `\{`; single-quoted strings remain non-interpolating.
 
-Build the language server from the root of this repository and expose the resulting executable through `DORIA_LSP_PATH`:
+## Install the VS Code extension
+
+From the repository root, package the extension with the shared target-based build command:
 
 ```bash
-cargo build --locked --bin doria-lsp
+php scripts/build.php vscode
+code --install-extension dist/doria-language-support.vsix --force
+```
+
+Reload VS Code after installation. If the `code` shell command is unavailable, open the Extensions view, choose the `...` menu, select **Install from VSIX...**, and select `dist/doria-language-support.vsix`.
+
+## Connect the language server
+
+For a repository-local development server:
+
+```bash
+php scripts/build.php server
 export DORIA_LSP_PATH="/absolute/path/to/doria-language-server/target/debug/doria-lsp"
 ```
 
-If `doria-lsp` from a GitHub release is already on `PATH`, no environment variable is required. On Windows, use the full path to `doria-lsp.exe`.
+The executable is under the repository-level `target/debug/` directory, not under `server/`. On Windows, use `target\debug\doria-lsp.exe`.
+
+To install the server globally instead:
+
+```bash
+php scripts/build.php install-server
+doria-lsp --version
+```
+
+If `doria-lsp` is on `PATH`, no environment variable is required. GUI-launched VS Code may not inherit shell environment changes until it is restarted. The most deterministic fallback is **Settings → Extensions → Doria → Language Server: Path**, or this workspace setting:
+
+```json
+{
+  "doria.languageServer.path": "/absolute/path/to/doria-language-server/target/debug/doria-lsp"
+}
+```
 
 The extension resolves the server from:
 
@@ -28,7 +56,7 @@ The extension resolves the server from:
 4. doria-lsp on PATH
 ```
 
-Run `npm ci` to install the pinned VS Code packaging tools. Use `npm run package` to produce a VSIX.
+The `vscode` build target runs the pinned npm install and packaging commands. From this directory, the equivalent low-level commands are `npm ci --ignore-scripts` and `npm run package`.
 
 After changing the TextMate grammar, reload the VS Code window or restart the Extension Development Host so VS Code reads the updated grammar.
 

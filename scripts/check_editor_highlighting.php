@@ -18,6 +18,7 @@ $intellijLanguage = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/i
 $intellijBuildGradle = $root . '/editors/intellij/doria/build.gradle';
 $intellijTokenTypes = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/highlighting/DoriaTokenTypes.kt';
 $intellijSyntaxHighlighter = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/highlighting/DoriaSyntaxHighlighter.kt';
+$intellijLexerTest = $root . '/editors/intellij/doria/src/test/kotlin/dev/doria/intellij/highlighting/DoriaLexerTest.kt';
 $intellijCodeStyleProvider = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/codestyle/DoriaLanguageCodeStyleSettingsProvider.kt';
 $intellijFormatter = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/codestyle/DoriaFormattingModelBuilder.kt';
 $intellijParser = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/psi/DoriaParserDefinition.kt';
@@ -659,14 +660,36 @@ function check_vscode_grammar(): void
     ] as $scope) {
         require_check(str_contains($grammarText, $scope), "VS Code grammar is missing '{$scope}'");
     }
+    $attributeExpressionPatterns = $grammar['repository']['attributeExpression']['patterns'] ?? [];
     $attributeIncludes = [];
-    foreach ($attributePatterns as $attributePattern) {
-        foreach (($attributePattern['patterns'] ?? []) as $pattern) {
-            if (is_array($pattern) && array_key_exists('include', $pattern)) {
-                $attributeIncludes[] = $pattern['include'];
-            }
+    foreach ($attributeExpressionPatterns as $pattern) {
+        if (is_array($pattern) && array_key_exists('include', $pattern)) {
+            $attributeIncludes[] = $pattern['include'];
         }
     }
+    require_check(
+        any_match(
+            $attributePatterns[0]['patterns'] ?? [],
+            static fn (mixed $pattern): bool => is_array($pattern) &&
+                ($pattern['include'] ?? null) === '#attributeExpression'
+        ),
+        'VS Code attributes must use the shared attribute-expression grammar'
+    );
+    require_check(
+        in_array('#attributeBrackets', $attributeIncludes, true),
+        'VS Code attribute expressions must recognize nested list and dictionary brackets'
+    );
+    $attributeBracketPatterns = $grammar['repository']['attributeBrackets'] ?? [];
+    require_check(
+        ($attributeBracketPatterns['begin'] ?? null) === '\\[' &&
+            ($attributeBracketPatterns['end'] ?? null) === '\\]' &&
+            any_match(
+                $attributeBracketPatterns['patterns'] ?? [],
+                static fn (mixed $pattern): bool => is_array($pattern) &&
+                    ($pattern['include'] ?? null) === '#attributeExpression'
+            ),
+        'VS Code nested attribute brackets must recursively reuse the attribute-expression grammar'
+    );
     $invalidIndex = array_search('#invalid', $attributeIncludes, true);
     $operatorsIndex = array_search('#operators', $attributeIncludes, true);
     require_check($invalidIndex !== false, 'VS Code attribute context must include invalid syntax patterns');
@@ -681,7 +704,7 @@ function check_intellij_lexer(): void
 {
     global $acceptedKeywords, $primitiveTypes, $reservedTypes, $plannedTypes, $wordOperators, $stage13SymbolOperators, $booleanSymbolOperators;
     global $notKeywords, $strictComparison, $rejectedPreprocessor, $rejectedKeywords, $rejectedTypes;
-    global $intellijLexer, $intellijLanguage, $intellijBuildGradle, $intellijTokenTypes, $intellijSyntaxHighlighter, $intellijCodeStyleProvider, $intellijFormatter, $intellijParser, $intellijFormatterTest, $intellijPluginXml, $intellijPluginIcon, $doriaLogo;
+    global $intellijLexer, $intellijLanguage, $intellijBuildGradle, $intellijTokenTypes, $intellijSyntaxHighlighter, $intellijLexerTest, $intellijCodeStyleProvider, $intellijFormatter, $intellijParser, $intellijFormatterTest, $intellijPluginXml, $intellijPluginIcon, $doriaLogo;
 
     require_check(
         str_contains(read_text($intellijBuildGradle), "version = '2026.03.1-canary'"),
@@ -813,6 +836,12 @@ function check_intellij_lexer(): void
             str_contains($lexerText, 'DoriaTokenTypes.ATTRIBUTE_NAME') &&
             str_contains($lexerText, 'DoriaTokenTypes.ATTRIBUTE_ARGUMENT'),
         'IntelliJ lexer must emit dedicated attribute tokens'
+    );
+    $lexerTestText = read_text($intellijLexerTest);
+    require_check(
+        str_contains($lexerTestText, 'testNestedAttributeBracketsDoNotCloseTheAttributeEarly') &&
+            str_contains($lexerTestText, 'tokens.count { it.type == DoriaTokenTypes.BRACKET }'),
+        'IntelliJ lexer tests must preserve nested attribute brackets until the outer attribute delimiter'
     );
     require_check(
         str_contains($lexerText, 'isConstantName(text) -> DoriaTokenTypes.CLASS_CONSTANT') &&
@@ -1172,6 +1201,9 @@ function check_fixture(): void
         'extern',
         '#[PhpExport]',
         '#[App\Routing\Route(path: "/parser", name: "parser.show")]',
+        'imports: [',
+        'ORMModule::forRoot(',
+        'entities: [],',
         '0..<10',
         '0..10',
         'float32 $delta = 0.016;',

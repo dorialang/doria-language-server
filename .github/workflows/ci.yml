@@ -92,6 +92,11 @@ jobs:
       - name: Check cross-editor highlighting
         run: php scripts/check_editor_highlighting.php
 
+      - name: Check developer build entrypoint
+        run: |
+          php -l scripts/build.php
+          php scripts/build.php help
+
       - name: Check VS Code client syntax
         working-directory: editors/vscode/doria
         run: npm run check

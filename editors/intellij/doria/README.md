@@ -23,26 +23,27 @@ The plugin registers the lower-case `doria` language id so Markdown fenced block
 From the root of this repository:
 
 ```bash
-cargo build --locked --bin doria-lsp
+php scripts/build.php server
 ```
 
 Point the plugin setting or `DORIA_LSP_PATH` at `target/debug/doria-lsp` (`target\debug\doria-lsp.exe` on Windows). If a release binary is already on `PATH`, no explicit configuration is required.
 
 ## Build the plugin
 
-From this directory:
+From the repository root:
 
 ```bash
+php scripts/build.php intellij
+```
+
+The target uses the checked-in Gradle wrapper and prints the absolute path of the generated ZIP. The equivalent low-level commands are:
+
+```bash
+cd editors/intellij/doria
 ./gradlew buildPlugin
 ```
 
-On Windows PowerShell or Command Prompt:
-
-```powershell
-.\gradlew.bat buildPlugin
-```
-
-Use the checked-in Gradle wrapper instead of a system Gradle installation. The wrapper pins the Gradle distribution used by the IntelliJ Platform Gradle Plugin, so local builds and CI do not depend on whichever `gradle` happens to be installed globally.
+On Windows, use `.\gradlew.bat buildPlugin`. Use the checked-in wrapper instead of a system Gradle installation so local builds and CI use the same pinned Gradle distribution.
 
 The packaged plugin will be written under:
 
