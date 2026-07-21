@@ -50,6 +50,10 @@ class DoriaColorSettingsPage : ColorSettingsPage {
         }
 
         let writable ${'$'}person = new Person();
+        mixed ${'$'}value = ${'$'}person;
+        if (${'$'}value is Person) {
+            ${'$'}value->greet();
+        }
         echo "\\n---\\t---\\r---\\s";
         ${'$'}person->greet();
         Person::fromName("Lucy");
@@ -68,6 +72,7 @@ class DoriaColorSettingsPage : ColorSettingsPage {
     companion object {
         private val ATTRIBUTES = arrayOf(
             AttributesDescriptor("Keyword", DoriaSyntaxHighlighter.KEYWORD),
+            AttributesDescriptor("Type-test operator", DoriaSyntaxHighlighter.TYPE_TEST_OPERATOR),
             AttributesDescriptor("Modifier", DoriaSyntaxHighlighter.MODIFIER),
             AttributesDescriptor("Primitive type", DoriaSyntaxHighlighter.PRIMITIVE_TYPE),
             AttributesDescriptor("Collection type", DoriaSyntaxHighlighter.COLLECTION_TYPE),

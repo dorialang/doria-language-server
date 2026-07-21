@@ -13,6 +13,7 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
 
     override fun getTokenHighlights(tokenType: IElementType): Array<TextAttributesKey> = when (tokenType) {
         DoriaTokenTypes.KEYWORD -> KEYWORD_KEYS
+        DoriaTokenTypes.TYPE_TEST_OPERATOR -> TYPE_TEST_OPERATOR_KEYS
         DoriaTokenTypes.MODIFIER -> MODIFIER_KEYS
         DoriaTokenTypes.PRIMITIVE_TYPE -> PRIMITIVE_TYPE_KEYS
         DoriaTokenTypes.RESERVED_TYPE -> RESERVED_TYPE_KEYS
@@ -59,6 +60,10 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
     companion object {
         val KEYWORD: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
             "DORIA_KEYWORD",
+            DefaultLanguageHighlighterColors.KEYWORD,
+        )
+        val TYPE_TEST_OPERATOR: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
+            "DORIA_TYPE_TEST_OPERATOR",
             DefaultLanguageHighlighterColors.KEYWORD,
         )
         val MODIFIER: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
@@ -224,6 +229,7 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
 
         private val EMPTY_KEYS = emptyArray<TextAttributesKey>()
         private val KEYWORD_KEYS = arrayOf(KEYWORD)
+        private val TYPE_TEST_OPERATOR_KEYS = arrayOf(TYPE_TEST_OPERATOR)
         private val MODIFIER_KEYS = arrayOf(MODIFIER)
         private val PRIMITIVE_TYPE_KEYS = arrayOf(PRIMITIVE_TYPE)
         private val RESERVED_TYPE_KEYS = arrayOf(RESERVED_TYPE)

@@ -232,6 +232,24 @@ let $d = true xor false;
 }
 
 #[test]
+fn accepts_stage22_is_narrowing_without_lsp_diagnostics() {
+    let diagnostics = diagnostics_for_document(
+        "file:///narrowing.doria",
+        r#"function describePayload(mixed $payload): string
+{
+    if ($payload is string) {
+        return $payload;
+    }
+
+    return "other payload";
+}
+"#,
+    );
+
+    assert_eq!(diagnostics, Vec::<Value>::new());
+}
+
+#[test]
 fn accepts_control_flow_without_lsp_diagnostics() {
     let diagnostics = diagnostics_for_document(
         "file:///control_flow.doria",

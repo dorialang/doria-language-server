@@ -431,6 +431,16 @@ fn completion_items() -> Value {
         "finally",
         "when",
         "given",
+        "is",
+        "default",
+        "do",
+        "fn",
+        "get",
+        "set",
+        "insteadof",
+        "shared",
+        "spawn",
+        "scope",
         "enum",
         "case",
         "match",
@@ -463,6 +473,15 @@ fn completion_items() -> Value {
         "finally",
         "when",
         "given",
+        "default",
+        "do",
+        "fn",
+        "get",
+        "set",
+        "insteadof",
+        "shared",
+        "spawn",
+        "scope",
     ];
     let types = [
         "void",
@@ -767,6 +786,9 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
         TokenKind::And => Some("Boolean AND operator; exact synonym for `&&`."),
         TokenKind::Or => Some("Boolean OR operator; exact synonym for `||`."),
         TokenKind::Xor => Some("Bool-only exclusive OR operator."),
+        TokenKind::Is => Some(
+            "Exact type-test operator. `value is Type` narrows `mixed` and nullable values on the true branch.",
+        ),
         TokenKind::Void => Some("The `void` return type."),
         TokenKind::IntType => integer_type_description("int"),
         TokenKind::Int8Type => integer_type_description("int8"),
@@ -791,7 +813,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "List" => Some("Ordered collection alias: `List<T>`."),
             "Dictionary" => Some("Key-value collection alias: `Dictionary<K, V>`."),
             "Set" => Some("Unique-value collection alias: `Set<T>`."),
-            "mixed" => Some("Dynamic boundary type. Operations on `mixed` require future narrowing syntax before use."),
+            "mixed" => Some("Dynamic boundary type. Operations on `mixed` require narrowing with the exact `is` type-test operator before use."),
             "resource" => Some("Reserved for future PHP interop; not a usable core type."),
             companion @ ("Int" | "Int8" | "Int16" | "Int32" | "Int64" | "UInt8"
             | "UInt16" | "UInt32" | "UInt64") => integer_conversion_description(companion),
@@ -1012,6 +1034,7 @@ mod tests {
         for keyword in [
             "enum", "case", "match", "async", "await", "unsafe", "extern", "open", "override",
             "with", "take", "throw", "throws", "try", "catch", "finally", "when", "given",
+            "default", "do", "fn", "get", "set", "insteadof", "shared", "spawn", "scope",
         ] {
             let item = completion_item(keyword);
             assert_eq!(item["detail"], "planned Doria keyword");
@@ -1056,6 +1079,7 @@ mod tests {
             ["#de", "fine"].concat(),
             ["#inc", "lude"].concat(),
             ["ar", "ray"].concat(),
+            ["instance", "of"].concat(),
         ];
         for rejected in rejected {
             assert!(
@@ -1106,7 +1130,7 @@ mod tests {
         assert!(text.contains("Other interfaces are not supported by this compiler"));
     }
     #[test]
-    fn hover_help_does_not_present_planned_syntax_as_immediate_fixes() {
+    fn hover_help_tracks_stage22_narrowing() {
         let null_hover = hover_description(&TokenKind::Null).expect("null should have hover text");
         assert!(null_hover.contains("narrow `?string` result of `read_line`"));
         assert!(null_hover.contains("`?string`"));
@@ -1114,9 +1138,12 @@ mod tests {
 
         let mixed_hover = hover_description(&TokenKind::Identifier("mixed".to_string()))
             .expect("mixed should have hover text");
-        assert!(mixed_hover.contains("future narrowing syntax"));
-        assert!(!mixed_hover.contains("`is`"));
+        assert!(mixed_hover.contains("exact `is` type-test operator"));
         assert!(!mixed_hover.contains("`match`"));
+
+        let is_hover = hover_description(&TokenKind::Is).expect("is should have hover text");
+        assert!(is_hover.contains("Exact type-test operator"));
+        assert!(is_hover.contains("narrows `mixed` and nullable values"));
     }
     #[test]
     fn completions_do_not_offer_unrelated_future_types() {

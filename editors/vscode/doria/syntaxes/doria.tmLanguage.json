@@ -155,7 +155,7 @@
         },
         {
           "name": "invalid.illegal.keyword.rejected.doria",
-          "match": "\\b(?:goto|require|require_once|include_once|print)\\b|\\buse\\b(?=\\s*\\()"
+          "match": "\\b(?:goto|require|require_once|include_once|print|instanceof)\\b|\\buse\\b(?=\\s*\\()"
         },
         {
           "match": "(::)(\\s*)(\\$)(?=[A-Za-z_][A-Za-z0-9_]*)",
@@ -647,7 +647,11 @@
         },
         {
           "name": "keyword.control.doria",
-          "match": "\\b(?:return|foreach|as|if|else|while|for|break|continue|when|given|finally|try|catch|extends|uses|with)\\b"
+          "match": "\\b(?:return|foreach|as|if|else|while|for|break|continue|when|given|finally|try|catch|extends|uses|with|default|do)\\b"
+        },
+        {
+          "name": "keyword.operator.type-test.doria",
+          "match": "\\bis\\b"
         },
         {
           "name": "keyword.declaration.implements.doria",
@@ -659,7 +663,7 @@
         },
         {
           "name": "storage.modifier.mutability.doria",
-          "match": "\\b(?:writable|readonly|take)\\b"
+          "match": "\\b(?:writable|readonly|take|shared)\\b"
         },
         {
           "name": "storage.modifier.visibility.doria",
@@ -683,7 +687,7 @@
         },
         {
           "name": "keyword.other.reserved.doria",
-          "match": "\\b(?:async|await|spawn|scope|enum|case|match|unsafe|extern|open|override)\\b"
+          "match": "\\b(?:async|await|spawn|scope|enum|case|match|unsafe|extern|open|override|fn|get|set|insteadof)\\b"
         }
       ]
     },
@@ -721,7 +725,7 @@
         },
         {
           "name": "storage.type.primitive.doria",
-          "match": "\\b(?:void|int|int8|int16|int32|int64|uint8|uint16|uint32|uint64|float|float32|float64|string|bool|mixed|never)\\b"
+          "match": "\\b(?:void|int|int8|int16|int32|int64|uint8|uint16|uint32|uint64|float|float32|float64|string|bool|mixed)\\b"
         },
         {
           "name": "support.type.collection.doria",

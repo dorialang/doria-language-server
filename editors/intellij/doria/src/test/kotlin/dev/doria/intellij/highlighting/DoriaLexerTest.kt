@@ -16,6 +16,19 @@ class DoriaLexerTest : TestCase() {
         assertEquals(DoriaTokenTypes.KEYWORD, tokens.first { it.text == "class" }.type)
     }
 
+    fun testStage22TypeTestAndRejectedPhpOperator() {
+        val tokens = lex("if (\$payload is string) { echo \$payload instanceof User; }")
+
+        assertEquals(DoriaTokenTypes.TYPE_TEST_OPERATOR, tokens.first { it.text == "is" }.type)
+        assertEquals(DoriaTokenTypes.INVALID, tokens.first { it.text == "instanceof" }.type)
+    }
+
+    fun testNeverIsNotAdvertisedAsAPrimitiveType() {
+        val tokens = lex("never \$result = fail();")
+
+        assertEquals(DoriaTokenTypes.IDENTIFIER, tokens.first { it.text == "never" }.type)
+    }
+
     private fun lex(source: String): List<Token> {
         val lexer = DoriaLexer()
         lexer.start(source)

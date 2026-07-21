@@ -219,7 +219,7 @@ dependencies = [
 [[package]]
 name = "doriac"
 version = "2026.3.1-canary"
-source = "git+https://github.com/dorialang/doria?rev=92b16a216e9322c03ab17d9a1fd36e8f4a0e4269#92b16a216e9322c03ab17d9a1fd36e8f4a0e4269"
+source = "git+https://github.com/dorialang/doria?rev=8979df3a62a756b80d0cc1bd901aacbbc1f2b9e9#8979df3a62a756b80d0cc1bd901aacbbc1f2b9e9"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -373,9 +373,9 @@ checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
 
 [[package]]
 name = "ryu"
-version = "1.0.20"
+version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
+checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "serde"
