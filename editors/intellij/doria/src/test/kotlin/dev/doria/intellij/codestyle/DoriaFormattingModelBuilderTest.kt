@@ -93,6 +93,28 @@ class DoriaFormattingModelBuilderTest : BasePlatformTestCase() {
         )
     }
 
+    fun testWordOperatorsKeepRequiredLexicalSpacing() {
+        configureIndentOptions(indentSize = 4, continuationIndentSize = 4, useTabs = false)
+        val common = CodeStyle.getSettings(project).getCommonSettings(DoriaLanguage)
+        common.SPACE_AROUND_LOGICAL_OPERATORS = false
+        common.SPACE_AROUND_RELATIONAL_OPERATORS = false
+
+        assertFormatted(
+            """
+            function accepts(mixed ${'$'}value): bool
+            {
+            return ${'$'}value is string and true xor false;
+            }
+            """.trimIndent(),
+            """
+            function accepts(mixed ${'$'}value): bool
+            {
+                return ${'$'}value is string and true xor false;
+            }
+            """.trimIndent(),
+        )
+    }
+
     private fun configureIndentOptions(
         indentSize: Int,
         continuationIndentSize: Int,

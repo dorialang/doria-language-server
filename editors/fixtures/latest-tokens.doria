@@ -100,7 +100,12 @@ function main(): void
     float64 $distance = 10.5;
     bool $enabled = true;
     mixed $metadata = null;
-    never $impossible = fail();
+
+    if ($metadata is string) {
+        echo $metadata;
+    }
+
+    let $displayName = $maybeUser?->name ?? "anonymous";
 
     // Naming charter: built-in free functions are snake_case; member APIs are camelCase.
     let $now = get_time();

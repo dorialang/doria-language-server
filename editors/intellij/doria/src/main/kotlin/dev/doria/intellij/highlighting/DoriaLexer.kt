@@ -468,6 +468,8 @@ class DoriaLexer : LexerBase() {
         when (text) {
             in KEYWORDS -> DoriaTokenTypes.KEYWORD
 
+            in TYPE_TEST_OPERATORS -> DoriaTokenTypes.TYPE_TEST_OPERATOR
+
             in WORD_OPERATORS -> DoriaTokenTypes.LOGICAL_OPERATOR
 
             in MODIFIERS -> DoriaTokenTypes.MODIFIER
@@ -906,6 +908,8 @@ class DoriaLexer : LexerBase() {
             "for",
             "break",
             "continue",
+            "default",
+            "do",
             "when",
             "given",
             "finally",
@@ -929,6 +933,10 @@ class DoriaLexer : LexerBase() {
             "open",
             "override",
             "with",
+            "fn",
+            "get",
+            "set",
+            "insteadof",
             "take",
             "try",
             "catch",
@@ -936,12 +944,20 @@ class DoriaLexer : LexerBase() {
             "throws",
         )
 
+        private val TYPE_TEST_OPERATORS = setOf("is")
         private val WORD_OPERATORS = setOf("not", "and", "or", "xor")
         private val LOGICAL_SYMBOL_OPERATORS = setOf("!", "&&", "||")
 
-        private val INVALID_KEYWORDS = setOf("goto", "require", "require_once", "include_once", "print")
+        private val INVALID_KEYWORDS = setOf(
+            "goto",
+            "require",
+            "require_once",
+            "include_once",
+            "print",
+            "instanceof",
+        )
 
-        private val MODIFIERS = setOf("take", "writable", "readonly", "internal", "static")
+        private val MODIFIERS = setOf("take", "writable", "readonly", "internal", "static", "shared")
 
         private val CONSTANT_REFERENCE_NAME = Regex("[A-Z][A-Z0-9_]+")
 
@@ -968,7 +984,6 @@ class DoriaLexer : LexerBase() {
             "string",
             "bool",
             "mixed",
-            "never",
         )
 
         private val RESERVED_TYPES = setOf("resource")

@@ -11,6 +11,7 @@ object DoriaTokenTypes {
     val BAD_CHARACTER: IElementType = TokenType.BAD_CHARACTER
 
     val KEYWORD = DoriaTokenType("DORIA_KEYWORD")
+    val TYPE_TEST_OPERATOR = DoriaTokenType("DORIA_TYPE_TEST_OPERATOR")
     val MODIFIER = DoriaTokenType("DORIA_MODIFIER")
     val PRIMITIVE_TYPE = DoriaTokenType("DORIA_PRIMITIVE_TYPE")
     val RESERVED_TYPE = DoriaTokenType("DORIA_RESERVED_TYPE")

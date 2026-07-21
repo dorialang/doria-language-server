@@ -62,6 +62,7 @@ $acceptedKeywords = [
     'foreach',
     'break',
     'continue',
+    'is',
     'true',
     'false',
     'null',
@@ -76,6 +77,15 @@ $acceptedKeywords = [
     'match',
     'when',
     'given',
+    'default',
+    'do',
+    'fn',
+    'get',
+    'set',
+    'insteadof',
+    'shared',
+    'spawn',
+    'scope',
     'async',
     'await',
     'unsafe',
@@ -105,6 +115,15 @@ $plannedKeywords = [
     'finally',
     'when',
     'given',
+    'default',
+    'do',
+    'fn',
+    'get',
+    'set',
+    'insteadof',
+    'shared',
+    'spawn',
+    'scope',
 ];
 $primitiveTypes = [
     'void',
@@ -123,7 +142,6 @@ $primitiveTypes = [
     'string',
     'bool',
     'mixed',
-    'never',
 ];
 
 $implementedIntegerTypes = [
@@ -166,6 +184,7 @@ $plannedTypes = [
 $rejectedTypes = [
     'array',
     'object',
+    'never',
 ];
 
 $lspSupportedTypes = [
@@ -235,7 +254,7 @@ $rejectedPreprocessor = [
     'warning',
     'error',
 ];
-$rejectedKeywords = ['goto', 'require', 'require_once', 'include_once', 'print'];
+$rejectedKeywords = ['goto', 'require', 'require_once', 'include_once', 'print', 'instanceof'];
 $strictComparison = ['===', '!=='];
 $notKeywords = ['public', 'private', 'protected', 'Result', 'object'];
 function fail_check(string $message): never
@@ -407,6 +426,10 @@ function check_vscode_grammar(): void
     require_check(
         str_contains($grammarText, 'keyword.declaration.implements.doria'),
         'VS Code must scope active implements syntax as a declaration keyword'
+    );
+    require_check(
+        str_contains($grammarText, 'keyword.operator.type-test.doria'),
+        'VS Code must scope the Stage 22 is operator as a type-test operator'
     );
     foreach ([
         'keyword.declaration.constant.doria',
@@ -950,6 +973,7 @@ function check_intellij_lexer(): void
         'DORIA_ATTRIBUTE_DELIMITER',
         'DORIA_ATTRIBUTE_NAME',
         'DORIA_ATTRIBUTE_ARGUMENT',
+        'DORIA_TYPE_TEST_OPERATOR',
         'DORIA_LOGICAL_OPERATOR',
         'DORIA_PROPERTY',
         'DORIA_FUNCTION_CALL',
@@ -1197,6 +1221,8 @@ function check_fixture(): void
         'ReportFormatter::formatReport($customResult)',
         'new App\Report()',
         '?User',
+        'if ($metadata is string)',
+        '$maybeUser?->name ?? "anonymous"',
         '\n\t\r\s',
         'use App\Repositories\UserRepository;',
         'get_time()',

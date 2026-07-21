@@ -161,9 +161,11 @@ private class DoriaFormattingBlock(
 
 private object DoriaSpacing {
     private val assignmentOperators = setOf("=", "+=", "-=", "*=", "/=", "%=", "??=")
-    private val logicalOperators = setOf("&&", "||", "and", "or", "xor")
+    private val logicalOperators = setOf("&&", "||")
+    private val wordLogicalOperators = setOf("and", "or", "xor")
     private val equalityOperators = setOf("==", "!=")
     private val relationalOperators = setOf("<", ">", "<=", ">=")
+    private val typeTestOperators = setOf("is")
     private val bitwiseOperators = setOf("&", "|", "^")
     private val additiveOperators = setOf("+", "-", ".")
     private val multiplicativeOperators = setOf("*", "/", "%")
@@ -269,8 +271,9 @@ private object DoriaSpacing {
         return spacing(1)
     }
 
-    private val allBinaryOperators = assignmentOperators + logicalOperators + equalityOperators +
-        relationalOperators + bitwiseOperators + additiveOperators + multiplicativeOperators + shiftOperators
+    private val allBinaryOperators = assignmentOperators + logicalOperators + wordLogicalOperators +
+        equalityOperators + relationalOperators + typeTestOperators + bitwiseOperators +
+        additiveOperators + multiplicativeOperators + shiftOperators
     private val tightOperators = setOf("\\", "->", "?->", "::", "#")
     private val unaryOperators = setOf("!", "~", "++", "--")
     private val stringTokens = setOf(DoriaTokenTypes.STRING, DoriaTokenTypes.ESCAPE_SEQUENCE)
@@ -302,12 +305,13 @@ private object DoriaSpacing {
 
     private val builtinTypeNames = setOf(
         "void", "int", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
-        "float", "float32", "float64", "string", "bool", "mixed", "never",
+        "float", "float32", "float64", "string", "bool", "mixed",
     )
 
     private fun spaceAround(operator: String, settings: CommonCodeStyleSettings): Boolean = when (operator) {
         in assignmentOperators -> settings.SPACE_AROUND_ASSIGNMENT_OPERATORS
         in logicalOperators -> settings.SPACE_AROUND_LOGICAL_OPERATORS
+        in wordLogicalOperators, in typeTestOperators -> true
         in equalityOperators -> settings.SPACE_AROUND_EQUALITY_OPERATORS
         in relationalOperators -> settings.SPACE_AROUND_RELATIONAL_OPERATORS
         in bitwiseOperators -> settings.SPACE_AROUND_BITWISE_OPERATORS
