@@ -24,6 +24,10 @@ The compiler owns tokenization, parsing, semantic and type checking, diagnostic 
 The server owns LSP transport, document state, UTF-16/UTF-8 position conversion, protocol capability negotiation, and conversion of compiler results into LSP diagnostics, completion, hover, and code actions.
 
 The server may organize IDE-friendly data but must not create a second semantic checker.
+Each open document has one versioned compiler-backed analysis snapshot containing
+diagnostics, symbols, and resolved source occurrences. Diagnostics and semantic
+features consume that shared snapshot so an individual hover request does not
+re-parse or re-check the document.
 
 ### Editor clients
 
@@ -44,3 +48,6 @@ Both editor implementations must be checked against the same fixtures and token 
 The standalone server depends on `doriac` at an exact Git commit recorded in `Cargo.toml` and `Cargo.lock`. Default compiler runtime bundling is disabled because the language server needs reusable frontend services, not native runtime artifacts.
 
 Compiler updates are deliberate compatibility changes: update the pinned revision, run the complete server and editor validation, and confirm the advertised Doria toolchain version before release. The server source may adapt compiler diagnostics to LSP structures, but compiler-owned syntax and semantic behavior must stay in `doriac`.
+
+See [semantic-hover.md](semantic-hover.md) for the hover payload, fallback behavior,
+and the first semantic-navigation slice.

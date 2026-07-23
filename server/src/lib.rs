@@ -7,6 +7,10 @@ use doriac::diagnostics::Diagnostic;
 use doriac::lexer::{Token, TokenKind};
 use doriac::source::Span;
 
+mod analysis;
+
+use analysis::AnalysisSnapshot;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LspPosition {
     pub line: u32,
@@ -23,6 +27,18 @@ pub fn toolchain_version() -> &'static str {
 struct Document {
     text: String,
     version: Option<i64>,
+    analysis: AnalysisSnapshot,
+}
+
+impl Document {
+    fn new(uri: &str, text: String, version: Option<i64>) -> Self {
+        let analysis = AnalysisSnapshot::analyze(uri, &text);
+        Self {
+            text,
+            version,
+            analysis,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -103,21 +119,16 @@ pub fn position_to_byte_offset(text: &str, line: u32, character: u32) -> usize {
 }
 
 pub fn diagnostics_for_document(uri: &str, text: &str) -> Vec<Value> {
-    match doriac::check_source(uri.to_string(), text.to_string()) {
-        Ok(_) => Vec::new(),
-        Err(diagnostics) => diagnostics
-            .iter()
-            .map(|diagnostic| diagnostic_to_lsp(uri, text, diagnostic))
-            .collect(),
-    }
+    AnalysisSnapshot::analyze(uri, text)
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| diagnostic_to_lsp(uri, text, diagnostic))
+        .collect()
 }
 
 pub fn code_actions_for_document(uri: &str, text: &str) -> Vec<Value> {
-    let Err(diagnostics) = doriac::check_source(uri.to_string(), text.to_string()) else {
-        return Vec::new();
-    };
-
-    diagnostics
+    AnalysisSnapshot::analyze(uri, text)
+        .diagnostics()
         .iter()
         .filter_map(|diagnostic| {
             let fix = diagnostic.fix.as_ref()?;
@@ -214,10 +225,7 @@ impl Server {
 
         self.documents.insert(
             uri.to_string(),
-            Document {
-                text: text.to_string(),
-                version,
-            },
+            Document::new(uri, text.to_string(), version),
         );
         self.publish_diagnostics(uri, writer)
     }
@@ -250,10 +258,7 @@ impl Server {
 
         self.documents.insert(
             uri.to_string(),
-            Document {
-                text: text.to_string(),
-                version,
-            },
+            Document::new(uri, text.to_string(), version),
         );
         self.publish_diagnostics(uri, writer)
     }
@@ -276,10 +281,7 @@ impl Server {
                 .and_then(|document| document.version);
             self.documents.insert(
                 uri.to_string(),
-                Document {
-                    text: text.to_string(),
-                    version,
-                },
+                Document::new(uri, text.to_string(), version),
             );
         }
 
@@ -314,9 +316,15 @@ impl Server {
             return Ok(());
         };
 
+        let diagnostics = document
+            .analysis
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic_to_lsp(uri, &document.text, diagnostic))
+            .collect::<Vec<_>>();
         let mut params = json!({
             "uri": uri,
-            "diagnostics": diagnostics_for_document(uri, &document.text),
+            "diagnostics": diagnostics,
         });
 
         if let Some(version) = document.version {
@@ -342,7 +350,7 @@ impl Server {
             .and_then(Value::as_u64)? as u32;
         let document = self.documents.get(uri)?;
         let offset = position_to_byte_offset(&document.text, line, character);
-        hover_at_offset(&document.text, offset)
+        hover_at_offset_with_analysis(&document.text, offset, &document.analysis)
     }
 
     fn code_actions(&self, params: Option<&Value>) -> Value {
@@ -675,7 +683,27 @@ fn integer_type_description(name: &str) -> Option<&'static str> {
     }
 }
 
+#[cfg(test)]
 fn hover_at_offset(text: &str, offset: usize) -> Option<Value> {
+    let analysis = AnalysisSnapshot::analyze("<lsp>", text);
+    hover_at_offset_with_analysis(text, offset, &analysis)
+}
+
+fn hover_at_offset_with_analysis(
+    text: &str,
+    offset: usize,
+    analysis: &AnalysisSnapshot,
+) -> Option<Value> {
+    if let Some(hover) = analysis.hover_at_offset(offset) {
+        return Some(json!({
+            "contents": {
+                "kind": "markdown",
+                "value": hover.markdown,
+            },
+            "range": span_to_range(text, hover.span),
+        }));
+    }
+
     let tokens = doriac::lex_source("<lsp>", text.to_string()).ok()?;
     let token_index = tokens.iter().position(|token| {
         !matches!(token.kind, TokenKind::Eof)
@@ -1032,9 +1060,33 @@ mod tests {
     #[test]
     fn completions_mark_accepted_planned_keywords() {
         for keyword in [
-            "enum", "case", "match", "async", "await", "unsafe", "extern", "open", "override",
-            "with", "take", "throw", "throws", "try", "catch", "finally", "when", "given",
-            "default", "do", "fn", "get", "set", "insteadof", "shared", "spawn", "scope",
+            "enum",
+            "case",
+            "match",
+            "async",
+            "await",
+            "unsafe",
+            "extern",
+            "open",
+            "override",
+            "with",
+            "take",
+            "throw",
+            "throws",
+            "try",
+            "catch",
+            "finally",
+            "when",
+            "given",
+            "default",
+            "do",
+            "fn",
+            "get",
+            "set",
+            "insteadof",
+            "shared",
+            "spawn",
+            "scope",
         ] {
             let item = completion_item(keyword);
             assert_eq!(item["detail"], "planned Doria keyword");
@@ -1302,8 +1354,14 @@ mod tests {
         for name in ["toFloat", "toInt"] {
             let source = format!("function {name}(): int {{ return 42; }}");
             let offset = source.find(name).unwrap() + 1;
+            let hover =
+                hover_at_offset(&source, offset).expect("user function declaration should hover");
+            let text = hover["contents"]["value"]
+                .as_str()
+                .expect("hover contents should be markdown");
+            assert!(text.contains(&format!("function {name}(): int")));
             assert!(
-                hover_at_offset(&source, offset).is_none(),
+                !text.contains("converts canonical"),
                 "unqualified user function {name} must not receive intrinsic hover text"
             );
         }

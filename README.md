@@ -135,6 +135,12 @@ The packaged plugin is written to `editors/intellij/doria/build/distributions/`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow, [docs/architecture.md](docs/architecture.md) for component boundaries, and [docs/releasing.md](docs/releasing.md) for CalVer release coordination.
 
+Semantic hover uses compiler-resolved symbols for same-file classes, free functions,
+instance methods, and static methods. It displays callable signatures and attached
+PHPDoc consistently in VS Code and JetBrains IDEs. See
+[docs/semantic-hover.md](docs/semantic-hover.md) for the behavior contract and
+planned workspace-wide extensions.
+
 ## Versioning
 
 Language-server and editor releases track the Doria toolchain CalVer. The current target is `2026.03.1-canary`. Ecosystems that require SemVer-compatible numeric components encode the same release without zero padding, for example `2026.3.1-canary` in the VS Code manifest.
