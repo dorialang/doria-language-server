@@ -145,7 +145,7 @@ impl<'a> SnapshotBuilder<'a> {
                     );
                     self.functions.insert(function.name.clone(), symbol);
                 }
-                Item::Interface(_) | Item::Constant(_) | Item::Statement(_) => {}
+                _ => {}
             }
         }
     }
@@ -224,26 +224,28 @@ impl<'a> SnapshotBuilder<'a> {
             match item {
                 Item::Class(class) => {
                     for member in &class.members {
-                        match member {
-                            ClassMember::Method(method) => self.visit_block(
+                        if let ClassMember::Method(method) = member {
+                            self.visit_block(
                                 &method.body,
                                 Some(&class.name),
                                 class.parent.as_deref(),
-                            ),
-                            ClassMember::Property(property) => {
-                                if let Some(initializer) = &property.initializer {
-                                    self.visit_expr(
-                                        initializer,
-                                        Some(&class.name),
-                                        class.parent.as_deref(),
-                                    );
-                                }
+                            );
+                        }
+                        if let ClassMember::Property(property) = member {
+                            if let Some(initializer) = &property.initializer {
+                                self.visit_expr(
+                                    initializer,
+                                    Some(&class.name),
+                                    class.parent.as_deref(),
+                                );
                             }
-                            ClassMember::Constant(constant) => self.visit_expr(
+                        }
+                        if let ClassMember::Constant(constant) = member {
+                            self.visit_expr(
                                 &constant.initializer,
                                 Some(&class.name),
                                 class.parent.as_deref(),
-                            ),
+                            );
                         }
                     }
                 }
@@ -257,7 +259,7 @@ impl<'a> SnapshotBuilder<'a> {
                 Item::Function(function) => self.visit_block(&function.body, None, None),
                 Item::Constant(constant) => self.visit_expr(&constant.initializer, None, None),
                 Item::Statement(statement) => self.visit_stmt(statement, None, None),
-                Item::Interface(_) => {}
+                _ => {}
             }
         }
     }
@@ -288,11 +290,9 @@ impl<'a> SnapshotBuilder<'a> {
                 self.visit_expr(&assignment.value, current_class, parent_class);
             }
             Stmt::Echo { expr, .. } => self.visit_expr(expr, current_class, parent_class),
-            Stmt::Return { expr, .. } => {
-                if let Some(expr) = expr {
-                    self.visit_expr(expr, current_class, parent_class);
-                }
-            }
+            Stmt::Return {
+                expr: Some(expr), ..
+            } => self.visit_expr(expr, current_class, parent_class),
             Stmt::If(if_statement) => {
                 self.visit_expr(&if_statement.condition, current_class, parent_class);
                 self.visit_block(&if_statement.then_block, current_class, parent_class);
@@ -306,28 +306,24 @@ impl<'a> SnapshotBuilder<'a> {
             }
             Stmt::For(for_statement) => {
                 if let Some(initializer) = &for_statement.initializer {
-                    match initializer {
-                        ForInitializer::VarDecl(declaration) => {
-                            self.visit_expr(&declaration.initializer, current_class, parent_class)
-                        }
-                        ForInitializer::Assignment(assignment) => {
-                            self.visit_expr(&assignment.target, current_class, parent_class);
-                            self.visit_expr(&assignment.value, current_class, parent_class);
-                        }
+                    if let ForInitializer::VarDecl(declaration) = initializer {
+                        self.visit_expr(&declaration.initializer, current_class, parent_class);
+                    }
+                    if let ForInitializer::Assignment(assignment) = initializer {
+                        self.visit_expr(&assignment.target, current_class, parent_class);
+                        self.visit_expr(&assignment.value, current_class, parent_class);
                     }
                 }
                 if let Some(condition) = &for_statement.condition {
                     self.visit_expr(condition, current_class, parent_class);
                 }
                 if let Some(increment) = &for_statement.increment {
-                    match increment {
-                        ForIncrement::Increment(increment) => {
-                            self.visit_expr(&increment.target, current_class, parent_class)
-                        }
-                        ForIncrement::Assignment(assignment) => {
-                            self.visit_expr(&assignment.target, current_class, parent_class);
-                            self.visit_expr(&assignment.value, current_class, parent_class);
-                        }
+                    if let ForIncrement::Increment(increment) = increment {
+                        self.visit_expr(&increment.target, current_class, parent_class);
+                    }
+                    if let ForIncrement::Assignment(assignment) = increment {
+                        self.visit_expr(&assignment.target, current_class, parent_class);
+                        self.visit_expr(&assignment.value, current_class, parent_class);
                     }
                 }
                 self.visit_block(&for_statement.body, current_class, parent_class);
@@ -340,7 +336,7 @@ impl<'a> SnapshotBuilder<'a> {
                 self.visit_expr(&increment.target, current_class, parent_class)
             }
             Stmt::Expr { expr, .. } => self.visit_expr(expr, current_class, parent_class),
-            Stmt::Break { .. } | Stmt::Continue { .. } => {}
+            _ => {}
         }
     }
 
@@ -350,15 +346,15 @@ impl<'a> SnapshotBuilder<'a> {
         current_class: Option<&str>,
         parent_class: Option<&str>,
     ) {
-        match branch {
-            ElseBranch::If(if_statement) => {
-                self.visit_expr(&if_statement.condition, current_class, parent_class);
-                self.visit_block(&if_statement.then_block, current_class, parent_class);
-                if let Some(branch) = &if_statement.else_branch {
-                    self.visit_else_branch(branch, current_class, parent_class);
-                }
+        if let ElseBranch::If(if_statement) = branch {
+            self.visit_expr(&if_statement.condition, current_class, parent_class);
+            self.visit_block(&if_statement.then_block, current_class, parent_class);
+            if let Some(branch) = &if_statement.else_branch {
+                self.visit_else_branch(branch, current_class, parent_class);
             }
-            ElseBranch::Block(block) => self.visit_block(block, current_class, parent_class),
+        }
+        if let ElseBranch::Block(block) = branch {
+            self.visit_block(block, current_class, parent_class);
         }
     }
 
@@ -439,11 +435,9 @@ impl<'a> SnapshotBuilder<'a> {
                         class_name,
                         method_name,
                     }) if method_name == method => Some(class_name.as_str()),
-                    _ => match qualifier {
-                        StaticQualifier::Class(_) | StaticQualifier::InvalidStatic => None,
-                        StaticQualifier::SelfType => current_class,
-                        StaticQualifier::Parent => parent_class,
-                    },
+                    _ if matches!(qualifier, StaticQualifier::SelfType) => current_class,
+                    _ if matches!(qualifier, StaticQualifier::Parent) => parent_class,
+                    _ => None,
                 };
                 if let Some(class_name) = class_name {
                     if let Some(symbol) = self.resolve_method(class_name, method) {
@@ -506,14 +500,10 @@ impl<'a> SnapshotBuilder<'a> {
                     }
                 }
             }
-            Expr::Variable { .. }
-            | Expr::This { .. }
-            | Expr::Identifier { .. }
-            | Expr::String { .. }
-            | Expr::Int { .. }
-            | Expr::Float { .. }
-            | Expr::Bool { .. }
-            | Expr::Null { .. } => {}
+            // IDE analysis is best-effort across compiler feature branches. New
+            // expression forms remain diagnostic-safe until their symbol-bearing
+            // children need explicit traversal here.
+            _ => {}
         }
     }
 

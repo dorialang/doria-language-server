@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
+use std::process::ExitCode;
 
 use serde_json::{json, Value};
 
@@ -21,6 +22,40 @@ pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn toolchain_version() -> &'static str {
     doriac::TOOLCHAIN_VERSION
+}
+
+pub fn run_cli<I, S>(arguments: I) -> ExitCode
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    match arguments.into_iter().next().as_ref().map(AsRef::as_ref) {
+        Some("--version" | "-V") => {
+            println!(
+                "doria-lsp {} (Doria {})",
+                SERVER_VERSION,
+                toolchain_version()
+            );
+            ExitCode::SUCCESS
+        }
+        Some("--help" | "-h") => {
+            println!(
+                "doria-lsp [--version]\n\nWithout arguments, starts the Doria language server over stdio."
+            );
+            ExitCode::SUCCESS
+        }
+        Some(argument) => {
+            eprintln!("unknown argument: {argument}");
+            ExitCode::from(2)
+        }
+        None => match run_stdio() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(message) => {
+                eprintln!("{message}");
+                ExitCode::FAILURE
+            }
+        },
+    }
 }
 
 #[derive(Debug, Clone)]

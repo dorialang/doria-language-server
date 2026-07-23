@@ -141,6 +141,20 @@ PHPDoc consistently in VS Code and JetBrains IDEs. See
 [docs/semantic-hover.md](docs/semantic-hover.md) for the behavior contract and
 planned workspace-wide extensions.
 
+When developing compiler syntax or semantics on a local Doria branch, build the
+server against that checkout so editor diagnostics use the same compiler:
+
+```bash
+php scripts/build.php server --compiler-path ../doria
+```
+
+Use `all` instead of `server` to package both editor clients in the same command.
+The local compiler mode creates a disposable runner under `target/`, writes the
+resulting executable to the normal `target/debug/doria-lsp` path in both
+repositories, and does not change the commit-pinned `Cargo.toml` or `Cargo.lock`.
+This lets both editor clients discover the matching server from an open compiler
+workspace. Restart the language server or IDE after replacing a running executable.
+
 ## Versioning
 
 Language-server and editor releases track the Doria toolchain CalVer. The current target is `2026.03.1-canary`. Ecosystems that require SemVer-compatible numeric components encode the same release without zero padding, for example `2026.3.1-canary` in the VS Code manifest.

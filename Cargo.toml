@@ -9,7 +9,7 @@ repository = "https://github.com/dorialang/doria-language-server"
 version = "2026.3.1-canary"
 
 [workspace.dependencies]
-doriac = { git = "https://github.com/dorialang/doria", rev = "5c94f051d65f81e402dd0b06de7146b5bd8659fb", default-features = false }
+doriac = { git = "https://github.com/dorialang/doria", rev = "c37663ae9b5e2662f22b1558af51854ddd79e7aa", default-features = false }
 serde_json = "1"
 
 [profile.dev]
