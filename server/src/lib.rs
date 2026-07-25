@@ -1322,6 +1322,21 @@ function main(): void
     }
 
     #[test]
+    fn writable_and_consuming_entry_argument_lists_are_reported() {
+        // The entry glue owns the list and lends a readonly view to `main`.
+        for source in [
+            "function main(writable List<string> $args): void {}",
+            "function main(take List<string> $args): void {}",
+        ] {
+            let diagnostics = diagnostics_for_document("test.doria", source);
+            assert!(
+                !diagnostics.is_empty(),
+                "an owning or writable entry parameter must be reported"
+            );
+        }
+    }
+
+    #[test]
     fn completion_and_hover_document_the_narrow_displayable_contract() {
         let completion = completion_item("Displayable");
         let documentation = completion["documentation"]
