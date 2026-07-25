@@ -200,19 +200,29 @@ function build_vscode(string $root): void
     $dist = $root . '/dist';
     ensure_directory($dist);
 
-    run_tool('npm', ['ci', '--ignore-scripts'], $editor);
-    run_tool(
-        'npm',
-        ['run', 'package', '--', '--out', $dist . '/doria-language-support.vsix'],
-        $editor
-    );
+    $vsix = $dist . '/doria-language-support.vsix';
+    // Remove the prior artifact so a packaging step that does not overwrite (or
+    // no-ops) can never leave a stale file that require_artifact would report as
+    // freshly built.
+    remove_stale_artifacts($vsix);
 
-    require_artifact($dist . '/doria-language-support.vsix', 'VS Code extension');
+    run_tool('npm', ['ci', '--ignore-scripts'], $editor);
+    run_tool('npm', ['run', 'package', '--', '--out', $vsix], $editor);
+
+    require_artifact($vsix, 'VS Code extension');
 }
 
 function build_intellij(string $root): void
 {
     $editor = $root . '/editors/intellij/doria';
+    // Remove prior plugin ZIPs first. Gradle's buildPlugin is incremental: when
+    // the plugin inputs are unchanged it reports the Zip task UP-TO-DATE and does
+    // not rewrite the version-stamped ZIP, so a stale artifact would linger and
+    // the newest-by-mtime glob below would report it as this run's output.
+    // Deleting the ZIP also makes the Zip task's output missing, so Gradle
+    // regenerates it.
+    remove_stale_artifacts($editor . '/build/distributions/*.zip');
+
     $gradle = PHP_OS_FAMILY === 'Windows' ? $editor . '/gradlew.bat' : $editor . '/gradlew';
     $command = PHP_OS_FAMILY === 'Windows'
         ? windows_command($gradle, ['buildPlugin', '--no-daemon'])
@@ -399,6 +409,20 @@ function ensure_directory(string $directory): void
 {
     if (!is_dir($directory) && !mkdir($directory, 0777, true) && !is_dir($directory)) {
         throw new RuntimeException("could not create artifact directory: {$directory}");
+    }
+}
+
+/**
+ * Delete a prior build artifact (an exact path or a glob pattern) so the build
+ * tool must regenerate it and require_artifact can only ever find a file this
+ * run produced. A missing artifact is not an error.
+ */
+function remove_stale_artifacts(string $pattern): void
+{
+    foreach (glob($pattern) ?: [] as $file) {
+        if (is_file($file) && !unlink($file)) {
+            throw new RuntimeException("could not remove stale artifact: {$file}");
+        }
     }
 }
 
