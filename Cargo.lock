@@ -219,7 +219,7 @@ dependencies = [
 [[package]]
 name = "doriac"
 version = "2026.3.1-canary"
-source = "git+https://github.com/dorialang/doria?rev=3c5b211d7300afc20301e2b20d32b56b4fe9ae5e#3c5b211d7300afc20301e2b20d32b56b4fe9ae5e"
+source = "git+https://github.com/dorialang/doria?rev=cf9099460922fbb242c9c184997e004f92f9930c#cf9099460922fbb242c9c184997e004f92f9930c"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
