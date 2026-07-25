@@ -1,0 +1,19 @@
+id = "doria"
+name = "Doria"
+version = "2026.3.1-canary"
+schema_version = 1
+authors = ["Andrew Masiye <amasiye313@gmail.com>"]
+description = "Doria language support for Zed."
+repository = "https://github.com/dorialang/doria-language-server"
+
+[language_servers.doria]
+name = "Doria Language Server"
+languages = ["Doria"]
+language_ids = { "Doria" = "doria" }
+
+# Zed requires a tree-sitter grammar to register a language. The Doria grammar
+# does not exist yet: author and publish `tree-sitter-doria`, then pin it here by
+# commit. Until this repository/rev resolves, the extension will not load.
+[grammars.doria]
+repository = "https://github.com/dorialang/tree-sitter-doria"
+rev = "0000000000000000000000000000000000000000"

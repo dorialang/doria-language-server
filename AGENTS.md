@@ -4,6 +4,11 @@
 
 This repository owns Doria's language server, syntax highlighting, shared editor fixtures, and IDE clients. The `doria` compiler repository remains the authority for language syntax, semantics, diagnostics, and staged implementation status.
 
+**This repository restates language facts, so it goes stale whenever a compiler stage lands.** Hover text, descriptions, highlighting, and fixtures all encode claims the compiler owns. A stale language server tells the user that valid code is wrong — worse than shipping no language server at all. Two obligations follow:
+
+- The `doriac` pin in the root `Cargo.toml` (`rev = "…"`) is part of the language surface, not just a build detail. A pin behind the compiler's landed work means hovers and diagnostics describe a language that no longer exists.
+- Any claim scoped to a superseded stage is a defect to fix on sight, whether or not the current task caused it: "this compiler currently supports…", "represents the EOF result of…", or "alias" for a type that is now implemented with a real member surface. When compiler work lands a stage, `doria/AGENTS.md` ("Language-server sweep") requires that beat to update this repository too — the sweep is not optional follow-up.
+
 ## Guardrails
 
 - Do not duplicate compiler parsing, semantic checking, or diagnostics in editor clients.
