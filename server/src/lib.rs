@@ -1225,6 +1225,60 @@ function main(): void
     }
 
     #[test]
+    fn the_entry_argument_list_is_not_reported_as_an_editor_error() {
+        // Stage 23b (decision 0099) adds `main(List<string> $args)` alongside
+        // the parameterless forms. None of them may be marked as invalid code.
+        for source in [
+            r#"function main(List<string> $args): int
+{
+    printf("count=%d\n", $args->count);
+    return 0;
+}
+"#,
+            r#"function main(List<string> $args): void
+{
+    foreach ($args as $argument) {
+        echo $argument;
+    }
+}
+"#,
+            r#"function main(): int
+{
+    return 0;
+}
+"#,
+            r#"function main(): void
+{
+}
+"#,
+        ] {
+            let diagnostics = diagnostics_for_document("test.doria", source);
+            assert!(
+                diagnostics.is_empty(),
+                "accepted entry form must not surface as an editor error: {diagnostics:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_separate_argument_count_parameter_is_reported() {
+        // Decision 0099 rejects `argc`; the editor should show that.
+        let diagnostics = diagnostics_for_document(
+            "test.doria",
+            r#"function main(string[] $argv, int $argc): int
+{
+    return 0;
+}
+"#,
+        );
+
+        assert!(
+            !diagnostics.is_empty(),
+            "a separate argument count must be reported"
+        );
+    }
+
+    #[test]
     fn completion_and_hover_document_the_narrow_displayable_contract() {
         let completion = completion_item("Displayable");
         let documentation = completion["documentation"]

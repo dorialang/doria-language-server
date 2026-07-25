@@ -89,8 +89,12 @@ function publish(take Post $post): void
     return;
 }
 
-function main(): void
+// Stage 23b: the entry point may take the program arguments as a
+// `List<string>`; the executable path is not element 0.
+function main(List<string> $args): void
 {
+    printf("arguments: %d\n", $args->count);
+
     let $name = "Doria";
     let writable $count = 0;
     ?User $maybeUser = null;

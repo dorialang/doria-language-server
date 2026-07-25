@@ -1267,6 +1267,8 @@ function check_fixture(): void
         '$message->deliver(attempts: 2, recipient: $name)',
         'MessageFactory::create(recipient: $name, attempts: 1)',
         'new Message(attempts: 5, recipient: $name)',
+        // Stage 23b program entry arguments.
+        'function main(List<string> $args): void',
         '$message->tenantId',
         '$repository->findById($id)',
     ];
