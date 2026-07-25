@@ -127,6 +127,14 @@ function main(): void
     echo $message->tenantId;
     $repository->findById($id);
 
+    // Named arguments bind by parameter name across all four callable forms.
+    // Positional arguments may precede named ones, named ones may reorder and
+    // skip a defaulted parameter, and evaluation stays in written order.
+    scheduleDelivery(recipient: $name, attempts: 3);
+    $message->deliver(attempts: 2, recipient: $name);
+    MessageFactory::create(recipient: $name, attempts: 1);
+    let $retry = new Message(attempts: 5, recipient: $name);
+
     echo "Hello " . $name . "!";
     echo "Hello {$name}";
     echo "Hello {$this->name}";

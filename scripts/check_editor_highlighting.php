@@ -1262,6 +1262,11 @@ function check_fixture(): void
         'Int::wrappingAdd(1, 2)',
         '$name->isEmpty()',
         '$message->retryAfter(seconds: 30)',
+        // Stage 23a named arguments across all four callable forms.
+        'scheduleDelivery(recipient: $name, attempts: 3)',
+        '$message->deliver(attempts: 2, recipient: $name)',
+        'MessageFactory::create(recipient: $name, attempts: 1)',
+        'new Message(attempts: 5, recipient: $name)',
         '$message->tenantId',
         '$repository->findById($id)',
     ];

@@ -1158,6 +1158,73 @@ mod tests {
     }
 
     #[test]
+    fn named_arguments_are_not_reported_as_editor_errors() {
+        // Stage 23a (decision 0098) makes `name: value` a real call form for
+        // free functions, instance methods, static methods, and constructors.
+        // The editor must not mark any of them as invalid code.
+        let diagnostics = diagnostics_for_document(
+            "test.doria",
+            r#"class Message
+{
+    function __construct(string $recipient, int $attempts = 1)
+    {
+    }
+
+    function deliver(string $recipient, int $attempts = 1): void
+    {
+    }
+
+    static function create(string $recipient, int $attempts = 1): void
+    {
+    }
+}
+
+function scheduleDelivery(string $recipient, int $attempts = 1): void
+{
+}
+
+function main(): void
+{
+    let $name = "inbox";
+    scheduleDelivery(recipient: $name, attempts: 3);
+    scheduleDelivery($name, attempts: 3);
+    scheduleDelivery(attempts: 3, recipient: $name);
+    let $message = new Message(attempts: 5, recipient: $name);
+    $message->deliver(attempts: 2, recipient: $name);
+    Message::create(recipient: $name);
+}
+"#,
+        );
+
+        assert!(
+            diagnostics.is_empty(),
+            "named arguments must not surface as editor errors: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn a_positional_argument_after_a_named_argument_is_reported() {
+        // The ordering rule is a real compile error, so the editor should show it.
+        let diagnostics = diagnostics_for_document(
+            "test.doria",
+            r#"function scheduleDelivery(string $recipient, int $attempts = 1): void
+{
+}
+
+function main(): void
+{
+    scheduleDelivery(recipient: "inbox", 3);
+}
+"#,
+        );
+
+        assert!(
+            !diagnostics.is_empty(),
+            "a positional argument after a named argument must be reported"
+        );
+    }
+
+    #[test]
     fn completion_and_hover_document_the_narrow_displayable_contract() {
         let completion = completion_item("Displayable");
         let documentation = completion["documentation"]

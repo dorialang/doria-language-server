@@ -378,7 +378,7 @@ impl<'a> SnapshotBuilder<'a> {
             } => {
                 self.visit_expr(object, current_class, parent_class);
                 for argument in args {
-                    self.visit_expr(argument, current_class, parent_class);
+                    self.visit_expr(&argument.value, current_class, parent_class);
                 }
                 let target = self.semantic_info.and_then(|info| info.call_target(*span));
                 let resolved_class = match target {
@@ -404,7 +404,7 @@ impl<'a> SnapshotBuilder<'a> {
             }
             Expr::FunctionCall { name, args, span } => {
                 for argument in args {
-                    self.visit_expr(argument, current_class, parent_class);
+                    self.visit_expr(&argument.value, current_class, parent_class);
                 }
                 let resolved = matches!(
                     self.semantic_info.and_then(|info| info.call_target(*span)),
@@ -431,7 +431,7 @@ impl<'a> SnapshotBuilder<'a> {
                 ..
             } => {
                 for argument in args {
-                    self.visit_expr(argument, current_class, parent_class);
+                    self.visit_expr(&argument.value, current_class, parent_class);
                 }
                 let target = self.semantic_info.and_then(|info| info.call_target(*span));
                 let class_name = match target {
@@ -464,7 +464,7 @@ impl<'a> SnapshotBuilder<'a> {
                 span,
             } => {
                 for argument in args {
-                    self.visit_expr(argument, current_class, parent_class);
+                    self.visit_expr(&argument.value, current_class, parent_class);
                 }
                 if let Some(symbol) = self.classes.get(class_name).copied() {
                     if let Some(name_span) = find_identifier_span(self.tokens, *span, class_name) {
@@ -505,6 +505,12 @@ impl<'a> SnapshotBuilder<'a> {
                         self.visit_expr(expr, current_class, parent_class);
                     }
                 }
+            }
+            Expr::Index {
+                collection, index, ..
+            } => {
+                self.visit_expr(collection, current_class, parent_class);
+                self.visit_expr(index, current_class, parent_class);
             }
             Expr::Variable { .. }
             | Expr::This { .. }
