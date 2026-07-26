@@ -128,14 +128,14 @@ jobs:
           npm run package -- --target ${{ matrix.vscode_target }} --out ../../../dist/${{ matrix.vsix_filename }}
 
       - name: Upload server archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.filename }}
           if-no-files-found: error
 
       - name: Upload platform-specific VS Code extension
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: doria-vscode-${{ matrix.vscode_target }}
           path: dist/${{ matrix.vsix_filename }}
@@ -161,7 +161,7 @@ jobs:
         run: ./gradlew test buildPlugin --no-daemon
 
       - name: Upload IntelliJ plugin
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: doria-intellij
           path: editors/intellij/doria/build/distributions/*.zip
