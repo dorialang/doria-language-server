@@ -31,7 +31,7 @@ echo ParserLimits::next;
 echo ParserLimits::MAX_DEPTH;
 echo HARD_LIMIT;
 
-// Attributes and named arguments are editor-highlighted before full compiler support.
+// Attributes remain syntax-ahead; named arguments are compiler-supported.
 #[Module(host: "localhost", port: 3306)]
 #[App\Routing\Route(path: "/parser", name: "parser.show")]
 #[Test]
