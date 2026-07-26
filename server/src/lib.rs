@@ -1304,6 +1304,25 @@ function main(): void
     }
 
     #[test]
+    fn sequence_fill_literals_are_not_reported_as_editor_errors() {
+        let diagnostics = diagnostics_for_document(
+            "test.doria",
+            r#"function main(List<string> $args): void
+{
+    bool[] $flags = [true; $args->count];
+    let $counts = [0; $args->count];
+    echo "{$flags->length}:{$counts->count}";
+}
+"#,
+        );
+
+        assert!(
+            diagnostics.is_empty(),
+            "Stage 23c sequence fills must not surface as editor errors: {diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn a_separate_argument_count_parameter_is_reported() {
         // Decision 0099 rejects `argc`; the editor should show that.
         let diagnostics = diagnostics_for_document(

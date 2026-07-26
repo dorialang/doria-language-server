@@ -1340,6 +1340,8 @@ function check_fixture(): void
         'new Message(attempts: 5, recipient: $name)',
         // Stage 23b program entry arguments.
         'function main(List<string> $args): void',
+        // Stage 23c sequence fill literal.
+        'let $runtimeSizedFlags = [true; $args->count];',
         '$message->tenantId',
         '$repository->findById($id)',
     ];

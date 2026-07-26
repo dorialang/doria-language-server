@@ -29,6 +29,15 @@ class DoriaLexerTest : TestCase() {
         assertEquals(DoriaTokenTypes.IDENTIFIER, tokens.first { it.text == "never" }.type)
     }
 
+    fun testSequenceFillSeparatorRemainsValidPunctuation() {
+        val tokens = lex("let \$flags = [true; \$count];")
+
+        assertEquals(DoriaTokenTypes.BRACKET, tokens.first { it.text == "[" }.type)
+        assertEquals(DoriaTokenTypes.PUNCTUATION, tokens.first { it.text == ";" }.type)
+        assertEquals(DoriaTokenTypes.BRACKET, tokens.first { it.text == "]" }.type)
+        assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
+    }
+
     private fun lex(source: String): List<Token> {
         val lexer = DoriaLexer()
         lexer.start(source)

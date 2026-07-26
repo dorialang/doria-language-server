@@ -94,6 +94,7 @@ function publish(take Post $post): void
 function main(List<string> $args): void
 {
     printf("arguments: %d\n", $args->count);
+    let $runtimeSizedFlags = [true; $args->count];
 
     let $name = "Doria";
     let writable $count = 0;
