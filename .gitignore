@@ -16,6 +16,7 @@
 **/node_modules/
 **/*.vsix
 **/.vscode-test/
+editors/vscode/doria/bin/
 coverage/
 
 # Local editor and environment state

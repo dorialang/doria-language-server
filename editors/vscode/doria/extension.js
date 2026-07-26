@@ -1,9 +1,8 @@
 "use strict";
 
 const cp = require("child_process");
-const fs = require("fs");
-const path = require("path");
 const vscode = require("vscode");
+const { resolveServerPath } = require("./server-path");
 
 let client;
 
@@ -59,15 +58,27 @@ class DoriaLanguageClient {
     }
     this.started = true;
 
-    const serverPath = resolveServerPath(this.context);
-    const child = cp.spawn(serverPath, [], {
+    const resolution = resolveServerPath({
+      configuredPath: vscode.workspace.getConfiguration("doria").get("languageServer.path"),
+      environmentPath: process.env.DORIA_LSP_PATH,
+      workspaceRoot: workspaceRoot(),
+      extensionPath: this.context.extensionPath
+    });
+    const child = cp.spawn(resolution.command, [], {
       cwd: workspaceRoot(),
       stdio: ["pipe", "pipe", "pipe"]
     });
     this.process = child;
 
     child.on("error", (error) => {
-      vscode.window.showWarningMessage(`Doria language server failed to start: ${error.message}`);
+      const ignored = resolution.rejectedPaths.length === 0
+        ? ""
+        : ` Ignored missing ${resolution.rejectedPaths
+          .map(({ source, path: rejectedPath }) => `${source} path ${rejectedPath}`)
+          .join(" and ")}.`;
+      vscode.window.showWarningMessage(
+        `Doria language server failed to start from ${resolution.source}: ${error.message}.${ignored}`
+      );
       this.resetServer(child, error);
     });
     child.stderr.on("data", (chunk) => {
@@ -339,36 +350,6 @@ class DoriaLanguageClient {
       })
       .catch(() => undefined);
   }
-}
-
-function resolveServerPath(context) {
-  const configured = vscode.workspace.getConfiguration("doria").get("languageServer.path");
-  if (configured && configured.trim().length > 0) {
-    return configured;
-  }
-
-  if (process.env.DORIA_LSP_PATH) {
-    return process.env.DORIA_LSP_PATH;
-  }
-
-  const root = workspaceRoot();
-  if (root) {
-    const workspaceBinary = process.platform === "win32"
-      ? path.join(root, "target", "debug", "doria-lsp.exe")
-      : path.join(root, "target", "debug", "doria-lsp");
-    if (fs.existsSync(workspaceBinary)) {
-      return workspaceBinary;
-    }
-  }
-
-  const extensionBinary = process.platform === "win32"
-    ? path.resolve(context.extensionPath, "..", "..", "..", "target", "debug", "doria-lsp.exe")
-    : path.resolve(context.extensionPath, "..", "..", "..", "target", "debug", "doria-lsp");
-  if (fs.existsSync(extensionBinary)) {
-    return extensionBinary;
-  }
-
-  return process.platform === "win32" ? "doria-lsp.exe" : "doria-lsp";
 }
 
 function workspaceRoot() {

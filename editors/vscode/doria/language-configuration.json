@@ -143,24 +143,21 @@
       "beforeText": "^.*\\([^\\)]*$",
       "afterText": "^\\s*\\).*$",
       "action": {
-        "indent": "indentOutdent",
-        "appendText": "\\t"
+        "indent": "indentOutdent"
       }
     },
     {
       "beforeText": "^.*\\{[^\\}]*$",
       "afterText": "^\\s*\\}.*$",
       "action": {
-        "indent": "indentOutdent",
-        "appendText": "\\t"
+        "indent": "indentOutdent"
       }
     },
     {
       "beforeText": "^.*\\[[^\\]]*$",
       "afterText": "^\\s*\\].*$",
       "action": {
-        "indent": "indentOutdent",
-        "appendText": "\\t"
+        "indent": "indentOutdent"
       }
     },
     {

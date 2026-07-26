@@ -13,6 +13,9 @@ $vscodePackage = $root . '/editors/vscode/doria/package.json';
 $vscodeGrammar = $root . '/editors/vscode/doria/syntaxes/doria.tmLanguage.json';
 $vscodeLanguageConfiguration = $root . '/editors/vscode/doria/language-configuration.json';
 $vscodeExtension = $root . '/editors/vscode/doria/extension.js';
+$vscodeServerPath = $root . '/editors/vscode/doria/server-path.js';
+$vscodeIcon = $root . '/editors/vscode/doria/icons/doria.svg';
+$buildScript = $root . '/scripts/build.php';
 $intellijLexer = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/highlighting/DoriaLexer.kt';
 $intellijLanguage = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/DoriaLanguage.kt';
 $intellijBuildGradle = $root . '/editors/intellij/doria/build.gradle';
@@ -347,7 +350,7 @@ function regex_fully_matches(string $pattern, string $subject): bool
 
 function check_vscode_package(): void
 {
-    global $vscodePackage;
+    global $vscodePackage, $vscodeIcon, $doriaLogo;
 
     $package = load_json($vscodePackage);
     require_check(
@@ -366,6 +369,22 @@ function check_vscode_package(): void
         ),
         'VS Code package.json must map doria/source.doria to ./syntaxes/doria.tmLanguage.json'
     );
+    $languages = $package['contributes']['languages'] ?? [];
+    require_check(
+        any_match(
+            $languages,
+            static fn (mixed $language): bool => is_array($language)
+                && ($language['id'] ?? null) === 'doria'
+                && ($language['icon']['light'] ?? null) === './icons/doria.svg'
+                && ($language['icon']['dark'] ?? null) === './icons/doria.svg'
+        ),
+        'VS Code must associate .doria files with the canonical Doria icon'
+    );
+    require_check(is_file($vscodeIcon), 'VS Code must package icons/doria.svg');
+    require_check(
+        rtrim(read_text($vscodeIcon)) === rtrim(read_text($doriaLogo)),
+        'VS Code file icon must use the canonical Doria README SVG'
+    );
 
     $defaults = $package['contributes']['configurationDefaults']['[doria]'] ?? [];
     require_check(
@@ -374,6 +393,33 @@ function check_vscode_package(): void
             ($defaults['editor.detectIndentation'] ?? null) === true &&
             ($defaults['editor.wordWrapColumn'] ?? null) === 120,
         'VS Code must provide the PHP-shaped Doria editor defaults without overriding user or workspace settings'
+    );
+}
+
+function check_vscode_language_server_packaging(): void
+{
+    global $vscodeExtension, $vscodeServerPath, $buildScript;
+
+    $extension = read_text($vscodeExtension);
+    $resolver = read_text($vscodeServerPath);
+    $builder = read_text($buildScript);
+
+    require_check(
+        str_contains($extension, 'require("./server-path")')
+            && str_contains($extension, 'resolution.rejectedPaths'),
+        'VS Code client must use the tested server resolver and report ignored stale overrides'
+    );
+    require_check(
+        str_contains($resolver, 'path.join(extensionPath, "bin", executable)')
+            && str_contains($resolver, 'pathExists(resolved)')
+            && str_contains($resolver, 'source: "bundled"'),
+        'VS Code server resolution must ignore missing overrides and load the bundled native server'
+    );
+    require_check(
+        str_contains($builder, 'build_server($root, true, $compilerPath)')
+            && str_contains($builder, "install_executable(\$server, \$bundledServer)")
+            && str_contains($builder, "'--target', vscode_target()"),
+        'VS Code packaging must build, bundle, and platform-target doria-lsp'
     );
 }
 
@@ -398,6 +444,31 @@ function check_vscode_language_configuration(): void
                 ($rule['action']['appendText'] ?? null) === ' * '
         ),
         'VS Code language configuration must continue PHP-style documentation comments'
+    );
+    foreach ([
+        ['^.*\\([^\\)]*$', '^\\s*\\).*$'],
+        ['^.*\\{[^\\}]*$', '^\\s*\\}.*$'],
+        ['^.*\\[[^\\]]*$', '^\\s*\\].*$'],
+    ] as [$beforeText, $afterText]) {
+        require_check(
+            any_match(
+                $config['onEnterRules'] ?? [],
+                static fn (mixed $rule): bool => is_array($rule)
+                    && ($rule['beforeText'] ?? null) === $beforeText
+                    && ($rule['afterText'] ?? null) === $afterText
+                    && ($rule['action']['indent'] ?? null) === 'indentOutdent'
+                    && !array_key_exists('appendText', $rule['action'])
+            ),
+            'VS Code delimiter Enter rules must defer indentation text to editor settings'
+        );
+    }
+    require_check(
+        !any_match(
+            $config['onEnterRules'] ?? [],
+            static fn (mixed $rule): bool => is_array($rule)
+                && ($rule['action']['appendText'] ?? null) === '\\t'
+        ),
+        'VS Code Enter rules must not insert a literal escaped tab'
     );
 }
 
@@ -1350,6 +1421,7 @@ function check_fixture(): void
 function main(): int
 {
     check_vscode_package();
+    check_vscode_language_server_packaging();
     check_vscode_language_configuration();
     check_vscode_grammar();
     check_intellij_lexer();

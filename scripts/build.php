@@ -20,8 +20,13 @@ for ($index = 2; $index < count($argv); $index++) {
     $compilerPath = $argv[$index];
 }
 
-if ($compilerPath !== null && !in_array($target, ['server', 'server-release', 'all'], true)) {
-    usage_error('--compiler-path is supported by the server, server-release, and all targets');
+if (
+    $compilerPath !== null
+    && !in_array($target, ['server', 'server-release', 'vscode', 'editors', 'all'], true)
+) {
+    usage_error(
+        '--compiler-path is supported by the server, server-release, vscode, editors, and all targets'
+    );
 }
 
 try {
@@ -29,9 +34,9 @@ try {
         'server' => build_server($root, false, $compilerPath),
         'server-release' => build_server($root, true, $compilerPath),
         'install-server' => install_server($root),
-        'vscode' => build_vscode($root),
+        'vscode' => build_vscode($root, $compilerPath),
         'intellij' => build_intellij($root),
-        'editors' => build_editors($root),
+        'editors' => build_editors($root, $compilerPath),
         'all' => build_all($root, $compilerPath),
         'help', '--help', '-h' => print_usage(),
         default => usage_error("unknown target '{$target}'"),
@@ -56,16 +61,7 @@ function build_server(string $root, bool $release, ?string $compilerPath = null)
 
     run_command($command, $root);
 
-    $metadata = json_decode(
-        capture_command(['cargo', 'metadata', '--format-version', '1', '--no-deps'], $root),
-        true,
-        512,
-        JSON_THROW_ON_ERROR
-    );
-    $profile = $release ? 'release' : 'debug';
-    $executable = PHP_OS_FAMILY === 'Windows' ? 'doria-lsp.exe' : 'doria-lsp';
-    $artifact = ($metadata['target_directory'] ?? $root . '/target') . "/{$profile}/{$executable}";
-    require_artifact($artifact, 'language-server executable');
+    require_artifact(server_artifact($root, $release), 'language-server executable');
 }
 
 function build_server_with_local_compiler(
@@ -194,11 +190,17 @@ function install_server(string $root): void
     fwrite(STDOUT, "\nVerify the installation with: doria-lsp --version\n");
 }
 
-function build_vscode(string $root): void
+function build_vscode(string $root, ?string $compilerPath = null): void
 {
     $editor = $root . '/editors/vscode/doria';
     $dist = $root . '/dist';
     ensure_directory($dist);
+
+    build_server($root, true, $compilerPath);
+    $server = server_artifact($root, true);
+    $bundledServer = $editor . '/bin/' . basename($server);
+    remove_stale_artifacts($editor . '/bin/doria-lsp*');
+    install_executable($server, $bundledServer);
 
     $vsix = $dist . '/doria-language-support.vsix';
     // Remove the prior artifact so a packaging step that does not overwrite (or
@@ -207,8 +209,13 @@ function build_vscode(string $root): void
     remove_stale_artifacts($vsix);
 
     run_tool('npm', ['ci', '--ignore-scripts'], $editor);
-    run_tool('npm', ['run', 'package', '--', '--out', $vsix], $editor);
+    run_tool(
+        'npm',
+        ['run', 'package', '--', '--target', vscode_target(), '--out', $vsix],
+        $editor
+    );
 
+    require_artifact($bundledServer, 'bundled VS Code language server');
     require_artifact($vsix, 'VS Code extension');
 }
 
@@ -242,16 +249,56 @@ function build_intellij(string $root): void
     require_artifact($artifacts[0], 'IntelliJ plugin');
 }
 
-function build_editors(string $root): void
+function build_editors(string $root, ?string $compilerPath = null): void
 {
-    build_vscode($root);
+    build_vscode($root, $compilerPath);
     build_intellij($root);
 }
 
 function build_all(string $root, ?string $compilerPath = null): void
 {
     build_server($root, false, $compilerPath);
-    build_editors($root);
+    build_editors($root, $compilerPath);
+}
+
+function server_artifact(string $root, bool $release): string
+{
+    $metadata = json_decode(
+        capture_command(['cargo', 'metadata', '--format-version', '1', '--no-deps'], $root),
+        true,
+        512,
+        JSON_THROW_ON_ERROR
+    );
+    $profile = $release ? 'release' : 'debug';
+    $executable = PHP_OS_FAMILY === 'Windows' ? 'doria-lsp.exe' : 'doria-lsp';
+
+    return ($metadata['target_directory'] ?? $root . '/target') . "/{$profile}/{$executable}";
+}
+
+function vscode_target(): string
+{
+    $platform = match (PHP_OS_FAMILY) {
+        'Windows' => 'win32',
+        'Darwin' => 'darwin',
+        'Linux' => 'linux',
+        default => throw new RuntimeException(
+            'VS Code packaging is unsupported on ' . PHP_OS_FAMILY
+        ),
+    };
+    $machine = strtolower(php_uname('m'));
+    $architecture = match ($machine) {
+        'x86_64', 'amd64' => 'x64',
+        'aarch64', 'arm64' => 'arm64',
+        'armv7l', 'armv7' => 'armhf',
+        default => throw new RuntimeException(
+            "VS Code packaging is unsupported on architecture {$machine}"
+        ),
+    };
+    if ($platform !== 'linux' && $architecture === 'armhf') {
+        throw new RuntimeException("VS Code packaging does not support {$platform}-armhf");
+    }
+
+    return "{$platform}-{$architecture}";
 }
 
 /**
@@ -448,7 +495,7 @@ Targets:
   server          Build the debug doria-lsp executable
   server-release  Build the optimized doria-lsp executable
   install-server  Build and install doria-lsp into Cargo's global bin directory
-  vscode          Package dist/doria-language-support.vsix
+  vscode          Build and bundle doria-lsp, then package a platform-specific VSIX
   intellij        Package the JetBrains plugin ZIP
   editors         Package both editor extensions
   all             Build the debug server and both editor extensions
@@ -456,6 +503,7 @@ Targets:
 
 Options:
   --compiler-path Build doria-lsp against a local Doria repository or doriac crate.
+                  Supported by server, server-release, vscode, editors, and all.
                   This development mode leaves Cargo.toml and Cargo.lock unchanged.
 
 Every build target prints the absolute path of each generated artifact.

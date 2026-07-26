@@ -85,7 +85,7 @@ After changing editor highlighting, run this from the repository root:
 php scripts/check_editor_highlighting.php
 ```
 
-Files under `editors/fixtures/` are syntax-highlighting smoke fixtures. The IntelliJ LSP adapter keeps them out of `doria-lsp` diagnostics so accepted/planned editor vocabulary can be exercised before compiler implementation lands.
+Files under `editors/fixtures/` are syntax-highlighting smoke fixtures. The IntelliJ LSP adapter keeps them out of `doria-lsp` diagnostics so highlighting can be exercised independently of language-server diagnostics.
 
 Doria uses distinct spellings for imports and trait composition: file/namespace-scope `use` imports names from namespaces, while class-body or trait-body `uses` composes traits. The IntelliJ highlighter keeps these scopes separate as import use and trait-composition uses.
 

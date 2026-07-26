@@ -6,7 +6,9 @@ Editor releases track the Doria toolchain CalVer. The target toolchain release i
 
 Syntax colors depend on the active VS Code theme. This extension improves Doria's TextMate scopes for cleaner highlighting, but it does not ship a custom color theme yet.
 
-The TextMate grammar is editor support only. It highlights accepted and planned Doria vocabulary from the master plan so `.doria` files and Markdown `doria` fences stay readable, but highlighting does not mean the compiler implements every highlighted planned construct.
+The extension uses the canonical Doria logo for `.doria` file icons.
+
+New lines inside paired delimiters use VS Code's active indentation settings, including spaces versus tabs and the configured tab size.
 
 Double-quoted interpolation uses the ordinary Doria expression grammar, so expressions such as `{left() + right()}` receive normal token scopes inside the string. Literal opening braces use `\{`; single-quoted strings remain non-interpolating.
 
@@ -21,9 +23,11 @@ code --install-extension dist/doria-language-support.vsix --force
 
 Reload VS Code after installation. If the `code` shell command is unavailable, open the Extensions view, choose the `...` menu, select **Install from VSIX...**, and select `dist/doria-language-support.vsix`.
 
-## Connect the language server
+The platform-specific VSIX includes the matching optimized `doria-lsp` executable, so installing the extension enables language-server features without a separate server installation.
 
-For a repository-local development server:
+## Override the bundled language server
+
+For language-server development, build a repository-local server and point the extension at it:
 
 ```bash
 php scripts/build.php server
@@ -47,16 +51,17 @@ If `doria-lsp` is on `PATH`, no environment variable is required. GUI-launched V
 }
 ```
 
-The extension resolves the server from:
+Only existing configured and environment paths are used. Stale paths are ignored so they cannot prevent the bundled server from starting. The extension resolves the server from:
 
 ```text
 1. doria.languageServer.path
 2. DORIA_LSP_PATH
 3. target/debug/doria-lsp in the open workspace
-4. doria-lsp on PATH
+4. doria-lsp bundled in the installed extension
+5. doria-lsp on PATH
 ```
 
-The `vscode` build target runs the pinned npm install and packaging commands. From this directory, the equivalent low-level commands are `npm ci --ignore-scripts` and `npm run package`.
+The `vscode` build target compiles the optimized server for the host platform, copies it into the extension, and creates a platform-specific VSIX. It then runs the pinned npm install and packaging commands.
 
 After changing the TextMate grammar, reload the VS Code window or restart the Extension Development Host so VS Code reads the updated grammar.
 
@@ -66,6 +71,6 @@ Keep this TextMate grammar aligned with the IntelliJ / JetBrains highlighter und
 php scripts/check_editor_highlighting.php
 ```
 
-Files under `editors/fixtures/` are syntax-highlighting smoke fixtures. The VS Code client keeps them out of `doria-lsp` diagnostics so accepted/planned editor vocabulary can be exercised before compiler implementation lands.
+Files under `editors/fixtures/` are shared syntax-highlighting smoke fixtures and are excluded from `doria-lsp` diagnostics.
 
 Doria uses distinct spellings for imports and trait composition: file/namespace-scope `use` imports names from namespaces, while class-body or trait-body `uses` composes traits. The TextMate grammar keeps these scopes separate as import use and trait-composition uses.

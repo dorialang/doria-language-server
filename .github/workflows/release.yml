@@ -18,34 +18,46 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            vscode_target: linux-x64
             artifact: doria-lsp-linux-x86_64
             archive: tar
             filename: doria-lsp-linux-x86_64.tar.gz
+            vsix_filename: doria-language-support-linux-x64.vsix
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            vscode_target: linux-arm64
             artifact: doria-lsp-linux-aarch64
             archive: tar
             filename: doria-lsp-linux-aarch64.tar.gz
+            vsix_filename: doria-language-support-linux-arm64.vsix
           - os: macos-15-intel
             target: x86_64-apple-darwin
+            vscode_target: darwin-x64
             artifact: doria-lsp-macos-x86_64
             archive: tar
             filename: doria-lsp-macos-x86_64.tar.gz
+            vsix_filename: doria-language-support-darwin-x64.vsix
           - os: macos-15
             target: aarch64-apple-darwin
+            vscode_target: darwin-arm64
             artifact: doria-lsp-macos-aarch64
             archive: tar
             filename: doria-lsp-macos-aarch64.tar.gz
+            vsix_filename: doria-language-support-darwin-arm64.vsix
           - os: windows-2025
             target: x86_64-pc-windows-msvc
+            vscode_target: win32-x64
             artifact: doria-lsp-windows-x86_64
             archive: zip
             filename: doria-lsp-windows-x86_64.zip
+            vsix_filename: doria-language-support-win32-x64.vsix
           - os: windows-11-arm
             target: aarch64-pc-windows-msvc
+            vscode_target: win32-arm64
             artifact: doria-lsp-windows-aarch64
             archive: zip
             filename: doria-lsp-windows-aarch64.zip
+            vsix_filename: doria-language-support-win32-arm64.vsix
 
     steps:
       - name: Checkout
@@ -89,11 +101,44 @@ jobs:
           Copy-Item README.md, LICENSE "dist/${{ matrix.artifact }}/"
           Compress-Archive -Path "dist/${{ matrix.artifact }}/*" -DestinationPath "dist/${{ matrix.artifact }}.zip"
 
+      - name: Bundle Unix language server for VS Code
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p editors/vscode/doria/bin
+          cp "target/${{ matrix.target }}/release/doria-lsp" editors/vscode/doria/bin/doria-lsp
+          chmod 0755 editors/vscode/doria/bin/doria-lsp
+
+      - name: Bundle Windows language server for VS Code
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path editors/vscode/doria/bin
+          Copy-Item "target/${{ matrix.target }}/release/doria-lsp.exe" editors/vscode/doria/bin/doria-lsp.exe
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: editors/vscode/doria/.node-version
+
+      - name: Package platform-specific VS Code extension
+        working-directory: editors/vscode/doria
+        run: |
+          npm ci --ignore-scripts
+          npm run package -- --target ${{ matrix.vscode_target }} --out ../../../dist/${{ matrix.vsix_filename }}
+
       - name: Upload server archive
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.filename }}
+          if-no-files-found: error
+
+      - name: Upload platform-specific VS Code extension
+        uses: actions/upload-artifact@v4
+        with:
+          name: doria-vscode-${{ matrix.vscode_target }}
+          path: dist/${{ matrix.vsix_filename }}
           if-no-files-found: error
 
   editor-packages:
@@ -105,17 +150,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version-file: editors/vscode/doria/.node-version
-
-      - name: Package VS Code extension
-        working-directory: editors/vscode/doria
-        run: |
-          npm ci --ignore-scripts
-          npm run package -- --out doria-language-support.vsix
-
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
@@ -125,13 +159,6 @@ jobs:
       - name: Package IntelliJ plugin
         working-directory: editors/intellij/doria
         run: ./gradlew test buildPlugin --no-daemon
-
-      - name: Upload VS Code extension
-        uses: actions/upload-artifact@v4
-        with:
-          name: doria-vscode
-          path: editors/vscode/doria/doria-language-support.vsix
-          if-no-files-found: error
 
       - name: Upload IntelliJ plugin
         uses: actions/upload-artifact@v4

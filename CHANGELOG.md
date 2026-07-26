@@ -14,3 +14,6 @@ This project follows the Doria toolchain CalVer.
 - Added functional IntelliJ formatting for language-specific indentation, tabs, spacing, braces, and preserved blank lines, with platform regression tests.
 - Kept nested list and dictionary expressions inside attribute highlighting in both VS Code and JetBrains editors, with shared fixture and lexer regression coverage.
 - Added one target-based build command that prints server, VS Code, and IntelliJ artifact paths and can install `doria-lsp` globally through Cargo.
+- Bundled the native `doria-lsp` executable in platform-specific VS Code packages, with stale path overrides ignored when resolving the server.
+- Added the canonical Doria logo as the `.doria` file icon in VS Code.
+- Fixed VS Code delimiter Enter rules so indentation follows the editor's spaces, tabs, and tab-size settings instead of inserting a literal `\t`.

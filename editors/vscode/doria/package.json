@@ -21,7 +21,7 @@
   ],
   "main": "./extension.js",
   "scripts": {
-    "check": "node --check extension.js",
+    "check": "node --check extension.js && node --check server-path.js && node --test test/*.test.js",
     "package": "vsce package --no-dependencies"
   },
   "devDependencies": {
@@ -38,7 +38,11 @@
         "extensions": [
           ".doria"
         ],
-        "configuration": "./language-configuration.json"
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/doria.svg",
+          "dark": "./icons/doria.svg"
+        }
       }
     ],
     "grammars": [
@@ -62,7 +66,7 @@
         "doria.languageServer.path": {
           "type": "string",
           "default": "",
-          "description": "Path to the doria-lsp executable. Leave empty to use DORIA_LSP_PATH, workspace target/debug/doria-lsp, or doria-lsp from PATH."
+          "description": "Path to the doria-lsp executable. Leave empty to use DORIA_LSP_PATH, workspace target/debug/doria-lsp, the bundled server, or doria-lsp from PATH."
         }
       }
     }

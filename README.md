@@ -14,9 +14,7 @@ Current editor support includes:
 
 - VS Code language registration, TextMate highlighting, editor configuration, diagnostics, completion, hover, and fixits through `doria-lsp`.
 - IntelliJ Platform support for RustRover, IntelliJ IDEA, PhpStorm, and compatible JetBrains IDEs, with local syntax highlighting and optional LSP integration.
-- Shared accepted/planned and rejected-syntax fixtures used to keep both highlighters aligned.
-
-Syntax highlighting is editor UX, not a language implementation. Planned vocabulary may be highlighted for documentation readability even when the current compiler correctly reports it as unsupported.
+- Shared accepted and rejected-syntax fixtures used to keep both highlighters aligned.
 
 ## Layout
 
@@ -45,12 +43,12 @@ php scripts/build.php <target>
 | `server` | Debug `doria-lsp` executable |
 | `server-release` | Optimized `doria-lsp` executable |
 | `install-server` | Install `doria-lsp` into Cargo's global bin directory |
-| `vscode` | `dist/doria-language-support.vsix` |
+| `vscode` | Platform-specific `dist/doria-language-support.vsix` with bundled `doria-lsp` |
 | `intellij` | JetBrains plugin ZIP under `editors/intellij/doria/build/distributions/` |
 | `editors` | Both editor packages |
 | `all` | Debug server and both editor packages |
 
-Every target prints the absolute path of each artifact it creates. PHP and Rust/Cargo are needed for the server target; the VS Code target additionally needs Node.js/npm, and the IntelliJ target needs Java 21.
+Every target prints the absolute path of each artifact it creates. PHP and Rust/Cargo are needed for the server and VS Code targets; the VS Code target additionally needs Node.js/npm, and the IntelliJ target needs Java 21.
 
 ## Build the language server step by step
 
@@ -102,14 +100,15 @@ Every target prints the absolute path of each artifact it creates. PHP and Rust/
 
 For GUI-launched IDEs that do not inherit your shell environment, set the editor's explicit Doria language-server path or set `DORIA_LSP_PATH` to the absolute executable path. In VS Code this is the `doria.languageServer.path` setting; in JetBrains IDEs use **Settings → Languages & Frameworks → Doria → Language server path**. An explicit path is the most deterministic development setup.
 
-CI builds and tests the server on Linux, macOS, and Windows. GitHub release workflows build native archives for all three operating systems on x64 and arm64, and package the VS Code extension and IntelliJ Platform plugin.
+CI builds and tests the server on Linux, macOS, and Windows. GitHub release workflows build native archives and matching platform-specific VSIX packages for all three operating systems on x64 and arm64, plus the IntelliJ Platform plugin.
 
 Both editor clients resolve the server in this order:
 
 1. The editor's explicit Doria language-server setting.
 2. `DORIA_LSP_PATH`.
 3. `target/debug/doria-lsp` in the open project.
-4. `doria-lsp` on `PATH`.
+4. The platform-matched `doria-lsp` bundled with the editor package.
+5. `doria-lsp` on `PATH`.
 
 ## Development
 

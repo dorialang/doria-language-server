@@ -6,8 +6,6 @@ Thank you for helping improve Doria's IDE experience.
 
 The Doria compiler and its accepted specification and decisions define language behavior. This repository presents that behavior to editors; it must not invent a second parser, type system, diagnostic meaning, or feature-status authority.
 
-TextMate and IntelliJ highlighting may include clearly planned vocabulary so documentation and future-looking examples remain readable. Highlighting alone never means that `doriac` implements a construct.
-
 ## Before making a change
 
 - Check whether the change belongs to the language server, both editor clients, or only one editor-specific adapter.
