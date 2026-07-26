@@ -11,6 +11,8 @@ JetBrains client ------/                 lexer / parser / checker / diagnostics
 
 TextMate grammar ------> syntax presentation only
 JetBrains highlighter -> syntax presentation only
+
+VS Code launch profile -> baton run -> project entry selected from Baton.toml
 ```
 
 ## Ownership boundaries
@@ -31,7 +33,13 @@ re-parse or re-check the document.
 
 ### Editor clients
 
-Clients start and supervise `doria-lsp`, translate native editor APIs to LSP where necessary, and provide local file registration and lightweight syntax presentation. Client-specific fallback behavior must remain presentation-only.
+Clients start and supervise `doria-lsp`, translate native editor APIs to LSP
+where necessary, and provide local file registration and lightweight syntax
+presentation. The VS Code client also maps project launch profiles onto
+`baton run`; Baton remains responsible for manifest discovery, entry-point
+selection, builds, and toolchain selection. Direct `doriac run` is reserved for
+an explicit standalone-file profile. Client-specific fallback behavior must
+remain presentation-only.
 
 ### Syntax highlighters
 

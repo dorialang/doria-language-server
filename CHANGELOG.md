@@ -17,3 +17,5 @@ This project follows the Doria toolchain CalVer.
 - Bundled the native `doria-lsp` executable in platform-specific VS Code packages, with stale path overrides ignored when resolving the server.
 - Added the canonical Doria logo as the `.doria` file icon in VS Code.
 - Fixed VS Code delimiter Enter rules so indentation follows the editor's spaces, tabs, and tab-size settings instead of inserting a literal `\t`.
+- Added VS Code Run and Debug launch profiles that default to `baton run` for
+  projects, with explicit standalone-file execution through `doriac run`.

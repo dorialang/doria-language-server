@@ -6,7 +6,8 @@ Editor releases track the Doria toolchain CalVer. The target toolchain release i
 
 Syntax colors depend on the active VS Code theme. This extension improves Doria's TextMate scopes for cleaner highlighting, but it does not ship a custom color theme yet.
 
-The extension uses the canonical Doria logo for `.doria` file icons.
+The extension uses the canonical Doria logo for `.doria` file icons and
+contributes a Doria launch profile to VS Code's Run and Debug view.
 
 New lines inside paired delimiters use VS Code's active indentation settings, including spaces versus tabs and the configured tab size.
 
@@ -24,6 +25,49 @@ code --install-extension dist/doria-language-support.vsix --force
 Reload VS Code after installation. If the `code` shell command is unavailable, open the Extensions view, choose the `...` menu, select **Install from VSIX...**, and select `dist/doria-language-support.vsix`.
 
 The platform-specific VSIX includes the matching optimized `doria-lsp` executable, so installing the extension enables language-server features without a separate server installation.
+
+## Run a Doria project
+
+Open a project containing `Baton.toml`, open any project file, and use **Run and
+Debug** or press `F5`. The generated **Run Doria project** profile finds the
+manifest from the active file or workspace and runs:
+
+```bash
+baton run
+```
+
+Unsaved Doria project files are saved before launch. Program output and input use
+VS Code's integrated terminal. Set `release` to `true` for `baton run --release`;
+values in `args` are forwarded after `--`.
+
+No `.vscode/launch.json` is required. To keep an explicit profile:
+
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "doria",
+      "request": "launch",
+      "name": "Run Doria project",
+      "mode": "project",
+      "cwd": "${workspaceFolder}",
+      "args": [],
+      "release": false,
+      "noDebug": true
+    }
+  ]
+}
+```
+
+Baton is resolved from `doria.baton.path`, then `BATON_PATH`, then `PATH`.
+Standalone source files can use the **Doria: Run standalone file** snippet,
+which runs the selected `program` through `doriac run`; that opt-in mode resolves
+the compiler from `doria.compiler.path`, `DORIAC_PATH`, a workspace
+`target/debug/doriac`, then `PATH`.
+
+These are execution profiles. Source-level breakpoints and stepping will remain
+disabled until the Doria toolchain exposes a debugger protocol.
 
 ## Override the bundled language server
 

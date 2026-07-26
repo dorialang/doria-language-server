@@ -12,7 +12,9 @@ This repository owns the standalone `doria-lsp` binary, editor clients, shared s
 
 Current editor support includes:
 
-- VS Code language registration, TextMate highlighting, editor configuration, diagnostics, completion, hover, and fixits through `doria-lsp`.
+- VS Code language registration, TextMate highlighting, editor configuration,
+  diagnostics, completion, hover, fixits through `doria-lsp`, and Run and Debug
+  launch profiles that use Baton for projects.
 - IntelliJ Platform support for RustRover, IntelliJ IDEA, PhpStorm, and compatible JetBrains IDEs, with local syntax highlighting and optional LSP integration.
 - Shared accepted and rejected-syntax fixtures used to keep both highlighters aligned.
 

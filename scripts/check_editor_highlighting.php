@@ -13,6 +13,8 @@ $vscodePackage = $root . '/editors/vscode/doria/package.json';
 $vscodeGrammar = $root . '/editors/vscode/doria/syntaxes/doria.tmLanguage.json';
 $vscodeLanguageConfiguration = $root . '/editors/vscode/doria/language-configuration.json';
 $vscodeExtension = $root . '/editors/vscode/doria/extension.js';
+$vscodeDebugSupport = $root . '/editors/vscode/doria/debug-support.js';
+$vscodeLauncherPath = $root . '/editors/vscode/doria/launcher-path.js';
 $vscodeServerPath = $root . '/editors/vscode/doria/server-path.js';
 $vscodeIcon = $root . '/editors/vscode/doria/icons/doria.svg';
 $buildScript = $root . '/scripts/build.php';
@@ -385,6 +387,21 @@ function check_vscode_package(): void
         rtrim(read_text($vscodeIcon)) === rtrim(read_text($doriaLogo)),
         'VS Code file icon must use the canonical Doria README SVG'
     );
+    $debuggers = $package['contributes']['debuggers'] ?? [];
+    require_check(
+        any_match(
+            $debuggers,
+            static fn (mixed $debugger): bool => is_array($debugger)
+                && ($debugger['type'] ?? null) === 'doria'
+                && in_array('doria', $debugger['languages'] ?? [], true)
+                && ($debugger['initialConfigurations'][0]['mode'] ?? null) === 'project'
+                && ($debugger['initialConfigurations'][0]['noDebug'] ?? null) === true
+        )
+        && in_array('onDebug:doria', $package['activationEvents'] ?? [], true)
+        && isset($package['contributes']['configuration']['properties']['doria.baton.path'])
+        && isset($package['contributes']['configuration']['properties']['doria.compiler.path']),
+        'VS Code must contribute a Doria launch profile that defaults to Baton project execution'
+    );
 
     $defaults = $package['contributes']['configurationDefaults']['[doria]'] ?? [];
     require_check(
@@ -398,9 +415,11 @@ function check_vscode_package(): void
 
 function check_vscode_language_server_packaging(): void
 {
-    global $vscodeExtension, $vscodeServerPath, $buildScript;
+    global $vscodeExtension, $vscodeDebugSupport, $vscodeLauncherPath, $vscodeServerPath, $buildScript;
 
     $extension = read_text($vscodeExtension);
+    $debugSupport = read_text($vscodeDebugSupport);
+    $launcherResolver = read_text($vscodeLauncherPath);
     $resolver = read_text($vscodeServerPath);
     $builder = read_text($buildScript);
 
@@ -420,6 +439,14 @@ function check_vscode_language_server_packaging(): void
             && str_contains($builder, "install_executable(\$server, \$bundledServer)")
             && str_contains($builder, "'--target', vscode_target()"),
         'VS Code packaging must build, bundle, and platform-target doria-lsp'
+    );
+    require_check(
+        str_contains($extension, 'registerDebugConfigurationProvider')
+            && str_contains($extension, 'registerDebugAdapterDescriptorFactory')
+            && str_contains($extension, 'resolveBatonPath')
+            && str_contains($debugSupport, 'findBatonProjectRoot')
+            && str_contains($launcherResolver, 'executableName: "baton"'),
+        'VS Code must resolve Baton projects and register the Doria launch adapter'
     );
 }
 
