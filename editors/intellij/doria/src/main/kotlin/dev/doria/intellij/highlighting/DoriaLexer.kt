@@ -597,7 +597,7 @@ class DoriaLexer : LexerBase() {
     }
 
     private fun isFunctionDeclarationName(): Boolean =
-        nextNonWhitespace(tokenEnd) == '(' && previousIdentifier() == "function"
+        nextNonWhitespace(tokenEnd) in setOf('(', '<') && previousIdentifier() == "function"
 
     private fun isCallName(): Boolean = nextNonWhitespace(tokenEnd) == '('
 

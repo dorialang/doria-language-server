@@ -38,6 +38,16 @@ class DoriaLexerTest : TestCase() {
         assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
     }
 
+    fun testGenericFunctionNameRemainsADeclaration() {
+        val tokens = lex("function first<T>(List<T> \$items): ?T { return \$items->first; }")
+
+        assertEquals(
+            DoriaTokenTypes.FUNCTION_DECLARATION,
+            tokens.first { it.text == "first" }.type,
+        )
+        assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
+    }
+
     private fun lex(source: String): List<Token> {
         val lexer = DoriaLexer()
         lexer.start(source)

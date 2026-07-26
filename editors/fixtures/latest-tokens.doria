@@ -89,6 +89,12 @@ function publish(take Post $post): void
     return;
 }
 
+// Stage 24: generic free functions and methods infer concrete type arguments.
+function first<T>(List<T> $items): ?T
+{
+    return $items->first;
+}
+
 // Stage 23b: the entry point may take the program arguments as a
 // `List<string>`; the executable path is not element 0.
 function main(List<string> $args): void

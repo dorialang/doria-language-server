@@ -559,6 +559,32 @@ fn function_signature(function: &FunctionDecl, container: Option<&str>) -> Strin
     let name = container
         .map(|container| format!("{container}::{}", function.name))
         .unwrap_or_else(|| function.name.clone());
+    let type_parameters = if function.type_params.is_empty() {
+        String::new()
+    } else {
+        let parameters = function
+            .type_params
+            .iter()
+            .map(|parameter| {
+                if parameter.constraints.is_empty() {
+                    parameter.name.clone()
+                } else {
+                    format!(
+                        "{} implements {}",
+                        parameter.name,
+                        parameter
+                            .constraints
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("<{parameters}>")
+    };
     let parameters = function
         .params
         .iter()
@@ -589,7 +615,7 @@ fn function_signature(function: &FunctionDecl, container: Option<&str>) -> Strin
         .map(|return_type| format!(": {return_type}"))
         .unwrap_or_default();
 
-    format!("{prefix}function {name}({parameters}){return_type}")
+    format!("{prefix}function {name}{type_parameters}({parameters}){return_type}")
 }
 
 fn class_signature(class: &ClassDecl) -> String {
@@ -890,5 +916,26 @@ function main(): int
         assert!(static_call
             .markdown
             .contains("static function Counter::next(int $value): int"));
+    }
+
+    #[test]
+    fn generic_function_hovers_include_type_parameters_without_false_diagnostics() {
+        let source = r#"function identity<T>(T $value): T
+{
+    return $value;
+}
+
+function main(): int
+{
+    return identity(42);
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("test.doria", source);
+        assert!(snapshot.diagnostics().is_empty());
+
+        let call = snapshot
+            .hover_at_offset(source.rfind("identity").expect("generic function call"))
+            .expect("generic function call should have semantic hover");
+        assert!(call.markdown.contains("function identity<T>(T $value): T"));
     }
 }
