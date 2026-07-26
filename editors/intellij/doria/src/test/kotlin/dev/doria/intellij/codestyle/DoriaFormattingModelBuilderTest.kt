@@ -3,11 +3,71 @@ package dev.doria.intellij.codestyle
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.application.options.CodeStyle
 import com.intellij.psi.codeStyle.CodeStyleManager
+import com.intellij.psi.codeStyle.CommonCodeStyleSettings
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
 import dev.doria.intellij.DoriaFileType
 import dev.doria.intellij.DoriaLanguage
 
 class DoriaFormattingModelBuilderTest : BasePlatformTestCase() {
+    fun testDeclarationBraceSettingsDriveReformatting() {
+        val nextLineSource = """
+            class Greeter
+            {
+                function greet(): void
+                {
+                }
+            }
+        """.trimIndent()
+        val common = CodeStyle.getSettings(project).getCommonSettings(DoriaLanguage)
+        common.CLASS_BRACE_STYLE = CommonCodeStyleSettings.END_OF_LINE
+        common.METHOD_BRACE_STYLE = CommonCodeStyleSettings.END_OF_LINE
+
+        assertFormatted(
+            nextLineSource,
+            """
+            class Greeter {
+                function greet(): void {
+                }
+            }
+            """.trimIndent(),
+        )
+
+        common.CLASS_BRACE_STYLE = CommonCodeStyleSettings.NEXT_LINE
+        common.METHOD_BRACE_STYLE = CommonCodeStyleSettings.NEXT_LINE
+        assertFormatted(myFixture.editor.document.text, nextLineSource)
+    }
+
+    fun testControlFlowContinuationSettingsDriveReformatting() {
+        val common = CodeStyle.getSettings(project).getCommonSettings(DoriaLanguage)
+        common.ELSE_ON_NEW_LINE = true
+        common.CATCH_ON_NEW_LINE = true
+        common.FINALLY_ON_NEW_LINE = true
+
+        assertFormatted(
+            """
+            if (true) {
+            } else {
+            }
+            try {
+            } catch (Error ${'$'}error) {
+            } finally {
+            }
+            """.trimIndent(),
+            """
+            if (true) {
+            }
+            else {
+            }
+            try {
+            }
+            catch (Error ${'$'}error) {
+            }
+            finally {
+            }
+            """.trimIndent(),
+        )
+    }
+
     fun testIndentOptionsDriveReformatting() {
         configureIndentOptions(indentSize = 2, continuationIndentSize = 3, useTabs = false)
 
@@ -43,7 +103,7 @@ class DoriaFormattingModelBuilderTest : BasePlatformTestCase() {
         common.SPACE_BEFORE_METHOD_PARENTHESES = false
         common.SPACE_WITHIN_METHOD_CALL_PARENTHESES = true
         common.SPACE_WITHIN_METHOD_PARENTHESES = false
-        common.METHOD_BRACE_STYLE = com.intellij.psi.codeStyle.CommonCodeStyleSettings.END_OF_LINE
+        common.METHOD_BRACE_STYLE = CommonCodeStyleSettings.END_OF_LINE
 
         assertFormatted(
             """
