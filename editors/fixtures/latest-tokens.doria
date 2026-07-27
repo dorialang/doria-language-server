@@ -95,6 +95,18 @@ function first<T>(List<T> $items): ?T
     return $items->first;
 }
 
+// Stage 25: user generic classes accept constraints and nested instantiations.
+class History<T implements Displayable>
+{
+    function __construct(take T $entry)
+    {
+    }
+}
+
+function inspectHistory(History<int> $history): void
+{
+}
+
 // Stage 23b: the entry point may take the program arguments as a
 // `List<string>`; the executable path is not element 0.
 function main(List<string> $args): void

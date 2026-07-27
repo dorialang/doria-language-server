@@ -48,6 +48,17 @@ class DoriaLexerTest : TestCase() {
         assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
     }
 
+    fun testGenericClassDeclarationsAndInstantiationsRemainValidTokens() {
+        val tokens = lex(
+            "class Box<T implements Displayable> {} " +
+                "function use(Box<int> \$box): void {}",
+        )
+
+        assertEquals(DoriaTokenTypes.KEYWORD, tokens.first { it.text == "class" }.type)
+        assertEquals(DoriaTokenTypes.TYPE_NAME, tokens.first { it.text == "Box" }.type)
+        assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
+    }
+
     private fun lex(source: String): List<Token> {
         val lexer = DoriaLexer()
         lexer.start(source)

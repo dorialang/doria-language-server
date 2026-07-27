@@ -720,6 +720,35 @@
           ]
         },
         {
+          "begin": "\\b([A-Z][A-Za-z0-9_]*)\\s*(<)",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.type.doria"
+            },
+            "2": {
+              "name": "punctuation.definition.generic.begin.doria"
+            }
+          },
+          "end": ">",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.generic.end.doria"
+            }
+          },
+          "patterns": [
+            {
+              "name": "punctuation.separator.generic.doria",
+              "match": ","
+            },
+            {
+              "include": "#types"
+            },
+            {
+              "include": "#numbers"
+            }
+          ]
+        },
+        {
           "name": "storage.type.reserved.doria",
           "match": "\\bresource\\b"
         },

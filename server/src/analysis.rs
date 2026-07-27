@@ -379,9 +379,9 @@ impl<'a> SnapshotBuilder<'a> {
                 let target = self.semantic_info.and_then(|info| info.call_target(*span));
                 let resolved_class = match target {
                     Some(CallableTarget::Method {
-                        class_name,
+                        class_type,
                         method_name,
-                    }) if method_name == method => Some(class_name.as_str()),
+                    }) if method_name == method => Some(class_type.name.as_str()),
                     _ if matches!(object.as_ref(), Expr::This { .. }) => current_class,
                     _ => None,
                 };
@@ -432,9 +432,9 @@ impl<'a> SnapshotBuilder<'a> {
                 let target = self.semantic_info.and_then(|info| info.call_target(*span));
                 let class_name = match target {
                     Some(CallableTarget::Method {
-                        class_name,
+                        class_type,
                         method_name,
-                    }) if method_name == method => Some(class_name.as_str()),
+                    }) if method_name == method => Some(class_type.name.as_str()),
                     _ if matches!(qualifier, StaticQualifier::SelfType) => current_class,
                     _ if matches!(qualifier, StaticQualifier::Parent) => parent_class,
                     _ => None,
@@ -453,15 +453,17 @@ impl<'a> SnapshotBuilder<'a> {
                 }
             }
             Expr::New {
-                class_name,
+                class_type,
                 args,
                 span,
             } => {
                 for argument in args {
                     self.visit_expr(&argument.value, current_class, parent_class);
                 }
-                if let Some(symbol) = self.classes.get(class_name).copied() {
-                    if let Some(name_span) = find_identifier_span(self.tokens, *span, class_name) {
+                if let Some(symbol) = self.classes.get(&class_type.name).copied() {
+                    if let Some(name_span) =
+                        find_identifier_span(self.tokens, *span, &class_type.name)
+                    {
                         self.occurrences.push(Occurrence {
                             span: name_span,
                             symbol,
@@ -559,32 +561,7 @@ fn function_signature(function: &FunctionDecl, container: Option<&str>) -> Strin
     let name = container
         .map(|container| format!("{container}::{}", function.name))
         .unwrap_or_else(|| function.name.clone());
-    let type_parameters = if function.type_params.is_empty() {
-        String::new()
-    } else {
-        let parameters = function
-            .type_params
-            .iter()
-            .map(|parameter| {
-                if parameter.constraints.is_empty() {
-                    parameter.name.clone()
-                } else {
-                    format!(
-                        "{} implements {}",
-                        parameter.name,
-                        parameter
-                            .constraints
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("<{parameters}>")
-    };
+    let type_parameters = type_parameter_signature(&function.type_params);
     let parameters = function
         .params
         .iter()
@@ -618,8 +595,41 @@ fn function_signature(function: &FunctionDecl, container: Option<&str>) -> Strin
     format!("{prefix}function {name}{type_parameters}({parameters}){return_type}")
 }
 
+fn type_parameter_signature(parameters: &[doriac::ast::TypeParamDecl]) -> String {
+    if parameters.is_empty() {
+        return String::new();
+    }
+    let parameters = parameters
+        .iter()
+        .map(|parameter| {
+            let mut rendered = parameter.name.clone();
+            if !parameter.constraints.is_empty() {
+                rendered.push_str(" implements ");
+                rendered.push_str(
+                    &parameter
+                        .constraints
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+            }
+            if let Some(default) = &parameter.default_type {
+                rendered.push_str(&format!(" = {default}"));
+            }
+            rendered
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("<{parameters}>")
+}
+
 fn class_signature(class: &ClassDecl) -> String {
-    let mut signature = format!("class {}", class.name);
+    let mut signature = format!(
+        "class {}{}",
+        class.name,
+        type_parameter_signature(&class.type_params)
+    );
     if let Some(parent) = &class.parent {
         signature.push_str(&format!(" extends {parent}"));
     }
@@ -937,5 +947,35 @@ function main(): int
             .hover_at_offset(source.rfind("identity").expect("generic function call"))
             .expect("generic function call should have semantic hover");
         assert!(call.markdown.contains("function identity<T>(T $value): T"));
+    }
+
+    #[test]
+    fn generic_class_hovers_include_constraints_without_false_diagnostics() {
+        let source = r#"class Box<T implements Displayable>
+{
+    function __construct(take T $value) {}
+}
+
+function main(): void
+{
+    let $box = new Box<int>(42);
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("test.doria", source);
+        assert!(snapshot.diagnostics().is_empty());
+
+        let declaration = snapshot
+            .hover_at_offset(source.find("Box").expect("generic class declaration"))
+            .expect("generic class declaration should have semantic hover");
+        assert!(declaration
+            .markdown
+            .contains("class Box<T implements Displayable>"));
+
+        let construction = snapshot
+            .hover_at_offset(source.rfind("Box").expect("generic class construction"))
+            .expect("generic class construction should resolve to the class");
+        assert!(construction
+            .markdown
+            .contains("class Box<T implements Displayable>"));
     }
 }
