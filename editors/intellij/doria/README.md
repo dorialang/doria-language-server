@@ -8,47 +8,58 @@ It provides:
 
 - `.doria` file recognition.
 - Basic syntax highlighting for Doria keywords, variables, types, attributes, strings, string interpolation, comments, numbers, operators, punctuation, accepted OOP declaration vocabulary, namespace/import/include/directive vocabulary, and rejected strict-comparison/preprocessor spellings.
+- Doria code-style settings and formatting for tabs, indentation, continuation indentation, spacing, braces, and preserved blank lines.
 - A Doria settings page for configuring the language server path.
 - `doria-lsp` integration through the IntelliJ Platform LSP API.
 
 The initial plugin targets IntelliJ Platform `2025.2.1+`, where JetBrains exposes the LSP module as `com.intellij.modules.lsp`.
 
-This is first-pass Doria support for IntelliJ / JetBrains IDEs. The local IntelliJ highlighter is syntax highlighting only: it does not provide a semantic PSI tree, formatter, inspections, refactors, or compiler diagnostics. Compiler-backed diagnostics, completion, and hover remain separate and come from `doria-lsp` when the language server is configured and available.
+This is first-pass Doria support for IntelliJ / JetBrains IDEs. Local syntax highlighting and formatting do not provide semantic inspections or refactors. Compiler-backed diagnostics, completion, and hover remain separate and come from `doria-lsp` when the language server is configured and available.
 
 The plugin registers the lower-case `doria` language id so Markdown fenced blocks using the `doria` info string can resolve to the Doria highlighter where the JetBrains Markdown plugin performs language injection. Planned keywords are highlighted for documentation readability only; compiler support still follows the staged plan.
 
 ## Build the language server
 
-During the repository split, build `doria-lsp` from the Doria compiler checkout:
+From the root of this repository:
 
 ```bash
-cd /path/to/doria
-cargo build -p doriac --bin doria-lsp
+php scripts/build.php server
 ```
 
-Point the plugin setting or `DORIA_LSP_PATH` at the resulting executable. Once the standalone server source moves into this repository, the root README will own the repository-local build command.
+Point the plugin setting or `DORIA_LSP_PATH` at `target/debug/doria-lsp` (`target\debug\doria-lsp.exe` on Windows). If a release binary is already on `PATH`, no explicit configuration is required.
 
 ## Build the plugin
 
-From this directory:
+From the repository root:
 
 ```bash
+php scripts/build.php intellij
+```
+
+The target uses the checked-in Gradle wrapper and prints the absolute path of the generated ZIP. The equivalent low-level commands are:
+
+```bash
+cd editors/intellij/doria
 ./gradlew buildPlugin
 ```
 
-On Windows PowerShell or Command Prompt:
-
-```powershell
-.\gradlew.bat buildPlugin
-```
-
-Use the checked-in Gradle wrapper instead of a system Gradle installation. The wrapper pins the Gradle distribution used by the IntelliJ Platform Gradle Plugin, so local builds and CI do not depend on whichever `gradle` happens to be installed globally.
+On Windows, use `.\gradlew.bat buildPlugin`. Use the checked-in wrapper instead of a system Gradle installation so local builds and CI use the same pinned Gradle distribution.
 
 The packaged plugin will be written under:
 
 ```text
-build/distributions/
+build/distributions/doria-intellij-plugin-<version>.zip
 ```
+
+That is the only local build artifact to select in **Install Plugin from
+Disk**. Files under `build/libs/` are Gradle intermediates, not installable
+plugin packages. Every `buildPlugin` invocation removes obsolete distribution
+ZIPs first, so `build/distributions/` contains exactly one current plugin ZIP.
+
+GitHub Actions always wraps retained artifacts in a download ZIP. After
+downloading the `doria-intellij-plugin` Actions artifact, extract that outer
+container once and install the versioned plugin ZIP inside it. A plugin ZIP
+attached directly to a GitHub release can be installed without that extraction.
 
 ## Enable in RustRover or another JetBrains IDE
 
@@ -84,7 +95,7 @@ After changing editor highlighting, run this from the repository root:
 php scripts/check_editor_highlighting.php
 ```
 
-Files under `editors/fixtures/` are syntax-highlighting smoke fixtures. The IntelliJ LSP adapter keeps them out of `doria-lsp` diagnostics so accepted/planned editor vocabulary can be exercised before compiler implementation lands.
+Files under `editors/fixtures/` are syntax-highlighting smoke fixtures. The IntelliJ LSP adapter keeps them out of `doria-lsp` diagnostics so highlighting can be exercised independently of language-server diagnostics.
 
 Doria uses distinct spellings for imports and trait composition: file/namespace-scope `use` imports names from namespaces, while class-body or trait-body `uses` composes traits. The IntelliJ highlighter keeps these scopes separate as import use and trait-composition uses.
 

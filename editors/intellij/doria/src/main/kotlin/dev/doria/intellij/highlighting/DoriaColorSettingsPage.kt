@@ -18,6 +18,8 @@ class DoriaColorSettingsPage : ColorSettingsPage {
         #[App\Routing\Route(path: "/people")]
         class Person
         {
+            internal const MAX_GREETING_LENGTH = 120;
+            static writable int ${'$'}created = 0;
             writable string ${'$'}name = "Andrew Masiye";
 
             #[Test]
@@ -48,9 +50,15 @@ class DoriaColorSettingsPage : ColorSettingsPage {
         }
 
         let writable ${'$'}person = new Person();
+        mixed ${'$'}value = ${'$'}person;
+        if (${'$'}value is Person) {
+            ${'$'}value->greet();
+        }
         echo "\\n---\\t---\\r---\\s";
         ${'$'}person->greet();
         Person::fromName("Lucy");
+        echo Person::MAX_GREETING_LENGTH;
+        Person::created += 1;
     """.trimIndent()
 
     override fun getAdditionalHighlightingTagToDescriptorMap(): Map<String, TextAttributesKey> = emptyMap()
@@ -64,6 +72,7 @@ class DoriaColorSettingsPage : ColorSettingsPage {
     companion object {
         private val ATTRIBUTES = arrayOf(
             AttributesDescriptor("Keyword", DoriaSyntaxHighlighter.KEYWORD),
+            AttributesDescriptor("Type-test operator", DoriaSyntaxHighlighter.TYPE_TEST_OPERATOR),
             AttributesDescriptor("Modifier", DoriaSyntaxHighlighter.MODIFIER),
             AttributesDescriptor("Primitive type", DoriaSyntaxHighlighter.PRIMITIVE_TYPE),
             AttributesDescriptor("Collection type", DoriaSyntaxHighlighter.COLLECTION_TYPE),
@@ -81,11 +90,12 @@ class DoriaColorSettingsPage : ColorSettingsPage {
             AttributesDescriptor("Function call", DoriaSyntaxHighlighter.FUNCTION_CALL),
             AttributesDescriptor("Method call", DoriaSyntaxHighlighter.METHOD_CALL),
             AttributesDescriptor("Static method call", DoriaSyntaxHighlighter.STATIC_METHOD_CALL),
+            AttributesDescriptor("Class or top-level constant", DoriaSyntaxHighlighter.CLASS_CONSTANT),
+            AttributesDescriptor("Static property", DoriaSyntaxHighlighter.STATIC_PROPERTY),
             AttributesDescriptor("Identifier", DoriaSyntaxHighlighter.IDENTIFIER),
             AttributesDescriptor("Variable", DoriaSyntaxHighlighter.VARIABLE),
             AttributesDescriptor("Interpolated property", DoriaSyntaxHighlighter.PROPERTY),
             AttributesDescriptor("This", DoriaSyntaxHighlighter.THIS),
-            AttributesDescriptor("Unused variable", DoriaSyntaxHighlighter.UNUSED_VARIABLE),
             AttributesDescriptor("Constant", DoriaSyntaxHighlighter.CONSTANT),
             AttributesDescriptor("Number", DoriaSyntaxHighlighter.NUMBER),
             AttributesDescriptor("String", DoriaSyntaxHighlighter.STRING),

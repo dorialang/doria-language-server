@@ -4,6 +4,11 @@
 
 This repository owns Doria's language server, syntax highlighting, shared editor fixtures, and IDE clients. The `doria` compiler repository remains the authority for language syntax, semantics, diagnostics, and staged implementation status.
 
+**This repository restates language facts, so it goes stale whenever a compiler stage lands.** Hover text, descriptions, highlighting, and fixtures all encode claims the compiler owns. A stale language server tells the user that valid code is wrong — worse than shipping no language server at all. Two obligations follow:
+
+- The `doriac` pin in the root `Cargo.toml` (`rev = "…"`) is part of the language surface, not just a build detail. A pin behind the compiler's landed work means hovers and diagnostics describe a language that no longer exists.
+- Any claim scoped to a superseded stage is a defect to fix on sight, whether or not the current task caused it: "this compiler currently supports…", "represents the EOF result of…", or "alias" for a type that is now implemented with a real member surface. When compiler work lands a stage, `doria/AGENTS.md` ("Language-server sweep") requires that beat to update this repository too — the sweep is not optional follow-up.
+
 ## Guardrails
 
 - Do not duplicate compiler parsing, semantic checking, or diagnostics in editor clients.
@@ -17,13 +22,21 @@ This repository owns Doria's language server, syntax highlighting, shared editor
 - Track Doria's CalVer and retain any ecosystem-specific encoding explanation.
 - Do not initialize Git, push, publish, sign, or create releases without explicit authorization.
 
+## Build artifact storage
+
+- Cargo does not garbage-collect old project artifacts. Run `php scripts/check_cargo_target_size.php` before and after the full Rust validation suite.
+- The checker reports a problem when the repository's `target/` exceeds 15 GiB. It is diagnostic only and must never delete build artifacts.
+- Never run `cargo clean` or remove `target/` automatically. Report the measured size and ask Andrew for approval before cleaning.
+- Keep test debug information at line-table level and test incremental compilation disabled unless Andrew explicitly accepts the storage tradeoff.
+
 ## Required validation
 
 For highlighting or editor-client changes, run:
 
 ```bash
 php scripts/check_editor_highlighting.php
-node --check editors/vscode/doria/extension.js
+npm --prefix editors/vscode/doria ci --ignore-scripts
+npm --prefix editors/vscode/doria run check
 ```
 
 For IntelliJ plugin changes, also run:
@@ -33,4 +46,11 @@ cd editors/intellij/doria
 ./gradlew test buildPlugin
 ```
 
-Once the Rust server source is migrated here, run formatting, Clippy with warnings denied, build, and tests for every server change.
+For server or compiler-dependency changes, run:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+cargo build --workspace --locked
+```

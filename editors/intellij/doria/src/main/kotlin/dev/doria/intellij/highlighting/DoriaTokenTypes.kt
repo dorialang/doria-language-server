@@ -11,6 +11,7 @@ object DoriaTokenTypes {
     val BAD_CHARACTER: IElementType = TokenType.BAD_CHARACTER
 
     val KEYWORD = DoriaTokenType("DORIA_KEYWORD")
+    val TYPE_TEST_OPERATOR = DoriaTokenType("DORIA_TYPE_TEST_OPERATOR")
     val MODIFIER = DoriaTokenType("DORIA_MODIFIER")
     val PRIMITIVE_TYPE = DoriaTokenType("DORIA_PRIMITIVE_TYPE")
     val RESERVED_TYPE = DoriaTokenType("DORIA_RESERVED_TYPE")
@@ -29,6 +30,8 @@ object DoriaTokenTypes {
     val FUNCTION_CALL = DoriaTokenType("DORIA_FUNCTION_CALL")
     val METHOD_CALL = DoriaTokenType("DORIA_METHOD_CALL")
     val STATIC_METHOD_CALL = DoriaTokenType("DORIA_STATIC_METHOD_CALL")
+    val CLASS_CONSTANT = DoriaTokenType("DORIA_CLASS_CONSTANT")
+    val STATIC_PROPERTY = DoriaTokenType("DORIA_STATIC_PROPERTY")
     val IDENTIFIER = DoriaTokenType("DORIA_IDENTIFIER")
     val VARIABLE = DoriaTokenType("DORIA_VARIABLE")
     val PROPERTY = DoriaTokenType("DORIA_PROPERTY")

@@ -28,3 +28,8 @@ include_once "x.doria";
 goto done;
 
 print("use echo");
+
+echo $value instanceof User;
+
+BadVisibility::$name;
+static::create();

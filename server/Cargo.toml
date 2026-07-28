@@ -1,0 +1,15 @@
+[package]
+name = "doria-language-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+doriac.workspace = true
+serde_json.workspace = true
+
+[[bin]]
+name = "doria-lsp"
+path = "src/main.rs"
+

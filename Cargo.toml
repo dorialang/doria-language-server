@@ -1,0 +1,25 @@
+[workspace]
+members = ["server"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/dorialang/doria-language-server"
+version = "2026.3.1-canary"
+
+[workspace.dependencies]
+doriac = { git = "https://github.com/dorialang/doria", rev = "d58aac94b9a106a32c794dc999cbab71c95f1041", default-features = false }
+serde_json = "1"
+
+[profile.dev]
+panic = "abort"
+
+[profile.test]
+debug = "line-tables-only"
+incremental = false
+
+[profile.release]
+panic = "abort"
+strip = "symbols"
+lto = "thin"

@@ -6,8 +6,6 @@ Thank you for helping improve Doria's IDE experience.
 
 The Doria compiler and its accepted specification and decisions define language behavior. This repository presents that behavior to editors; it must not invent a second parser, type system, diagnostic meaning, or feature-status authority.
 
-TextMate and IntelliJ highlighting may include clearly planned vocabulary so documentation and future-looking examples remain readable. Highlighting alone never means that `doriac` implements a construct.
-
 ## Before making a change
 
 - Check whether the change belongs to the language server, both editor clients, or only one editor-specific adapter.
@@ -22,7 +20,17 @@ Run the repository guardrails:
 
 ```bash
 php scripts/check_editor_highlighting.php
-node --check editors/vscode/doria/extension.js
+npm --prefix editors/vscode/doria ci --ignore-scripts
+npm --prefix editors/vscode/doria run check
+```
+
+Validate the standalone server:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+cargo build --workspace --locked
 ```
 
 Build and test the JetBrains plugin:
@@ -32,7 +40,19 @@ cd editors/intellij/doria
 ./gradlew test buildPlugin
 ```
 
-When language-server source changes after its migration, also run its Rust formatting, Clippy, build, and test commands documented beside the server crate.
+When changing the pinned `doriac` revision, run all Rust and editor checks and verify `doria-lsp --version` reports the intended canonical Doria toolchain release.
+
+## Build artifact storage
+
+Cargo reuses `target/` between builds but does not garbage-collect obsolete hashed artifacts. This repository therefore uses line-table debug information and disables incremental compilation for the test profile while leaving ordinary development builds incremental.
+
+Run the non-destructive size guard before and after a full Rust validation:
+
+```bash
+php scripts/check_cargo_target_size.php
+```
+
+The command exits nonzero when `target/` exceeds 15 GiB and never removes anything. Inspect an oversized directory with an appropriate disk-usage tool and use `cargo clean --dry-run` to preview Cargo's cleanup. Run `cargo clean` only as an intentional, approved maintenance action; cleaning after every build would discard useful artifacts and force unnecessary cold rebuilds.
 
 ## Pull requests
 

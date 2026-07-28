@@ -1,0 +1,83 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const path = require("node:path");
+const test = require("node:test");
+const { resolveServerPath } = require("../server-path");
+
+function resolver(existingPaths, overrides = {}) {
+  const existing = new Set(existingPaths.map((candidate) => path.resolve(candidate)));
+  return resolveServerPath({
+    configuredPath: "",
+    environmentPath: "",
+    workspaceRoot: "/workspace",
+    extensionPath: "/extension",
+    platform: "linux",
+    pathExists: (candidate) => existing.has(path.resolve(candidate)),
+    ...overrides
+  });
+}
+
+test("uses an existing configured server first", () => {
+  const result = resolver(
+    ["/configured/doria-lsp", "/extension/bin/doria-lsp"],
+    { configuredPath: "/configured/doria-lsp" }
+  );
+
+  assert.equal(result.command, path.resolve("/configured/doria-lsp"));
+  assert.equal(result.source, "setting");
+});
+
+test("resolves a relative configured path from the workspace", () => {
+  const result = resolver(
+    ["/workspace/tools/doria-lsp"],
+    { configuredPath: "tools/doria-lsp" }
+  );
+
+  assert.equal(result.command, path.resolve("/workspace/tools/doria-lsp"));
+  assert.equal(result.source, "setting");
+});
+
+test("ignores stale overrides and uses the bundled server", () => {
+  const result = resolver(
+    ["/extension/bin/doria-lsp"],
+    {
+      configuredPath: "/old/configured/doria-lsp",
+      environmentPath: "/old/server/target/debug/doria-lsp"
+    }
+  );
+
+  assert.equal(result.command, path.resolve("/extension/bin/doria-lsp"));
+  assert.equal(result.source, "bundled");
+  assert.deepEqual(
+    result.rejectedPaths.map(({ source }) => source),
+    ["setting", "environment"]
+  );
+});
+
+test("prefers a workspace development server over the bundled server", () => {
+  const result = resolver([
+    "/workspace/target/debug/doria-lsp",
+    "/extension/bin/doria-lsp"
+  ]);
+
+  assert.equal(result.command, path.resolve("/workspace/target/debug/doria-lsp"));
+  assert.equal(result.source, "workspace");
+});
+
+test("falls back to PATH when no server file is available", () => {
+  const result = resolver([]);
+
+  assert.equal(result.command, "doria-lsp");
+  assert.equal(result.source, "PATH");
+});
+
+test("uses the Windows executable name", () => {
+  const result = resolver(
+    ["/extension/bin/doria-lsp.exe"],
+    { platform: "win32" }
+  );
+
+  assert.equal(result.command, path.resolve("/extension/bin/doria-lsp.exe"));
+  assert.equal(result.source, "bundled");
+});

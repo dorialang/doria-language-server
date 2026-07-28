@@ -409,7 +409,12 @@ class DoriaLexer : LexerBase() {
             while (tokenEnd < endOffset && isIdentifierPart(buffer[tokenEnd])) {
                 tokenEnd++
             }
-            tokenType = if (sliceEquals("\$this")) DoriaTokenTypes.THIS else DoriaTokenTypes.VARIABLE
+            tokenType = when {
+                sliceEquals("\$this") -> DoriaTokenTypes.THIS
+                previousAccessor() == "::" -> DoriaTokenTypes.INVALID
+                isStaticPropertyDeclaration() -> DoriaTokenTypes.STATIC_PROPERTY
+                else -> DoriaTokenTypes.VARIABLE
+            }
         } else {
             tokenType = DoriaTokenTypes.OPERATOR
         }
@@ -463,6 +468,8 @@ class DoriaLexer : LexerBase() {
         when (text) {
             in KEYWORDS -> DoriaTokenTypes.KEYWORD
 
+            in TYPE_TEST_OPERATORS -> DoriaTokenTypes.TYPE_TEST_OPERATOR
+
             in WORD_OPERATORS -> DoriaTokenTypes.LOGICAL_OPERATOR
 
             in MODIFIERS -> DoriaTokenTypes.MODIFIER
@@ -481,6 +488,8 @@ class DoriaLexer : LexerBase() {
                 isFunctionDeclarationName() -> DoriaTokenTypes.FUNCTION_DECLARATION
                 isConstructorTypeName() -> DoriaTokenTypes.TYPE_NAME
                 isCallName() -> callableTokenType()
+                isConstantName(text) -> DoriaTokenTypes.CLASS_CONSTANT
+                isStaticPropertyName(text) -> DoriaTokenTypes.STATIC_PROPERTY
                 text.first().isUpperCase() -> DoriaTokenTypes.TYPE_NAME
                 else -> DoriaTokenTypes.IDENTIFIER
             }
@@ -588,9 +597,25 @@ class DoriaLexer : LexerBase() {
     }
 
     private fun isFunctionDeclarationName(): Boolean =
-        nextNonWhitespace(tokenEnd) == '(' && previousIdentifier() == "function"
+        nextNonWhitespace(tokenEnd) in setOf('(', '<') && previousIdentifier() == "function"
 
     private fun isCallName(): Boolean = nextNonWhitespace(tokenEnd) == '('
+
+    private fun isConstantName(text: String): Boolean =
+        isConstantDeclaration() || CONSTANT_REFERENCE_NAME.matches(text)
+
+    private fun isStaticPropertyName(text: String): Boolean =
+        previousAccessor() == "::" && !isCallName() && !CONSTANT_REFERENCE_NAME.matches(text)
+
+    private fun isConstantDeclaration(): Boolean {
+        val prefix = buffer.subSequence(lineStart(tokenStart), tokenStart).toString()
+        return CONSTANT_DECLARATION_PREFIX.matches(prefix)
+    }
+
+    private fun isStaticPropertyDeclaration(): Boolean {
+        val prefix = buffer.subSequence(lineStart(tokenStart), tokenStart).toString()
+        return STATIC_PROPERTY_DECLARATION_PREFIX.matches(prefix)
+    }
 
     private fun isConstructorTypeName(): Boolean {
         if (nextNonWhitespace(tokenEnd) != '(') {
@@ -883,6 +908,8 @@ class DoriaLexer : LexerBase() {
             "for",
             "break",
             "continue",
+            "default",
+            "do",
             "when",
             "given",
             "finally",
@@ -891,7 +918,9 @@ class DoriaLexer : LexerBase() {
             "uses",
             "include",
             "declare",
-            "static",
+            "const",
+            "self",
+            "parent",
             "async",
             "await",
             "spawn",
@@ -904,6 +933,10 @@ class DoriaLexer : LexerBase() {
             "open",
             "override",
             "with",
+            "fn",
+            "get",
+            "set",
+            "insteadof",
             "take",
             "try",
             "catch",
@@ -911,12 +944,28 @@ class DoriaLexer : LexerBase() {
             "throws",
         )
 
+        private val TYPE_TEST_OPERATORS = setOf("is")
         private val WORD_OPERATORS = setOf("not", "and", "or", "xor")
         private val LOGICAL_SYMBOL_OPERATORS = setOf("!", "&&", "||")
 
-        private val INVALID_KEYWORDS = setOf("goto", "require", "require_once", "include_once", "print")
+        private val INVALID_KEYWORDS = setOf(
+            "goto",
+            "require",
+            "require_once",
+            "include_once",
+            "print",
+            "instanceof",
+        )
 
-        private val MODIFIERS = setOf("writable", "readonly", "internal")
+        private val MODIFIERS = setOf("take", "writable", "readonly", "internal", "static", "shared")
+
+        private val CONSTANT_REFERENCE_NAME = Regex("[A-Z][A-Z0-9_]+")
+
+        private val CONSTANT_DECLARATION_PREFIX =
+            Regex("\\s*(?:internal\\s+)?const(?:\\s+\\??[A-Za-z_][A-Za-z0-9_]*(?:<[^>]+>)?(?:\\[\\])*)?\\s+")
+
+        private val STATIC_PROPERTY_DECLARATION_PREFIX =
+            Regex("\\s*(?:internal\\s+)?static\\s+(?:writable\\s+)?\\??[A-Za-z_][A-Za-z0-9_]*(?:<[^>]+>)?(?:\\[\\])*\\s+")
 
         private val PRIMITIVE_TYPES = setOf(
             "void",
@@ -935,7 +984,6 @@ class DoriaLexer : LexerBase() {
             "string",
             "bool",
             "mixed",
-            "never",
         )
 
         private val RESERVED_TYPES = setOf("resource")
@@ -944,9 +992,12 @@ class DoriaLexer : LexerBase() {
             "List",
             "Dictionary",
             "Set",
-            "Shared",
-            "Weak",
-            "SharedMut",
+            "SharedReference",
+            "WeakReference",
+            "WritableSharedReference",
+            "WritableWeakReference",
+            "ReadonlySharedReferenceAccess",
+            "WritableSharedReferenceAccess",
             "Sendable",
             "Shareable",
             "Ptr",

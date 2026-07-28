@@ -13,14 +13,27 @@ $vscodePackage = $root . '/editors/vscode/doria/package.json';
 $vscodeGrammar = $root . '/editors/vscode/doria/syntaxes/doria.tmLanguage.json';
 $vscodeLanguageConfiguration = $root . '/editors/vscode/doria/language-configuration.json';
 $vscodeExtension = $root . '/editors/vscode/doria/extension.js';
+$vscodeDebugSupport = $root . '/editors/vscode/doria/debug-support.js';
+$vscodeLauncherPath = $root . '/editors/vscode/doria/launcher-path.js';
+$vscodeServerPath = $root . '/editors/vscode/doria/server-path.js';
+$vscodeIcon = $root . '/editors/vscode/doria/icons/doria.svg';
+$buildScript = $root . '/scripts/build.php';
 $intellijLexer = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/highlighting/DoriaLexer.kt';
+$intellijLanguage = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/DoriaLanguage.kt';
 $intellijBuildGradle = $root . '/editors/intellij/doria/build.gradle';
 $intellijTokenTypes = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/highlighting/DoriaTokenTypes.kt';
 $intellijSyntaxHighlighter = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/highlighting/DoriaSyntaxHighlighter.kt';
+$intellijLexerTest = $root . '/editors/intellij/doria/src/test/kotlin/dev/doria/intellij/highlighting/DoriaLexerTest.kt';
+$intellijCodeStyleProvider = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/codestyle/DoriaLanguageCodeStyleSettingsProvider.kt';
+$intellijFormatter = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/codestyle/DoriaFormattingModelBuilder.kt';
+$intellijParser = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/psi/DoriaParserDefinition.kt';
+$intellijFormatterTest = $root . '/editors/intellij/doria/src/test/kotlin/dev/doria/intellij/codestyle/DoriaFormattingModelBuilderTest.kt';
 $intellijLspFiles = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/lsp/DoriaLspFiles.kt';
 $intellijPluginXml = $root . '/editors/intellij/doria/src/main/resources/META-INF/plugin.xml';
 $intellijPluginIcon = $root . '/editors/intellij/doria/src/main/resources/META-INF/pluginIcon.svg';
+$intellijCreateClassAction = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/actions/DoriaCreateClassAction.kt';
 $doriaLogo = $root . '/res/images/doria-app-icon-warm.svg';
+$lspServer = $root . '/server/src/lib.rs';
 $fixture = $root . '/editors/fixtures/latest-tokens.doria';
 $rejectedFixture = $root . '/editors/fixtures/rejected-syntax.doria';
 
@@ -31,7 +44,12 @@ $acceptedKeywords = [
     'extends',
     'implements',
     'function',
+    'const',
+    'static',
+    'self',
+    'parent',
     'let',
+    'take',
     'writable',
     'readonly',
     'internal',
@@ -50,6 +68,7 @@ $acceptedKeywords = [
     'foreach',
     'break',
     'continue',
+    'is',
     'true',
     'false',
     'null',
@@ -64,6 +83,15 @@ $acceptedKeywords = [
     'match',
     'when',
     'given',
+    'default',
+    'do',
+    'fn',
+    'get',
+    'set',
+    'insteadof',
+    'shared',
+    'spawn',
+    'scope',
     'async',
     'await',
     'unsafe',
@@ -74,6 +102,34 @@ $acceptedKeywords = [
     'take',
 ];
 
+$plannedKeywords = [
+    'enum',
+    'case',
+    'match',
+    'async',
+    'await',
+    'unsafe',
+    'extern',
+    'open',
+    'override',
+    'with',
+    'take',
+    'throw',
+    'throws',
+    'try',
+    'catch',
+    'finally',
+    'when',
+    'given',
+    'default',
+    'do',
+    'fn',
+    'get',
+    'set',
+    'insteadof',
+    'spawn',
+    'scope',
+];
 $primitiveTypes = [
     'void',
     'int',
@@ -91,7 +147,25 @@ $primitiveTypes = [
     'string',
     'bool',
     'mixed',
-    'never',
+];
+
+$implementedIntegerTypes = [
+    'int',
+    'int8',
+    'int16',
+    'int32',
+    'int64',
+    'uint8',
+    'uint16',
+    'uint32',
+    'uint64',
+];
+
+$implementedStage14ScalarTypes = [
+    'float',
+    'float32',
+    'float64',
+    'bool',
 ];
 
 $reservedTypes = [
@@ -99,9 +173,12 @@ $reservedTypes = [
 ];
 
 $plannedTypes = [
-    'Shared',
-    'Weak',
-    'SharedMut',
+    'SharedReference',
+    'WeakReference',
+    'WritableSharedReference',
+    'WritableWeakReference',
+    'ReadonlySharedReferenceAccess',
+    'WritableSharedReferenceAccess',
     'Sendable',
     'Shareable',
     'Ptr',
@@ -115,8 +192,37 @@ $plannedTypes = [
 $rejectedTypes = [
     'array',
     'object',
+    'never',
 ];
 
+$lspSupportedTypes = [
+    'void',
+    'int',
+    'int8',
+    'int16',
+    'int32',
+    'int64',
+    'uint8',
+    'uint16',
+    'uint32',
+    'uint64',
+    'float',
+    'float32',
+    'float64',
+    'string',
+    'bool',
+    'mixed',
+    'List',
+    'Dictionary',
+    'Set',
+    'Bytes',
+    'SharedReference',
+    'WeakReference',
+    'WritableSharedReference',
+    'WritableWeakReference',
+    'ReadonlySharedReferenceAccess',
+    'WritableSharedReferenceAccess',
+];
 $wordOperators = ['not', 'and', 'or', 'xor'];
 $stage13SymbolOperators = [
     '-',
@@ -163,7 +269,7 @@ $rejectedPreprocessor = [
     'warning',
     'error',
 ];
-$rejectedKeywords = ['goto', 'require', 'require_once', 'include_once', 'print'];
+$rejectedKeywords = ['goto', 'require', 'require_once', 'include_once', 'print', 'instanceof'];
 $strictComparison = ['===', '!=='];
 $notKeywords = ['public', 'private', 'protected', 'Result', 'object'];
 function fail_check(string $message): never
@@ -255,7 +361,7 @@ function regex_fully_matches(string $pattern, string $subject): bool
 
 function check_vscode_package(): void
 {
-    global $vscodePackage;
+    global $vscodePackage, $vscodeIcon, $doriaLogo;
 
     $package = load_json($vscodePackage);
     require_check(
@@ -274,6 +380,83 @@ function check_vscode_package(): void
         ),
         'VS Code package.json must map doria/source.doria to ./syntaxes/doria.tmLanguage.json'
     );
+    $languages = $package['contributes']['languages'] ?? [];
+    require_check(
+        any_match(
+            $languages,
+            static fn (mixed $language): bool => is_array($language)
+                && ($language['id'] ?? null) === 'doria'
+                && ($language['icon']['light'] ?? null) === './icons/doria.svg'
+                && ($language['icon']['dark'] ?? null) === './icons/doria.svg'
+        ),
+        'VS Code must associate .doria files with the canonical Doria icon'
+    );
+    require_check(is_file($vscodeIcon), 'VS Code must package icons/doria.svg');
+    require_check(
+        rtrim(read_text($vscodeIcon)) === rtrim(read_text($doriaLogo)),
+        'VS Code file icon must use the canonical Doria README SVG'
+    );
+    $debuggers = $package['contributes']['debuggers'] ?? [];
+    require_check(
+        any_match(
+            $debuggers,
+            static fn (mixed $debugger): bool => is_array($debugger)
+                && ($debugger['type'] ?? null) === 'doria'
+                && in_array('doria', $debugger['languages'] ?? [], true)
+                && ($debugger['initialConfigurations'][0]['mode'] ?? null) === 'project'
+                && ($debugger['initialConfigurations'][0]['noDebug'] ?? null) === true
+        )
+        && in_array('onDebug:doria', $package['activationEvents'] ?? [], true)
+        && isset($package['contributes']['configuration']['properties']['doria.baton.path'])
+        && isset($package['contributes']['configuration']['properties']['doria.compiler.path']),
+        'VS Code must contribute a Doria launch profile that defaults to Baton project execution'
+    );
+
+    $defaults = $package['contributes']['configurationDefaults']['[doria]'] ?? [];
+    require_check(
+        ($defaults['editor.insertSpaces'] ?? null) === true &&
+            ($defaults['editor.tabSize'] ?? null) === 4 &&
+            ($defaults['editor.detectIndentation'] ?? null) === true &&
+            ($defaults['editor.wordWrapColumn'] ?? null) === 120,
+        'VS Code must provide the PHP-shaped Doria editor defaults without overriding user or workspace settings'
+    );
+}
+
+function check_vscode_language_server_packaging(): void
+{
+    global $vscodeExtension, $vscodeDebugSupport, $vscodeLauncherPath, $vscodeServerPath, $buildScript;
+
+    $extension = read_text($vscodeExtension);
+    $debugSupport = read_text($vscodeDebugSupport);
+    $launcherResolver = read_text($vscodeLauncherPath);
+    $resolver = read_text($vscodeServerPath);
+    $builder = read_text($buildScript);
+
+    require_check(
+        str_contains($extension, 'require("./server-path")')
+            && str_contains($extension, 'resolution.rejectedPaths'),
+        'VS Code client must use the tested server resolver and report ignored stale overrides'
+    );
+    require_check(
+        str_contains($resolver, 'path.join(extensionPath, "bin", executable)')
+            && str_contains($resolver, 'pathExists(resolved)')
+            && str_contains($resolver, 'source: "bundled"'),
+        'VS Code server resolution must ignore missing overrides and load the bundled native server'
+    );
+    require_check(
+        str_contains($builder, 'build_server($root, true, $compilerPath)')
+            && str_contains($builder, "install_executable(\$server, \$bundledServer)")
+            && str_contains($builder, "'--target', vscode_target()"),
+        'VS Code packaging must build, bundle, and platform-target doria-lsp'
+    );
+    require_check(
+        str_contains($extension, 'registerDebugConfigurationProvider')
+            && str_contains($extension, 'registerDebugAdapterDescriptorFactory')
+            && str_contains($extension, 'resolveBatonPath')
+            && str_contains($debugSupport, 'findBatonProjectRoot')
+            && str_contains($launcherResolver, 'executableName: "baton"'),
+        'VS Code must resolve Baton projects and register the Doria launch adapter'
+    );
 }
 
 function check_vscode_language_configuration(): void
@@ -285,6 +468,44 @@ function check_vscode_language_configuration(): void
         $json = json_encode($config[$key] ?? null, JSON_THROW_ON_ERROR);
         require_check(str_contains($json, '#[') && str_contains($json, ']'), 'VS Code language configuration must include #[...] behavior in ' . $key);
     }
+
+    require_check(
+        isset($config['indentationRules']['increaseIndentPattern'], $config['indentationRules']['decreaseIndentPattern']),
+        'VS Code language configuration must define Doria indentation rules'
+    );
+    require_check(
+        any_match(
+            $config['onEnterRules'] ?? [],
+            static fn (mixed $rule): bool => is_array($rule) &&
+                ($rule['action']['appendText'] ?? null) === ' * '
+        ),
+        'VS Code language configuration must continue PHP-style documentation comments'
+    );
+    foreach ([
+        ['^.*\\([^\\)]*$', '^\\s*\\).*$'],
+        ['^.*\\{[^\\}]*$', '^\\s*\\}.*$'],
+        ['^.*\\[[^\\]]*$', '^\\s*\\].*$'],
+    ] as [$beforeText, $afterText]) {
+        require_check(
+            any_match(
+                $config['onEnterRules'] ?? [],
+                static fn (mixed $rule): bool => is_array($rule)
+                    && ($rule['beforeText'] ?? null) === $beforeText
+                    && ($rule['afterText'] ?? null) === $afterText
+                    && ($rule['action']['indent'] ?? null) === 'indentOutdent'
+                    && !array_key_exists('appendText', $rule['action'])
+            ),
+            'VS Code delimiter Enter rules must defer indentation text to editor settings'
+        );
+    }
+    require_check(
+        !any_match(
+            $config['onEnterRules'] ?? [],
+            static fn (mixed $rule): bool => is_array($rule)
+                && ($rule['action']['appendText'] ?? null) === '\\t'
+        ),
+        'VS Code Enter rules must not insert a literal escaped tab'
+    );
 }
 
 function check_vscode_grammar(): void
@@ -313,6 +534,63 @@ function check_vscode_grammar(): void
     require_check(
         str_contains($grammarText, 'keyword.declaration.implements.doria'),
         'VS Code must scope active implements syntax as a declaration keyword'
+    );
+    require_check(
+        str_contains($grammarText, 'keyword.operator.type-test.doria'),
+        'VS Code must scope the Stage 22 is operator as a type-test operator'
+    );
+    foreach ([
+        'keyword.declaration.constant.doria',
+        'constant.other.doria',
+        'constant.other.class.doria',
+        'storage.modifier.static.doria',
+        'variable.language.class-context.doria',
+        'variable.other.property.static.doria',
+        'entity.name.function.static.doria',
+        'invalid.illegal.sigil.static-access.doria',
+    ] as $scope) {
+        require_check(str_contains($grammarText, $scope), "VS Code grammar is missing Stage 20 scope '{$scope}'");
+    }
+    $staticAccessorPatterns = $grammar['repository']['accessors']['patterns'] ?? [];
+    $staticMethodPatterns = [];
+    $classConstantPatterns = [];
+    $staticPropertyPatterns = [];
+    foreach ($staticAccessorPatterns as $pattern) {
+        $capture = $pattern['captures']['2']['name'] ?? null;
+        if ($capture === 'entity.name.function.static.doria') {
+            $staticMethodPatterns[] = (string) ($pattern['match'] ?? '');
+        } elseif ($capture === 'constant.other.class.doria') {
+            $classConstantPatterns[] = (string) ($pattern['match'] ?? '');
+        } elseif ($capture === 'variable.other.property.static.doria') {
+            $staticPropertyPatterns[] = (string) ($pattern['match'] ?? '');
+        }
+    }
+    require_check(
+        any_match($staticMethodPatterns, static fn (string $match): bool => regex_matches($match, '::nextId(')),
+        'VS Code must classify a parenthesized :: member as a static method'
+    );
+    require_check(
+        any_match($classConstantPatterns, static fn (string $match): bool => regex_matches($match, '::MAX_DEPTH')) &&
+            !any_match($classConstantPatterns, static fn (string $match): bool => regex_matches($match, '::nextId(')),
+        'VS Code must classify non-call :: members as class constants without swallowing static methods'
+    );
+    require_check(
+        any_match($staticPropertyPatterns, static fn (string $match): bool => regex_matches($match, '::next')) &&
+            any_match($staticPropertyPatterns, static fn (string $match): bool => regex_matches($match, '::age')) &&
+            !any_match($staticPropertyPatterns, static fn (string $match): bool => regex_matches($match, '::MAX_DEPTH')) &&
+            !any_match($staticPropertyPatterns, static fn (string $match): bool => regex_matches($match, '::$age')),
+        'VS Code must classify lowercase ::name as static-property access without swallowing class constants'
+    );
+
+    $invalidStaticSigilMatches = [];
+    foreach ($patterns as $pattern) {
+        if (($pattern['captures']['3']['name'] ?? null) === 'invalid.illegal.sigil.static-access.doria') {
+            $invalidStaticSigilMatches[] = (string) ($pattern['match'] ?? '');
+        }
+    }
+    require_check(
+        any_match($invalidStaticSigilMatches, static fn (string $match): bool => regex_matches($match, '::$age')),
+        'VS Code must mark only the PHP-style static-property sigil invalid'
     );
 
     $tokens = array_unique([...$acceptedKeywords, ...$primitiveTypes, ...$reservedTypes, ...$plannedTypes, ...$wordOperators]);
@@ -512,14 +790,36 @@ function check_vscode_grammar(): void
     ] as $scope) {
         require_check(str_contains($grammarText, $scope), "VS Code grammar is missing '{$scope}'");
     }
+    $attributeExpressionPatterns = $grammar['repository']['attributeExpression']['patterns'] ?? [];
     $attributeIncludes = [];
-    foreach ($attributePatterns as $attributePattern) {
-        foreach (($attributePattern['patterns'] ?? []) as $pattern) {
-            if (is_array($pattern) && array_key_exists('include', $pattern)) {
-                $attributeIncludes[] = $pattern['include'];
-            }
+    foreach ($attributeExpressionPatterns as $pattern) {
+        if (is_array($pattern) && array_key_exists('include', $pattern)) {
+            $attributeIncludes[] = $pattern['include'];
         }
     }
+    require_check(
+        any_match(
+            $attributePatterns[0]['patterns'] ?? [],
+            static fn (mixed $pattern): bool => is_array($pattern) &&
+                ($pattern['include'] ?? null) === '#attributeExpression'
+        ),
+        'VS Code attributes must use the shared attribute-expression grammar'
+    );
+    require_check(
+        in_array('#attributeBrackets', $attributeIncludes, true),
+        'VS Code attribute expressions must recognize nested list and dictionary brackets'
+    );
+    $attributeBracketPatterns = $grammar['repository']['attributeBrackets'] ?? [];
+    require_check(
+        ($attributeBracketPatterns['begin'] ?? null) === '\\[' &&
+            ($attributeBracketPatterns['end'] ?? null) === '\\]' &&
+            any_match(
+                $attributeBracketPatterns['patterns'] ?? [],
+                static fn (mixed $pattern): bool => is_array($pattern) &&
+                    ($pattern['include'] ?? null) === '#attributeExpression'
+            ),
+        'VS Code nested attribute brackets must recursively reuse the attribute-expression grammar'
+    );
     $invalidIndex = array_search('#invalid', $attributeIncludes, true);
     $operatorsIndex = array_search('#operators', $attributeIncludes, true);
     require_check($invalidIndex !== false, 'VS Code attribute context must include invalid syntax patterns');
@@ -534,11 +834,22 @@ function check_intellij_lexer(): void
 {
     global $acceptedKeywords, $primitiveTypes, $reservedTypes, $plannedTypes, $wordOperators, $stage13SymbolOperators, $booleanSymbolOperators;
     global $notKeywords, $strictComparison, $rejectedPreprocessor, $rejectedKeywords, $rejectedTypes;
-    global $intellijLexer, $intellijBuildGradle, $intellijTokenTypes, $intellijSyntaxHighlighter, $intellijPluginXml, $intellijPluginIcon, $doriaLogo;
+    global $buildScript, $intellijLexer, $intellijLanguage, $intellijBuildGradle, $intellijTokenTypes, $intellijSyntaxHighlighter, $intellijLexerTest, $intellijCodeStyleProvider, $intellijFormatter, $intellijParser, $intellijFormatterTest, $intellijPluginXml, $intellijPluginIcon, $doriaLogo;
 
+    $intellijBuildText = read_text($intellijBuildGradle);
     require_check(
-        str_contains(read_text($intellijBuildGradle), "version = '2026.03.1-canary'"),
+        str_contains($intellijBuildText, "version = '2026.03.1-canary'"),
         'IntelliJ package must carry the pre-1.0 Doria CalVer canary suffix'
+    );
+    require_check(
+        str_contains($intellijBuildText, "tasks.register('cleanPluginDistributions', Delete)")
+            && str_contains($intellijBuildText, 'dependsOn cleanPluginDistributions')
+            && str_contains($intellijBuildText, 'doria-intellij-plugin-${project.version}.zip'),
+        'IntelliJ buildPlugin must remove stale distributions and produce one clearly named plugin ZIP'
+    );
+    require_check(
+        str_contains(read_text($buildScript), 'if (count($artifacts) !== 1)'),
+        'repository build wrapper must reject ambiguous IntelliJ plugin ZIP output'
     );
 
     $lexerText = read_text($intellijLexer);
@@ -667,6 +978,29 @@ function check_intellij_lexer(): void
             str_contains($lexerText, 'DoriaTokenTypes.ATTRIBUTE_ARGUMENT'),
         'IntelliJ lexer must emit dedicated attribute tokens'
     );
+    $lexerTestText = read_text($intellijLexerTest);
+    require_check(
+        str_contains($lexerTestText, 'testNestedAttributeBracketsDoNotCloseTheAttributeEarly') &&
+            str_contains($lexerTestText, 'tokens.count { it.type == DoriaTokenTypes.BRACKET }'),
+        'IntelliJ lexer tests must preserve nested attribute brackets until the outer attribute delimiter'
+    );
+    require_check(
+        str_contains($lexerText, 'isConstantName(text) -> DoriaTokenTypes.CLASS_CONSTANT') &&
+            str_contains($lexerText, 'isConstantDeclaration()') &&
+            str_contains($lexerText, 'CONSTANT_REFERENCE_NAME.matches(text)'),
+        'IntelliJ lexer must distinguish class/top-level constants from static calls and type names'
+    );
+    require_check(
+        str_contains($lexerText, 'isStaticPropertyName(text) -> DoriaTokenTypes.STATIC_PROPERTY') &&
+            str_contains($lexerText, 'previousAccessor() == "::" && !isCallName()') &&
+            str_contains($lexerText, 'isStaticPropertyDeclaration() -> DoriaTokenTypes.STATIC_PROPERTY') &&
+            str_contains($lexerText, 'DoriaTokenTypes.STATIC_PROPERTY'),
+        'IntelliJ lexer must distinguish static properties from ordinary variables'
+    );
+    require_check(
+        str_contains($lexerText, 'previousAccessor() == "::" -> DoriaTokenTypes.INVALID'),
+        'IntelliJ lexer must mark the PHP static-access sigil invalid'
+    );
     require_check(
         str_contains($lexerText, "private fun isCallName(): Boolean = nextNonWhitespace(tokenEnd) == '('") &&
             str_contains($lexerText, 'isCallName() -> callableTokenType()') &&
@@ -701,6 +1035,80 @@ function check_intellij_lexer(): void
         str_contains($pluginXml, 'language=' . chr(34) . 'doria' . chr(34)),
         'IntelliJ plugin must register the lowercase doria language id for Markdown fences'
     );
+    require_check(
+        !str_contains($pluginXml, '<annotator')
+            && !str_contains($intellijHighlightingText, 'DORIA_UNUSED_VARIABLE'),
+        'IntelliJ syntax presentation must not guess unused symbols without semantic resolution'
+    );
+    $languageText = read_text($intellijLanguage);
+    require_check(
+        str_contains($languageText, 'Language("doria")') &&
+            str_contains($languageText, 'getDisplayName(): String = "Doria"'),
+        'IntelliJ must keep the lowercase doria language id while presenting the Doria display name'
+    );
+    require_check(
+        str_contains($pluginXml, '<langCodeStyleSettingsProvider') &&
+            str_contains($pluginXml, 'dev.doria.intellij.codestyle.DoriaLanguageCodeStyleSettingsProvider'),
+        'IntelliJ plugin must register the Doria code-style settings provider'
+    );
+    $codeStyleText = read_text($intellijCodeStyleProvider);
+    foreach ([
+        'getLanguageName(): String = "Doria"',
+        'getIndentOptionsEditor(): IndentOptionsEditor = SmartIndentOptionsEditor()',
+        'override fun createConfigurable(',
+        'TabbedLanguageCodeStylePanel(',
+        'INDENT_SIZE = 4',
+        'CONTINUATION_INDENT_SIZE = 4',
+        'TAB_SIZE = 4',
+        'USE_TAB_CHARACTER = false',
+        'RIGHT_MARGIN = 120',
+        'CLASS_BRACE_STYLE = CommonCodeStyleSettings.NEXT_LINE',
+        'METHOD_BRACE_STYLE = CommonCodeStyleSettings.NEXT_LINE',
+    ] as $default) {
+        require_check(
+            str_contains($codeStyleText, $default),
+            "IntelliJ Doria code-style defaults are missing '{$default}'"
+        );
+    }
+    require_check(
+        str_contains($pluginXml, '<lang.formatter') &&
+            str_contains($pluginXml, 'dev.doria.intellij.codestyle.DoriaFormattingModelBuilder'),
+        'IntelliJ plugin must register the Doria formatting model'
+    );
+    $formatterText = read_text($intellijFormatter);
+    foreach ([
+        'getCommonSettings(DoriaLanguage)',
+        'getLanguageIndentOptions(DoriaLanguage)',
+        'SPACE_WITHIN_METHOD_CALL_PARENTHESES',
+        'SPACE_WITHIN_METHOD_PARENTHESES',
+        'SPACE_BEFORE_COMMA',
+        'SPACE_BEFORE_SEMICOLON',
+        'DoriaElementTypes.BLOCK',
+        'DoriaElementTypes.PARENTHESIZED',
+        'DoriaElementTypes.BRACKETED',
+    ] as $formatterBehavior) {
+        require_check(
+            str_contains($formatterText, $formatterBehavior),
+            "IntelliJ formatter is missing '{$formatterBehavior}'"
+        );
+    }
+    $parserText = read_text($intellijParser);
+    require_check(
+        str_contains($parserText, 'builder.tokenType == closingType') &&
+            str_contains($parserText, 'builder.tokenText == closing'),
+        'IntelliJ delimiter grouping must match token type and text so interpolation braces cannot close code blocks'
+    );
+    $formatterTestText = read_text($intellijFormatterTest);
+    foreach ([
+        'testIndentOptionsDriveReformatting',
+        'testSpacingAndBraceSettingsDriveReformatting',
+        'testTabsAndLanguageBoundariesRemainSemantic',
+    ] as $formatterTest) {
+        require_check(
+            str_contains($formatterTestText, $formatterTest),
+            "IntelliJ formatter regression coverage is missing '{$formatterTest}'"
+        );
+    }
     require_check(is_file($intellijPluginIcon), 'IntelliJ plugin must package META-INF/pluginIcon.svg');
     require_check(
         rtrim(read_text($intellijPluginIcon)) === rtrim(read_text($doriaLogo)),
@@ -717,14 +1125,180 @@ function check_intellij_lexer(): void
         'DORIA_ATTRIBUTE_DELIMITER',
         'DORIA_ATTRIBUTE_NAME',
         'DORIA_ATTRIBUTE_ARGUMENT',
+        'DORIA_TYPE_TEST_OPERATOR',
         'DORIA_LOGICAL_OPERATOR',
         'DORIA_PROPERTY',
         'DORIA_FUNCTION_CALL',
         'DORIA_METHOD_CALL',
         'DORIA_STATIC_METHOD_CALL',
+        'DORIA_CLASS_CONSTANT',
+        'DORIA_STATIC_PROPERTY',
     ] as $tokenType) {
         require_check(str_contains($intellijHighlightingText, $tokenType), "IntelliJ highlighting is missing {$tokenType}");
     }
+}
+
+function check_lsp_completion_vocabulary(): void
+{
+    global $acceptedKeywords, $plannedKeywords, $primitiveTypes, $reservedTypes, $plannedTypes, $wordOperators, $notKeywords, $lspServer, $lspSupportedTypes, $rejectedTypes;
+    global $implementedIntegerTypes, $implementedStage14ScalarTypes;
+
+    $lspText = read_text($lspServer);
+    $tokens = array_unique([...$acceptedKeywords, ...$wordOperators]);
+    sort($tokens);
+    foreach ($tokens as $token) {
+        require_check(str_contains($lspText, chr(34) . $token . chr(34)), 'LSP completion list is missing ' . $token);
+    }
+
+    foreach ($plannedKeywords as $keyword) {
+        require_check(str_contains($lspText, chr(34) . $keyword . chr(34)), 'LSP completion list is missing planned keyword ' . $keyword);
+    }
+    require_check(str_contains($lspText, 'planned Doria keyword'), 'LSP planned keyword completions must be clearly marked as planned');
+    require_check(
+        str_contains($lspText, 'Accepted planned Doria syntax; compiler support lands in a later stage.'),
+        'LSP planned keyword completions must explain that compiler support lands later'
+    );
+
+    require_check(
+        preg_match('/let types = \[(.*?)\];/s', $lspText, $matches) === 1,
+        'LSP completion type list could not be found'
+    );
+    $lspTypeList = $matches[1];
+
+    require_check(
+        preg_match('/let reserved_types = \[(.*?)\];/s', $lspText, $reservedMatches) === 1,
+        'LSP completion reserved type list could not be found'
+    );
+    $lspReservedTypeList = $reservedMatches[1];
+
+    sort($lspSupportedTypes);
+    foreach ($lspSupportedTypes as $type) {
+        require_check(str_contains($lspTypeList, chr(34) . $type . chr(34)), 'LSP completion type list is missing ' . $type);
+    }
+
+    foreach ($implementedIntegerTypes as $type) {
+        require_check(
+            str_contains($lspTypeList, chr(34) . $type . chr(34)),
+            'LSP must classify Stage 13 integer type ' . $type . ' as implemented'
+        );
+    }
+    require_check(
+        str_contains($lspText, '`int` is an exact alias for `int64`'),
+        'LSP completion or hover text must document int as the exact int64 alias'
+    );
+
+    foreach ($implementedStage14ScalarTypes as $type) {
+        require_check(
+            str_contains($lspTypeList, chr(34) . $type . chr(34)),
+            'LSP must classify Stage 14 scalar type ' . $type . ' as implemented'
+        );
+    }
+    require_check(
+        str_contains($lspText, 'exact alias of `float64`'),
+        'LSP completion or hover text must document float as the exact float64 alias'
+    );
+
+    sort($reservedTypes);
+    foreach ($reservedTypes as $type) {
+        require_check(str_contains($lspReservedTypeList, chr(34) . $type . chr(34)), 'LSP completion reserved type list is missing ' . $type);
+        require_check(!str_contains($lspTypeList, chr(34) . $type . chr(34)), 'LSP completion type list must not advertise reserved type ' . $type);
+    }
+
+    foreach ($rejectedTypes as $type) {
+        require_check(!str_contains($lspTypeList, chr(34) . $type . chr(34)), 'LSP completion type list must not advertise rejected type ' . $type);
+        require_check(!str_contains($lspReservedTypeList, chr(34) . $type . chr(34)), 'LSP completion reserved type list must not advertise rejected type ' . $type);
+    }
+
+    $unsupportedTypes = array_diff(array_unique([...$primitiveTypes, ...$plannedTypes]), $lspSupportedTypes);
+    sort($unsupportedTypes);
+    foreach ($unsupportedTypes as $type) {
+        require_check(!str_contains($lspTypeList, chr(34) . $type . chr(34)), 'LSP completion type list must not advertise unsupported type ' . $type);
+    }
+
+    foreach (['Int', 'Int8', 'Int16', 'Int32', 'Int64', 'UInt8', 'UInt16', 'UInt32', 'UInt64'] as $companion) {
+        require_check(
+            str_contains($lspText, chr(34) . $companion . '::from' . chr(34)),
+            'LSP completion list is missing ' . $companion . '::from'
+        );
+    }
+    require_check(
+        str_contains($lspText, 'Doria integer conversion intrinsic') &&
+            str_contains($lspText, 'Out-of-range conversion panics'),
+        'LSP must provide completion and hover details for explicit integer conversions'
+    );
+    foreach (['Int::toFloat', 'Float::toInt'] as $intrinsic) {
+        require_check(
+            str_contains($lspText, chr(34) . $intrinsic . chr(34)),
+            'LSP completion list is missing ' . $intrinsic
+        );
+    }
+    require_check(
+        str_contains($lspText, 'Doria scalar conversion intrinsic'),
+        'LSP must provide completion and hover details for Stage 14 scalar conversions'
+    );
+
+    sort($notKeywords);
+    foreach ($notKeywords as $token) {
+        require_check(!str_contains($lspText, chr(34) . $token . chr(34)), 'LSP completion list must not advertise ' . $token);
+    }
+}
+
+function check_intellij_class_name_vocabulary(): void
+{
+    global $acceptedKeywords, $plannedKeywords, $primitiveTypes, $reservedTypes, $wordOperators, $rejectedKeywords;
+    global $intellijCreateClassAction;
+
+    $actionText = read_text($intellijCreateClassAction);
+    require_check(
+        preg_match('/DORIA_RESERVED_NAME_SEGMENTS = setOf\((.*?)\n\s*\)/s', $actionText, $segmentMatches) === 1,
+        'IntelliJ class workflow reserved-name vocabulary could not be found'
+    );
+    require_check(
+        preg_match('/DORIA_RESERVED_CLASS_NAMES = setOf\((.*?)\n\s*\)/s', $actionText, $classMatches) === 1,
+        'IntelliJ class workflow reserved class-name vocabulary could not be found'
+    );
+
+    $reservedSegments = array_unique([
+        ...$acceptedKeywords,
+        ...$plannedKeywords,
+        ...$primitiveTypes,
+        ...$reservedTypes,
+        ...$wordOperators,
+        ...$rejectedKeywords,
+        'static',
+        'spawn',
+        'scope',
+        'is',
+        'array',
+        'object',
+    ]);
+    foreach ($reservedSegments as $name) {
+        require_check(
+            str_contains($segmentMatches[1], '"' . $name . '"'),
+            'IntelliJ class workflow must reject reserved Doria name ' . $name
+        );
+    }
+
+    foreach ([
+        'Int', 'Int8', 'Int16', 'Int32', 'Int64',
+        'UInt8', 'UInt16', 'UInt32', 'UInt64',
+        'Float', 'Float32', 'Float64', 'Bool', 'Displayable',
+    ] as $name) {
+        require_check(
+            str_contains($classMatches[1], '"' . $name . '"'),
+            'IntelliJ class workflow must reject compiler-reserved class name ' . $name
+        );
+    }
+    require_check(
+        str_contains($actionText, "fun isDoriaQualifiedClassName")
+            && str_contains($actionText, "isDoriaClassName(segments.last())"),
+        'IntelliJ class workflow must validate the terminal qualified type-name segment as a class name'
+    );
+    require_check(
+        str_contains($actionText, "if (!isDoriaQualifiedInterfaceName(interfaceName))")
+            && str_contains($actionText, 'value == "Displayable" || isDoriaQualifiedClassName(value)'),
+        'IntelliJ class workflow must accept Displayable in the interface picker without allowing it as a class name'
+    );
 }
 
 function check_editor_fixture_diagnostics_are_skipped(): void
@@ -751,6 +1325,16 @@ function check_fixture(): void
     $fixtureText = read_text($fixture);
     $requiredSnippets = [
         'internal',
+        'const DEFAULT_LIMIT = 25;',
+        'const int HARD_LIMIT = 100;',
+        'internal const MAX_DEPTH = DEFAULT_LIMIT * 4;',
+        'static int $initial = 0;',
+        'static writable int $next = 1;',
+        'internal static string $label = "parser";',
+        'self::next += self::MAX_DEPTH;',
+        'ParserLimits::nextId()',
+        'ParserLimits::next;',
+        'ParserLimits::MAX_DEPTH',
         'uses HasSlug, TracksChanges;',
         'with ($base)',
         'with (take $resource)',
@@ -764,6 +1348,9 @@ function check_fixture(): void
         'extern',
         '#[PhpExport]',
         '#[App\Routing\Route(path: "/parser", name: "parser.show")]',
+        'imports: [',
+        'ORMModule::forRoot(',
+        'entities: [],',
         '0..<10',
         '0..10',
         'float32 $delta = 0.016;',
@@ -789,6 +1376,8 @@ function check_fixture(): void
         'ReportFormatter::formatReport($customResult)',
         'new App\Report()',
         '?User',
+        'if ($metadata is string)',
+        '$maybeUser?->name ?? "anonymous"',
         '\n\t\r\s',
         'use App\Repositories\UserRepository;',
         'get_time()',
@@ -796,6 +1385,15 @@ function check_fixture(): void
         'Int::wrappingAdd(1, 2)',
         '$name->isEmpty()',
         '$message->retryAfter(seconds: 30)',
+        // Stage 23a named arguments across all four callable forms.
+        'scheduleDelivery(recipient: $name, attempts: 3)',
+        '$message->deliver(attempts: 2, recipient: $name)',
+        'MessageFactory::create(recipient: $name, attempts: 1)',
+        'new Message(attempts: 5, recipient: $name)',
+        // Stage 23b program entry arguments.
+        'function main(List<string> $args): void',
+        // Stage 23c sequence fill literal.
+        'let $runtimeSizedFlags = [true; $args->count];',
         '$message->tenantId',
         '$repository->findById($id)',
     ];
@@ -877,9 +1475,12 @@ function check_fixture(): void
 function main(): int
 {
     check_vscode_package();
+    check_vscode_language_server_packaging();
     check_vscode_language_configuration();
     check_vscode_grammar();
     check_intellij_lexer();
+    check_intellij_class_name_vocabulary();
+    check_lsp_completion_vocabulary();
     check_editor_fixture_diagnostics_are_skipped();
     check_fixture();
     echo "Doria editor highlighting checks passed.\n";

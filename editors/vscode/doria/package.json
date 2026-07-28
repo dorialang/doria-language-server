@@ -1,20 +1,34 @@
 {
   "name": "doria-language-support",
   "displayName": "Doria Language Support",
-  "description": "Syntax highlighting and language server diagnostics for .doria files.",
+  "description": "Syntax highlighting, language server features, and launch profiles for .doria files.",
   "version": "2026.3.1-canary",
   "doriaToolchainVersion": "2026.03.1-canary",
   "publisher": "doria",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dorialang/doria-language-server.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
-    "Programming Languages"
+    "Programming Languages",
+    "Debuggers"
   ],
   "activationEvents": [
-    "onLanguage:doria"
+    "onLanguage:doria",
+    "onDebug:doria"
   ],
   "main": "./extension.js",
+  "scripts": {
+    "check": "node --check extension.js && node --check launcher-path.js && node --check debug-support.js && node --check server-path.js && node --test test/*.test.js",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "3.9.2"
+  },
   "contributes": {
     "languages": [
       {
@@ -26,7 +40,11 @@
         "extensions": [
           ".doria"
         ],
-        "configuration": "./language-configuration.json"
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/doria.svg",
+          "dark": "./icons/doria.svg"
+        }
       }
     ],
     "grammars": [
@@ -36,13 +54,133 @@
         "path": "./syntaxes/doria.tmLanguage.json"
       }
     ],
+    "debuggers": [
+      {
+        "type": "doria",
+        "label": "Doria",
+        "languages": [
+          "doria"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "project",
+                  "standalone"
+                ],
+                "enumDescriptions": [
+                  "Run the Baton project containing the active file.",
+                  "Run one source file directly through doriac."
+                ],
+                "description": "Select project-aware Baton execution or standalone compiler execution.",
+                "default": "project"
+              },
+              "program": {
+                "type": "string",
+                "description": "Doria source file to run in standalone mode.",
+                "default": "${file}"
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Working directory for the Doria program.",
+                "default": "${workspaceFolder}"
+              },
+              "args": {
+                "type": "array",
+                "description": "Arguments passed to the Doria program.",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "release": {
+                "type": "boolean",
+                "description": "Run with Doria's optimized LLVM release profile.",
+                "default": false
+              },
+              "env": {
+                "type": "object",
+                "description": "Environment variables passed to the Doria program.",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "default": {}
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "doria",
+            "request": "launch",
+            "name": "Run Doria project",
+            "mode": "project",
+            "cwd": "${workspaceFolder}",
+            "args": [],
+            "release": false,
+            "noDebug": true
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Doria: Run project",
+            "description": "Run the current Doria project through Baton in the integrated terminal.",
+            "body": {
+              "type": "doria",
+              "request": "launch",
+              "name": "Run Doria project",
+              "mode": "project",
+              "cwd": "${workspaceFolder}",
+              "args": [],
+              "release": false,
+              "noDebug": true
+            }
+          },
+          {
+            "label": "Doria: Run standalone file",
+            "description": "Run the active Doria source file directly through doriac.",
+            "body": {
+              "type": "doria",
+              "request": "launch",
+              "name": "Run standalone Doria file",
+              "mode": "standalone",
+              "program": "${file}",
+              "cwd": "${workspaceFolder}",
+              "args": [],
+              "release": false,
+              "noDebug": true
+            }
+          }
+        ]
+      }
+    ],
+    "configurationDefaults": {
+      "[doria]": {
+        "editor.insertSpaces": true,
+        "editor.tabSize": 4,
+        "editor.detectIndentation": true,
+        "editor.wordWrapColumn": 120
+      }
+    },
     "configuration": {
       "title": "Doria",
       "properties": {
         "doria.languageServer.path": {
           "type": "string",
           "default": "",
-          "description": "Path to the doria-lsp executable. Leave empty to use DORIA_LSP_PATH, workspace target/debug/doria-lsp, or doria-lsp from PATH."
+          "description": "Path to the doria-lsp executable. Leave empty to use DORIA_LSP_PATH, workspace target/debug/doria-lsp, the bundled server, or doria-lsp from PATH."
+        },
+        "doria.compiler.path": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the doriac executable used by standalone-file launch profiles. Leave empty to use DORIAC_PATH, workspace target/debug/doriac, or doriac from PATH."
+        },
+        "doria.baton.path": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the baton executable used by project launch profiles. Leave empty to use BATON_PATH or baton from PATH."
         }
       }
     }

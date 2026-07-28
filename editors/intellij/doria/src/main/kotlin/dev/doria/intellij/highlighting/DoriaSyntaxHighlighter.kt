@@ -3,7 +3,6 @@ package dev.doria.intellij.highlighting
 import com.intellij.lexer.Lexer
 import com.intellij.openapi.editor.DefaultLanguageHighlighterColors
 import com.intellij.openapi.editor.HighlighterColors
-import com.intellij.openapi.editor.colors.CodeInsightColors
 import com.intellij.openapi.editor.colors.TextAttributesKey
 import com.intellij.openapi.fileTypes.SyntaxHighlighter
 import com.intellij.psi.tree.IElementType
@@ -13,6 +12,7 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
 
     override fun getTokenHighlights(tokenType: IElementType): Array<TextAttributesKey> = when (tokenType) {
         DoriaTokenTypes.KEYWORD -> KEYWORD_KEYS
+        DoriaTokenTypes.TYPE_TEST_OPERATOR -> TYPE_TEST_OPERATOR_KEYS
         DoriaTokenTypes.MODIFIER -> MODIFIER_KEYS
         DoriaTokenTypes.PRIMITIVE_TYPE -> PRIMITIVE_TYPE_KEYS
         DoriaTokenTypes.RESERVED_TYPE -> RESERVED_TYPE_KEYS
@@ -31,6 +31,8 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
         DoriaTokenTypes.FUNCTION_CALL -> FUNCTION_CALL_KEYS
         DoriaTokenTypes.METHOD_CALL -> METHOD_CALL_KEYS
         DoriaTokenTypes.STATIC_METHOD_CALL -> STATIC_METHOD_CALL_KEYS
+        DoriaTokenTypes.CLASS_CONSTANT -> CLASS_CONSTANT_KEYS
+        DoriaTokenTypes.STATIC_PROPERTY -> STATIC_PROPERTY_KEYS
         DoriaTokenTypes.IDENTIFIER -> IDENTIFIER_KEYS
         DoriaTokenTypes.VARIABLE -> VARIABLE_KEYS
         DoriaTokenTypes.PROPERTY -> PROPERTY_KEYS
@@ -57,6 +59,10 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
     companion object {
         val KEYWORD: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
             "DORIA_KEYWORD",
+            DefaultLanguageHighlighterColors.KEYWORD,
+        )
+        val TYPE_TEST_OPERATOR: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
+            "DORIA_TYPE_TEST_OPERATOR",
             DefaultLanguageHighlighterColors.KEYWORD,
         )
         val MODIFIER: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
@@ -131,6 +137,14 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
             "DORIA_STATIC_METHOD_CALL",
             DefaultLanguageHighlighterColors.FUNCTION_DECLARATION,
         )
+        val CLASS_CONSTANT: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
+            "DORIA_CLASS_CONSTANT",
+            DefaultLanguageHighlighterColors.CONSTANT,
+        )
+        val STATIC_PROPERTY: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
+            "DORIA_STATIC_PROPERTY",
+            DefaultLanguageHighlighterColors.STATIC_FIELD,
+        )
         val IDENTIFIER: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
             "DORIA_IDENTIFIER",
             DefaultLanguageHighlighterColors.IDENTIFIER,
@@ -146,10 +160,6 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
         val THIS: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
             "DORIA_THIS",
             DefaultLanguageHighlighterColors.INSTANCE_FIELD,
-        )
-        val UNUSED_VARIABLE: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
-            "DORIA_UNUSED_VARIABLE",
-            CodeInsightColors.NOT_USED_ELEMENT_ATTRIBUTES,
         )
         val CONSTANT: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
             "DORIA_CONSTANT",
@@ -214,6 +224,7 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
 
         private val EMPTY_KEYS = emptyArray<TextAttributesKey>()
         private val KEYWORD_KEYS = arrayOf(KEYWORD)
+        private val TYPE_TEST_OPERATOR_KEYS = arrayOf(TYPE_TEST_OPERATOR)
         private val MODIFIER_KEYS = arrayOf(MODIFIER)
         private val PRIMITIVE_TYPE_KEYS = arrayOf(PRIMITIVE_TYPE)
         private val RESERVED_TYPE_KEYS = arrayOf(RESERVED_TYPE)
@@ -232,6 +243,8 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
         private val FUNCTION_CALL_KEYS = arrayOf(FUNCTION_CALL)
         private val METHOD_CALL_KEYS = arrayOf(METHOD_CALL)
         private val STATIC_METHOD_CALL_KEYS = arrayOf(STATIC_METHOD_CALL)
+        private val CLASS_CONSTANT_KEYS = arrayOf(CLASS_CONSTANT)
+        private val STATIC_PROPERTY_KEYS = arrayOf(STATIC_PROPERTY)
         private val IDENTIFIER_KEYS = arrayOf(IDENTIFIER)
         private val VARIABLE_KEYS = arrayOf(VARIABLE)
         private val PROPERTY_KEYS = arrayOf(PROPERTY)

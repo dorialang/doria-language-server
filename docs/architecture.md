@@ -11,6 +11,8 @@ JetBrains client ------/                 lexer / parser / checker / diagnostics
 
 TextMate grammar ------> syntax presentation only
 JetBrains highlighter -> syntax presentation only
+
+VS Code launch profile -> baton run -> project entry selected from Baton.toml
 ```
 
 ## Ownership boundaries
@@ -24,10 +26,20 @@ The compiler owns tokenization, parsing, semantic and type checking, diagnostic 
 The server owns LSP transport, document state, UTF-16/UTF-8 position conversion, protocol capability negotiation, and conversion of compiler results into LSP diagnostics, completion, hover, and code actions.
 
 The server may organize IDE-friendly data but must not create a second semantic checker.
+Each open document has one versioned compiler-backed analysis snapshot containing
+diagnostics, symbols, and resolved source occurrences. Diagnostics and semantic
+features consume that shared snapshot so an individual hover request does not
+re-parse or re-check the document.
 
 ### Editor clients
 
-Clients start and supervise `doria-lsp`, translate native editor APIs to LSP where necessary, and provide local file registration and lightweight syntax presentation. Client-specific fallback behavior must remain presentation-only.
+Clients start and supervise `doria-lsp`, translate native editor APIs to LSP
+where necessary, and provide local file registration and lightweight syntax
+presentation. The VS Code client also maps project launch profiles onto
+`baton run`; Baton remains responsible for manifest discovery, entry-point
+selection, builds, and toolchain selection. Direct `doriac run` is reserved for
+an explicit standalone-file profile. Client-specific fallback behavior must
+remain presentation-only.
 
 ### Syntax highlighters
 
@@ -39,8 +51,11 @@ The TextMate grammar and IntelliJ lexer are deliberately local and fast. They cl
 
 Both editor implementations must be checked against the same fixtures and token inventory.
 
-## Server extraction
+## Compiler dependency
 
-The current server implementation remains in the compiler repository during the split. The extraction should move only the protocol layer and its tests. Compiler services stay in `doriac` and are consumed through a deliberate library dependency or stable compiler-service boundary.
+The standalone server depends on `doriac` at an exact Git commit recorded in `Cargo.toml` and `Cargo.lock`. Default compiler runtime bundling is disabled because the language server needs reusable frontend services, not native runtime artifacts.
 
-The coordinated compiler change should remove the old `doria-lsp` binary only after this repository builds, tests, and packages its replacement.
+Compiler updates are deliberate compatibility changes: update the pinned revision, run the complete server and editor validation, and confirm the advertised Doria toolchain version before release. The server source may adapt compiler diagnostics to LSP structures, but compiler-owned syntax and semantic behavior must stay in `doriac`.
+
+See [semantic-hover.md](semantic-hover.md) for the hover payload, fallback behavior,
+and the first semantic-navigation slice.
