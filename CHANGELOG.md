@@ -19,3 +19,7 @@ This project follows the Doria toolchain CalVer.
 - Fixed VS Code delimiter Enter rules so indentation follows the editor's spaces, tabs, and tab-size settings instead of inserting a literal `\t`.
 - Added VS Code Run and Debug launch profiles that default to `baton run` for
   projects, with explicit standalone-file execution through `doriac run`.
+- Removed IntelliJ's token-only unused-variable guess so referenced class
+  properties are no longer incorrectly dimmed.
+- Made IntelliJ builds produce exactly one clearly named installable plugin ZIP,
+  including builds invoked directly through Gradle.

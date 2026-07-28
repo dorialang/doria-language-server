@@ -456,6 +456,7 @@ impl<'a> SnapshotBuilder<'a> {
                 class_type,
                 args,
                 span,
+                ..
             } => {
                 for argument in args {
                     self.visit_expr(&argument.value, current_class, parent_class);

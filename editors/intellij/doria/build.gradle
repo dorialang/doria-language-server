@@ -39,3 +39,12 @@ tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile).configureEach
         jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21
     }
 }
+
+def cleanPluginDistributions = tasks.register('cleanPluginDistributions', Delete) {
+    delete layout.buildDirectory.dir('distributions')
+}
+
+tasks.named('buildPlugin') {
+    dependsOn cleanPluginDistributions
+    archiveFileName = "doria-intellij-plugin-${project.version}.zip"
+}

@@ -163,8 +163,8 @@ jobs:
       - name: Upload IntelliJ plugin
         uses: actions/upload-artifact@v7
         with:
-          name: doria-intellij
-          path: editors/intellij/doria/build/distributions/*.zip
+          name: doria-intellij-plugin
+          path: editors/intellij/doria/build/distributions/doria-intellij-plugin-*.zip
           if-no-files-found: error
 
   github-release:

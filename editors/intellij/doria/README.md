@@ -48,8 +48,18 @@ On Windows, use `.\gradlew.bat buildPlugin`. Use the checked-in wrapper instead 
 The packaged plugin will be written under:
 
 ```text
-build/distributions/
+build/distributions/doria-intellij-plugin-<version>.zip
 ```
+
+That is the only local build artifact to select in **Install Plugin from
+Disk**. Files under `build/libs/` are Gradle intermediates, not installable
+plugin packages. Every `buildPlugin` invocation removes obsolete distribution
+ZIPs first, so `build/distributions/` contains exactly one current plugin ZIP.
+
+GitHub Actions always wraps retained artifacts in a download ZIP. After
+downloading the `doria-intellij-plugin` Actions artifact, extract that outer
+container once and install the versioned plugin ZIP inside it. A plugin ZIP
+attached directly to a GitHub release can be installed without that extraction.
 
 ## Enable in RustRover or another JetBrains IDE
 

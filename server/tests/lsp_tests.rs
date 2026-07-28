@@ -197,6 +197,36 @@ class Counter
 }
 
 #[test]
+fn readonly_shared_ownership_has_no_false_diagnostics() {
+    let diagnostics = diagnostics_for_document(
+        "file:///shared.doria",
+        r#"
+class Node
+{
+    function __construct(string $name) {}
+}
+
+function inspect(SharedReference<Node> $node): void
+{
+    echo $node->name;
+}
+
+function main(): void
+{
+    let $root = shared new Node("root");
+    let $weak = $root->createWeakReference();
+    inspect($root->share());
+    let $live = $weak->acquire();
+    if ($live != null) {
+        inspect($live);
+    }
+}
+"#,
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
 fn duplicate_member_diagnostics_publish_the_original_declaration() {
     let uri = "file:///duplicate.doria";
     let text = "class Example { const FOO = 1; static int $FOO = 2; }";

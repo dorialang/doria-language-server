@@ -3,7 +3,6 @@ package dev.doria.intellij.highlighting
 import com.intellij.lexer.Lexer
 import com.intellij.openapi.editor.DefaultLanguageHighlighterColors
 import com.intellij.openapi.editor.HighlighterColors
-import com.intellij.openapi.editor.colors.CodeInsightColors
 import com.intellij.openapi.editor.colors.TextAttributesKey
 import com.intellij.openapi.fileTypes.SyntaxHighlighter
 import com.intellij.psi.tree.IElementType
@@ -161,10 +160,6 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
         val THIS: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
             "DORIA_THIS",
             DefaultLanguageHighlighterColors.INSTANCE_FIELD,
-        )
-        val UNUSED_VARIABLE: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
-            "DORIA_UNUSED_VARIABLE",
-            CodeInsightColors.NOT_USED_ELEMENT_ATTRIBUTES,
         )
         val CONSTANT: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
             "DORIA_CONSTANT",

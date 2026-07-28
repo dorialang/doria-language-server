@@ -279,11 +279,14 @@ function exerciseStage14Scalars(int $whole, bool $input): int
     return 0;
 }
 
-// Planned/future: ownership, sharing, and marker types from the master plan.
+// Stage 25a shared-ownership types plus planned marker types.
 function share(
-    Shared<User> $user,
-    Weak<User> $parent,
-    SharedMut<Cache> $cache,
+    SharedReference<User> $user,
+    WeakReference<User> $parent,
+    WritableSharedReference<Cache> $cache,
+    WritableWeakReference<Cache> $weakCache,
+    ReadonlySharedReferenceAccess<Cache> $readonlyAccess,
+    WritableSharedReferenceAccess<Cache> $writableAccess,
     Bytes $payload,
     Sendable $task,
     Shareable $handle,

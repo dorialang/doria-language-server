@@ -222,14 +222,6 @@ function build_vscode(string $root, ?string $compilerPath = null): void
 function build_intellij(string $root): void
 {
     $editor = $root . '/editors/intellij/doria';
-    // Remove prior plugin ZIPs first. Gradle's buildPlugin is incremental: when
-    // the plugin inputs are unchanged it reports the Zip task UP-TO-DATE and does
-    // not rewrite the version-stamped ZIP, so a stale artifact would linger and
-    // the newest-by-mtime glob below would report it as this run's output.
-    // Deleting the ZIP also makes the Zip task's output missing, so Gradle
-    // regenerates it.
-    remove_stale_artifacts($editor . '/build/distributions/*.zip');
-
     $gradle = PHP_OS_FAMILY === 'Windows' ? $editor . '/gradlew.bat' : $editor . '/gradlew';
     $command = PHP_OS_FAMILY === 'Windows'
         ? windows_command($gradle, ['buildPlugin', '--no-daemon'])
@@ -238,12 +230,10 @@ function build_intellij(string $root): void
     run_command($command, $editor);
 
     $artifacts = glob($editor . '/build/distributions/*.zip') ?: [];
-    usort(
-        $artifacts,
-        static fn (string $left, string $right): int => filemtime($right) <=> filemtime($left)
-    );
-    if ($artifacts === []) {
-        throw new RuntimeException('IntelliJ plugin build completed without producing a ZIP');
+    if (count($artifacts) !== 1) {
+        throw new RuntimeException(
+            'IntelliJ plugin build must produce exactly one ZIP; found ' . count($artifacts)
+        );
     }
 
     require_artifact($artifacts[0], 'IntelliJ plugin');

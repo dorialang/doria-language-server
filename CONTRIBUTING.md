@@ -42,6 +42,18 @@ cd editors/intellij/doria
 
 When changing the pinned `doriac` revision, run all Rust and editor checks and verify `doria-lsp --version` reports the intended canonical Doria toolchain release.
 
+## Build artifact storage
+
+Cargo reuses `target/` between builds but does not garbage-collect obsolete hashed artifacts. This repository therefore uses line-table debug information and disables incremental compilation for the test profile while leaving ordinary development builds incremental.
+
+Run the non-destructive size guard before and after a full Rust validation:
+
+```bash
+php scripts/check_cargo_target_size.php
+```
+
+The command exits nonzero when `target/` exceeds 15 GiB and never removes anything. Inspect an oversized directory with an appropriate disk-usage tool and use `cargo clean --dry-run` to preview Cargo's cleanup. Run `cargo clean` only as an intentional, approved maintenance action; cleaning after every build would discard useful artifacts and force unnecessary cold rebuilds.
+
 ## Pull requests
 
 Keep pull requests focused and include:

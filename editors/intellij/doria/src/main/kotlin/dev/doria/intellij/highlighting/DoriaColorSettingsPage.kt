@@ -96,7 +96,6 @@ class DoriaColorSettingsPage : ColorSettingsPage {
             AttributesDescriptor("Variable", DoriaSyntaxHighlighter.VARIABLE),
             AttributesDescriptor("Interpolated property", DoriaSyntaxHighlighter.PROPERTY),
             AttributesDescriptor("This", DoriaSyntaxHighlighter.THIS),
-            AttributesDescriptor("Unused variable", DoriaSyntaxHighlighter.UNUSED_VARIABLE),
             AttributesDescriptor("Constant", DoriaSyntaxHighlighter.CONSTANT),
             AttributesDescriptor("Number", DoriaSyntaxHighlighter.NUMBER),
             AttributesDescriptor("String", DoriaSyntaxHighlighter.STRING),

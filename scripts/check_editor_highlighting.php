@@ -127,7 +127,6 @@ $plannedKeywords = [
     'get',
     'set',
     'insteadof',
-    'shared',
     'spawn',
     'scope',
 ];
@@ -174,9 +173,12 @@ $reservedTypes = [
 ];
 
 $plannedTypes = [
-    'Shared',
-    'Weak',
-    'SharedMut',
+    'SharedReference',
+    'WeakReference',
+    'WritableSharedReference',
+    'WritableWeakReference',
+    'ReadonlySharedReferenceAccess',
+    'WritableSharedReferenceAccess',
     'Sendable',
     'Shareable',
     'Ptr',
@@ -213,6 +215,13 @@ $lspSupportedTypes = [
     'List',
     'Dictionary',
     'Set',
+    'Bytes',
+    'SharedReference',
+    'WeakReference',
+    'WritableSharedReference',
+    'WritableWeakReference',
+    'ReadonlySharedReferenceAccess',
+    'WritableSharedReferenceAccess',
 ];
 $wordOperators = ['not', 'and', 'or', 'xor'];
 $stage13SymbolOperators = [
@@ -825,11 +834,22 @@ function check_intellij_lexer(): void
 {
     global $acceptedKeywords, $primitiveTypes, $reservedTypes, $plannedTypes, $wordOperators, $stage13SymbolOperators, $booleanSymbolOperators;
     global $notKeywords, $strictComparison, $rejectedPreprocessor, $rejectedKeywords, $rejectedTypes;
-    global $intellijLexer, $intellijLanguage, $intellijBuildGradle, $intellijTokenTypes, $intellijSyntaxHighlighter, $intellijLexerTest, $intellijCodeStyleProvider, $intellijFormatter, $intellijParser, $intellijFormatterTest, $intellijPluginXml, $intellijPluginIcon, $doriaLogo;
+    global $buildScript, $intellijLexer, $intellijLanguage, $intellijBuildGradle, $intellijTokenTypes, $intellijSyntaxHighlighter, $intellijLexerTest, $intellijCodeStyleProvider, $intellijFormatter, $intellijParser, $intellijFormatterTest, $intellijPluginXml, $intellijPluginIcon, $doriaLogo;
 
+    $intellijBuildText = read_text($intellijBuildGradle);
     require_check(
-        str_contains(read_text($intellijBuildGradle), "version = '2026.03.1-canary'"),
+        str_contains($intellijBuildText, "version = '2026.03.1-canary'"),
         'IntelliJ package must carry the pre-1.0 Doria CalVer canary suffix'
+    );
+    require_check(
+        str_contains($intellijBuildText, "tasks.register('cleanPluginDistributions', Delete)")
+            && str_contains($intellijBuildText, 'dependsOn cleanPluginDistributions')
+            && str_contains($intellijBuildText, 'doria-intellij-plugin-${project.version}.zip'),
+        'IntelliJ buildPlugin must remove stale distributions and produce one clearly named plugin ZIP'
+    );
+    require_check(
+        str_contains(read_text($buildScript), 'if (count($artifacts) !== 1)'),
+        'repository build wrapper must reject ambiguous IntelliJ plugin ZIP output'
     );
 
     $lexerText = read_text($intellijLexer);
@@ -1014,6 +1034,11 @@ function check_intellij_lexer(): void
     require_check(
         str_contains($pluginXml, 'language=' . chr(34) . 'doria' . chr(34)),
         'IntelliJ plugin must register the lowercase doria language id for Markdown fences'
+    );
+    require_check(
+        !str_contains($pluginXml, '<annotator')
+            && !str_contains($intellijHighlightingText, 'DORIA_UNUSED_VARIABLE'),
+        'IntelliJ syntax presentation must not guess unused symbols without semantic resolution'
     );
     $languageText = read_text($intellijLanguage);
     require_check(

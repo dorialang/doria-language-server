@@ -22,3 +22,8 @@ Use the canonical zero-padded form in user-facing Doria version text. When a pac
 Publishing Marketplace extensions, JetBrains plugins, binaries, tags, or GitHub releases is always an explicit maintainer action.
 
 `workflow_dispatch` builds and retains every artifact without publishing a GitHub release. A pushed `v*` tag builds the same matrix and publishes those artifacts after every platform job succeeds.
+
+GitHub Actions wraps the retained `doria-intellij-plugin` artifact in its own
+download ZIP. Extract that outer container to obtain the installable
+`doria-intellij-plugin-<version>.zip`. Tagged GitHub releases attach the
+installable plugin ZIP directly.

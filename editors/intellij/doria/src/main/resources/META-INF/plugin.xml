@@ -42,10 +42,6 @@
       language="doria"
       implementationClass="dev.doria.intellij.codestyle.DoriaFormattingModelBuilder" />
 
-    <annotator
-      language="doria"
-      implementationClass="dev.doria.intellij.highlighting.DoriaVariableUsageAnnotator" />
-
     <applicationConfigurable
       parentId="language"
       instance="dev.doria.intellij.settings.DoriaConfigurable"

@@ -522,7 +522,6 @@ fn completion_items() -> Value {
         "get",
         "set",
         "insteadof",
-        "shared",
         "spawn",
         "scope",
     ];
@@ -546,6 +545,13 @@ fn completion_items() -> Value {
         "List",
         "Dictionary",
         "Set",
+        "Bytes",
+        "SharedReference",
+        "WeakReference",
+        "WritableSharedReference",
+        "WritableWeakReference",
+        "ReadonlySharedReferenceAccess",
+        "WritableSharedReferenceAccess",
     ];
     let reserved_types = ["resource"];
     let integer_conversions = [
@@ -586,6 +592,10 @@ fn completion_items() -> Value {
         }
         if let Some(documentation) = scalar_runtime_type_description(ty) {
             item["detail"] = json!("implemented Doria scalar type");
+            item["documentation"] = json!(documentation);
+        }
+        if let Some(documentation) = shared_ownership_type_description(ty) {
+            item["detail"] = json!("compiler-known Doria shared-ownership type");
             item["documentation"] = json!(documentation);
         }
         item
@@ -695,6 +705,18 @@ fn scalar_runtime_type_description(name: &str) -> Option<&'static str> {
         "float64" => Some("Implemented IEEE 754 binary64 scalar type; exact alias of `float`."),
         "float32" => Some("Implemented distinct IEEE 754 binary32 scalar type."),
         "bool" => Some("Implemented Copy scalar type with runtime locals, parameters, returns, calls, and short-circuit operators."),
+        _ => None,
+    }
+}
+
+fn shared_ownership_type_description(name: &str) -> Option<&'static str> {
+    match name {
+        "SharedReference" => Some("`SharedReference<T>` is an owning readonly shared reference to a class payload. Construct it with `shared new T(...)`; `share()` adds an owner, `createWeakReference()` creates a weak handle, and member access forwards readonly to `T`."),
+        "WeakReference" => Some("`WeakReference<T>` is a non-owning reference created from `SharedReference<T>`. `acquire()` returns `?SharedReference<T>` and yields `null` after the final strong owner releases the payload."),
+        "WritableSharedReference" => Some("Compiler-known writable shared-owner type. Its runtime-checked access guards land in the next Stage 25a implementation slice; it never converts to or from `SharedReference<T>`."),
+        "WritableWeakReference" => Some("Compiler-known weak form of `WritableSharedReference<T>`. Its runtime behavior lands with the writable Stage 25a family."),
+        "ReadonlySharedReferenceAccess" => Some("Compiler-known readonly access guard for `WritableSharedReference<T>`. Its runtime behavior lands with the writable Stage 25a family."),
+        "WritableSharedReferenceAccess" => Some("Compiler-known writable access guard for `WritableSharedReference<T>`. Its runtime behavior lands with the writable Stage 25a family."),
         _ => None,
     }
 }
@@ -876,6 +898,9 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "List" => Some("`List<T>` is the growable, insertion-ordered sequence: `add`, `insertAt`, `removeAt`, `pop`, `contains`, `first`/`last`, and the `count`/`isEmpty` properties (decision 0100). An owned move type."),
             "Dictionary" => Some("`Dictionary<K, V>` is the insertion-ordered map: `get` (`?V`), `set`, `remove` (`?V`), `has`, the `keys`/`values` projections, and `count`/`isEmpty` (decision 0100). Keys require `Hashable`. An owned move type."),
             "Set" => Some("`Set<T>` is the insertion-ordered unique-element collection: `Set::from`, `add`, `remove`, `contains`, `union`/`intersect`/`difference`, and `count`/`isEmpty` (decision 0100). Elements require `Hashable`. An owned move type."),
+            name @ ("SharedReference" | "WeakReference" | "WritableSharedReference"
+            | "WritableWeakReference" | "ReadonlySharedReferenceAccess"
+            | "WritableSharedReferenceAccess") => shared_ownership_type_description(name),
             "mixed" => Some("The dynamic boundary type: a boxed runtime value that accepts any type but rejects every operation until narrowed with the exact `is` type-test operator. `?mixed` adds nullability."),
             "resource" => Some("Reserved for future PHP interop; not a usable core type."),
             companion @ ("Int" | "Int8" | "Int16" | "Int32" | "Int64" | "UInt8"
@@ -1127,7 +1152,6 @@ mod tests {
             "get",
             "set",
             "insteadof",
-            "shared",
             "spawn",
             "scope",
         ] {
@@ -1398,6 +1422,37 @@ function main(): void
         assert!(is_hover.contains("Exact type-test operator"));
         assert!(is_hover.contains("narrows `mixed` and nullable values"));
     }
+
+    #[test]
+    fn completions_and_hovers_track_stage25a_shared_ownership() {
+        for name in [
+            "SharedReference",
+            "WeakReference",
+            "WritableSharedReference",
+            "WritableWeakReference",
+            "ReadonlySharedReferenceAccess",
+            "WritableSharedReferenceAccess",
+        ] {
+            assert_eq!(
+                completion_item(name)["detail"],
+                "compiler-known Doria shared-ownership type"
+            );
+            assert!(
+                hover_description(&TokenKind::Identifier(name.to_string())).is_some(),
+                "{name} should provide hover information"
+            );
+        }
+        let shared = hover_description(&TokenKind::Identifier("SharedReference".to_string()))
+            .expect("SharedReference hover");
+        assert!(shared.contains("`shared new T(...)`"));
+        assert!(shared.contains("readonly"));
+
+        let weak = hover_description(&TokenKind::Identifier("WeakReference".to_string()))
+            .expect("WeakReference hover");
+        assert!(weak.contains("`acquire()`"));
+        assert!(weak.contains("`?SharedReference<T>`"));
+    }
+
     #[test]
     fn completions_do_not_offer_unrelated_future_types() {
         let labels = completion_labels();
@@ -1410,7 +1465,6 @@ function main(): void
             "Shareable",
             "Ptr",
             "MutPtr",
-            "Bytes",
         ] {
             assert!(
                 !labels.iter().any(|label| label == unsupported),
@@ -1443,6 +1497,13 @@ function main(): void
             "List",
             "Dictionary",
             "Set",
+            "Bytes",
+            "SharedReference",
+            "WeakReference",
+            "WritableSharedReference",
+            "WritableWeakReference",
+            "ReadonlySharedReferenceAccess",
+            "WritableSharedReferenceAccess",
         ] {
             assert!(
                 labels.iter().any(|label| label == supported),
