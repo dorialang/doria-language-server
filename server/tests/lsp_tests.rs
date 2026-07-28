@@ -211,12 +211,20 @@ function inspect(SharedReference<Node> $node): void
     echo $node->name;
 }
 
+function choose(
+    take ?SharedReference<Node> $left,
+    take ?SharedReference<Node> $right,
+): ?SharedReference<Node>
+{
+    return $left ?? $right;
+}
+
 function main(): void
 {
     let $root = shared new Node("root");
     let $weak = $root->createWeakReference();
     inspect($root->share());
-    let $live = $weak->acquire();
+    let $live = choose($weak->acquire(), null);
     if ($live != null) {
         inspect($live);
     }
