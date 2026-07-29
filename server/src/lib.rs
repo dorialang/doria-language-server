@@ -678,6 +678,44 @@ fn completion_items() -> Value {
             ),
         })
     }));
+    items.extend(
+        [
+            (
+                "share",
+                "function share(): SharedReference<T> | WritableSharedReference<T>",
+                "Creates one additional owner in the receiver's existing shared-ownership family.",
+            ),
+            (
+                "createWeakReference",
+                "function createWeakReference(): WeakReference<T> | WritableWeakReference<T>",
+                "Creates a non-owning reference in the receiver's existing shared-ownership family.",
+            ),
+            (
+                "acquire",
+                "function acquire(): ?SharedReference<T> | ?WritableSharedReference<T>",
+                "Attempts to create a strong owner from a weak reference without changing ownership families.",
+            ),
+            (
+                "acquireReadonlyAccess",
+                "function acquireReadonlyAccess(): ReadonlySharedReferenceAccess<T>",
+                "Acquires owned readonly access to a writable shared payload. Multiple readonly accesses may coexist.",
+            ),
+            (
+                "acquireWritableAccess",
+                "function acquireWritableAccess(): WritableSharedReferenceAccess<T>",
+                "Acquires owned exclusive writable access to a writable shared payload.",
+            ),
+        ]
+        .into_iter()
+        .map(|(label, detail, documentation)| {
+            json!({
+                "label": label,
+                "kind": 2,
+                "detail": detail,
+                "documentation": documentation,
+            })
+        }),
+    );
     items.extend([
         json!({
             "label": "Int::toFloat",
@@ -713,10 +751,10 @@ fn shared_ownership_type_description(name: &str) -> Option<&'static str> {
     match name {
         "SharedReference" => Some("`SharedReference<T>` is an owning readonly shared reference to a class payload. Construct it with `shared new T(...)`; `share()` adds an owner, `createWeakReference()` creates a weak handle, and member access forwards readonly to `T`."),
         "WeakReference" => Some("`WeakReference<T>` is a non-owning reference created from `SharedReference<T>`. `acquire()` returns `?SharedReference<T>` and yields `null` after the final strong owner releases the payload."),
-        "WritableSharedReference" => Some("Compiler-known writable shared-owner type. Its runtime-checked access guards land in the next Stage 25a implementation slice; it never converts to or from `SharedReference<T>`."),
-        "WritableWeakReference" => Some("Compiler-known weak form of `WritableSharedReference<T>`. Its runtime behavior lands with the writable Stage 25a family."),
-        "ReadonlySharedReferenceAccess" => Some("Compiler-known readonly access guard for `WritableSharedReference<T>`. Its runtime behavior lands with the writable Stage 25a family."),
-        "WritableSharedReferenceAccess" => Some("Compiler-known writable access guard for `WritableSharedReference<T>`. Its runtime behavior lands with the writable Stage 25a family."),
+        "WritableSharedReference" => Some("`WritableSharedReference<T>` owns a payload through the writable shared family. `share()` adds an owner, `createWeakReference()` creates a writable weak handle, and controlled payload access comes only from `acquireReadonlyAccess()` or `acquireWritableAccess()`. It never converts to or from `SharedReference<T>`."),
+        "WritableWeakReference" => Some("`WritableWeakReference<T>` is the non-owning writable-family handle. `acquire()` returns `?WritableSharedReference<T>` and never crosses into the readonly family."),
+        "ReadonlySharedReferenceAccess" => Some("`ReadonlySharedReferenceAccess<T>` is an owned move value that keeps a writable shared payload alive and forwards readonly properties, methods, indexing, and iteration. Destroying it releases readonly access before its strong ownership claim."),
+        "WritableSharedReferenceAccess" => Some("`WritableSharedReferenceAccess<T>` is an owned move value that exclusively forwards writable payload operations. The binding must be `writable` to mutate through it; destruction releases writable access before its strong ownership claim."),
         _ => None,
     }
 }
@@ -901,6 +939,11 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             name @ ("SharedReference" | "WeakReference" | "WritableSharedReference"
             | "WritableWeakReference" | "ReadonlySharedReferenceAccess"
             | "WritableSharedReferenceAccess") => shared_ownership_type_description(name),
+            "share" => Some("`share()` creates one additional strong owner in the receiver's current shared-ownership family."),
+            "createWeakReference" => Some("`createWeakReference()` creates a non-owning handle in the receiver's current shared-ownership family."),
+            "acquire" => Some("`acquire()` attempts to create a strong owner from a weak reference and returns `null` after the payload is destroyed. It never changes ownership families."),
+            "acquireReadonlyAccess" => Some("`acquireReadonlyAccess()` returns an owned `ReadonlySharedReferenceAccess<T>` and registers one readonly access on the writable shared allocation."),
+            "acquireWritableAccess" => Some("`acquireWritableAccess()` returns an owned `WritableSharedReferenceAccess<T>` and registers exclusive writable access on the writable shared allocation."),
             "mixed" => Some("The dynamic boundary type: a boxed runtime value that accepts any type but rejects every operation until narrowed with the exact `is` type-test operator. `?mixed` adds nullability."),
             "resource" => Some("Reserved for future PHP interop; not a usable core type."),
             companion @ ("Int" | "Int8" | "Int16" | "Int32" | "Int64" | "UInt8"
@@ -1451,6 +1494,28 @@ function main(): void
             .expect("WeakReference hover");
         assert!(weak.contains("`acquire()`"));
         assert!(weak.contains("`?SharedReference<T>`"));
+
+        let writable = hover_description(&TokenKind::Identifier(
+            "WritableSharedReference".to_string(),
+        ))
+        .expect("WritableSharedReference hover");
+        assert!(writable.contains("`acquireReadonlyAccess()`"));
+        assert!(writable.contains("`acquireWritableAccess()`"));
+        assert!(!writable.contains("next Stage 25a"));
+
+        for member in [
+            "share",
+            "createWeakReference",
+            "acquire",
+            "acquireReadonlyAccess",
+            "acquireWritableAccess",
+        ] {
+            assert_eq!(completion_item(member)["kind"], 2);
+            assert!(
+                hover_description(&TokenKind::Identifier(member.to_string())).is_some(),
+                "{member} should provide hover information"
+            );
+        }
     }
 
     #[test]

@@ -235,6 +235,102 @@ function main(): void
 }
 
 #[test]
+fn writable_shared_ownership_has_no_false_diagnostics() {
+    let diagnostics = diagnostics_for_document(
+        "file:///writable-shared.doria",
+        r#"
+class Counter
+{
+    writable int $value = 0;
+}
+
+function update(WritableSharedReference<Counter> $counter): void
+{
+    let writable $write = $counter->acquireWritableAccess();
+    $write->value++;
+}
+
+function main(): void
+{
+    let $counter = new WritableSharedReference(new Counter());
+    let $second = $counter->share();
+    let $weak = $counter->createWeakReference();
+    update($counter);
+
+    let $live = $weak->acquire();
+    if ($live != null) {
+        let $read = $second->acquireReadonlyAccess();
+        echo $read->value;
+    }
+}
+"#,
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn writable_shared_diagnostics_come_from_the_compiler_surface() {
+    let cases = [
+        (
+            "file:///direct-access.doria",
+            r#"
+class Counter { writable int $value = 0; }
+let $counter = new WritableSharedReference(new Counter());
+echo $counter->value;
+"#,
+            "E0548",
+        ),
+        (
+            "file:///readonly-access-write.doria",
+            r#"
+class Counter { writable int $value = 0; }
+let $counter = new WritableSharedReference(new Counter());
+let $read = $counter->acquireReadonlyAccess();
+$read->value = 1;
+"#,
+            "E0201",
+        ),
+        (
+            "file:///family-crossing.doria",
+            r#"
+class Counter {}
+let $counter = new WritableSharedReference(new Counter());
+SharedReference<Counter> $wrong = $counter;
+"#,
+            "E0403",
+        ),
+        (
+            "file:///direct-access-construction.doria",
+            r#"
+class Counter {}
+let $bad = new ReadonlySharedReferenceAccess<Counter>();
+"#,
+            "E0543",
+        ),
+        (
+            "file:///use-after-move.doria",
+            r#"
+class Counter {}
+let $counter = new WritableSharedReference(new Counter());
+let $moved = $counter;
+let $bad = $counter->share();
+"#,
+            "E0470",
+        ),
+    ];
+
+    for (uri, source, expected_code) in cases {
+        let diagnostics = diagnostics_for_document(uri, source);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic["code"] == expected_code),
+            "{uri} should report {expected_code}: {diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
 fn duplicate_member_diagnostics_publish_the_original_declaration() {
     let uri = "file:///duplicate.doria";
     let text = "class Example { const FOO = 1; static int $FOO = 2; }";
