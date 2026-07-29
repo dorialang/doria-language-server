@@ -12,6 +12,8 @@ function resolver(existingPaths, overrides = {}) {
     environmentPath: "",
     workspaceRoot: "/workspace",
     extensionPath: "/extension",
+    cargoHome: "/cargo",
+    homeDirectory: "/home/test",
     platform: "linux",
     pathExists: (candidate) => existing.has(path.resolve(candidate)),
     ...overrides
@@ -55,14 +57,21 @@ test("ignores stale overrides and uses the bundled server", () => {
   );
 });
 
-test("prefers a workspace development server over the bundled server", () => {
+test("ignores mutable workspace binaries and prefers the bundled server", () => {
   const result = resolver([
     "/workspace/target/debug/doria-lsp",
     "/extension/bin/doria-lsp"
   ]);
 
-  assert.equal(result.command, path.resolve("/workspace/target/debug/doria-lsp"));
-  assert.equal(result.source, "workspace");
+  assert.equal(result.command, path.resolve("/extension/bin/doria-lsp"));
+  assert.equal(result.source, "bundled");
+});
+
+test("uses the Cargo-installed server when no bundle is available", () => {
+  const result = resolver(["/cargo/bin/doria-lsp"]);
+
+  assert.equal(result.command, path.resolve("/cargo/bin/doria-lsp"));
+  assert.equal(result.source, "Cargo install");
 });
 
 test("falls back to PATH when no server file is available", () => {

@@ -14,6 +14,8 @@ function resolver(existingPaths, overrides = {}) {
     configuredPath: "",
     environmentPath: "",
     workspaceRoot: "/workspace",
+    cargoHome: "/cargo",
+    homeDirectory: "/home/test",
     platform: "linux",
     pathExists: (candidate) => existing.has(path.resolve(candidate)),
     ...overrides
@@ -39,17 +41,17 @@ test("resolves a relative compiler path from the workspace", () => {
   assert.equal(result.command, path.resolve("/workspace/tools/doriac"));
 });
 
-test("ignores stale overrides and uses a workspace compiler", () => {
+test("ignores stale overrides and uses the Cargo-installed compiler", () => {
   const result = resolver(
-    ["/workspace/target/debug/doriac"],
+    ["/workspace/target/debug/doriac", "/cargo/bin/doriac"],
     {
       configuredPath: "/old/doriac",
       environmentPath: "/old/environment/doriac"
     }
   );
 
-  assert.equal(result.command, path.resolve("/workspace/target/debug/doriac"));
-  assert.equal(result.source, "workspace");
+  assert.equal(result.command, path.resolve("/cargo/bin/doriac"));
+  assert.equal(result.source, "Cargo install");
   assert.deepEqual(
     result.rejectedPaths.map(({ source }) => source),
     ["setting", "environment"]

@@ -29,8 +29,12 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    match arguments.into_iter().next().as_ref().map(AsRef::as_ref) {
-        Some("--version" | "-V") => {
+    let arguments = arguments
+        .into_iter()
+        .map(|argument| argument.as_ref().to_string())
+        .collect::<Vec<_>>();
+    match arguments.as_slice() {
+        [argument] if argument == "--version" || argument == "-V" => {
             println!(
                 "doria-lsp {} (Doria {})",
                 SERVER_VERSION,
@@ -38,17 +42,30 @@ where
             );
             ExitCode::SUCCESS
         }
-        Some("--help" | "-h") => {
+        [argument, format] if argument == "--version" && format == "--json" => {
             println!(
-                "doria-lsp [--version]\n\nWithout arguments, starts the Doria language server over stdio."
+                "{}",
+                json!({
+                    "schema": 1,
+                    "component": "doria-lsp",
+                    "version": SERVER_VERSION,
+                    "toolchainVersion": toolchain_version(),
+                    "compilerCommit": doriac::BUILD_COMMIT,
+                })
             );
             ExitCode::SUCCESS
         }
-        Some(argument) => {
+        [argument] if argument == "--help" || argument == "-h" => {
+            println!(
+                "doria-lsp [--version [--json]]\n\nWithout arguments, starts the Doria language server over stdio."
+            );
+            ExitCode::SUCCESS
+        }
+        [argument, ..] => {
             eprintln!("unknown argument: {argument}");
             ExitCode::from(2)
         }
-        None => match run_stdio() {
+        [] => match run_stdio() {
             Ok(()) => ExitCode::SUCCESS,
             Err(message) => {
                 eprintln!("{message}");

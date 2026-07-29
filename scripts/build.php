@@ -22,10 +22,15 @@ for ($index = 2; $index < count($argv); $index++) {
 
 if (
     $compilerPath !== null
-    && !in_array($target, ['server', 'server-release', 'vscode', 'editors', 'all'], true)
+    && !in_array(
+        $target,
+        ['server', 'server-release', 'install-server', 'vscode', 'editors', 'all'],
+        true,
+    )
 ) {
     usage_error(
-        '--compiler-path is supported by the server, server-release, vscode, editors, and all targets'
+        '--compiler-path is supported by the server, server-release, install-server, '
+            . 'vscode, editors, and all targets'
     );
 }
 
@@ -33,7 +38,7 @@ try {
     match ($target) {
         'server' => build_server($root, false, $compilerPath),
         'server-release' => build_server($root, true, $compilerPath),
-        'install-server' => install_server($root),
+        'install-server' => install_server($root, $compilerPath),
         'vscode' => build_vscode($root, $compilerPath),
         'intellij' => build_intellij($root),
         'editors' => build_editors($root, $compilerPath),
@@ -133,12 +138,6 @@ RUST
     write_generated_file(local_server_marker($root, $release), $compiler . "\n");
 
     require_artifact($artifact, 'language-server executable');
-    if ($compilerSource['workspace'] !== null) {
-        $workspaceArtifact =
-            $compilerSource['workspace'] . "/target/{$profile}/{$executable}";
-        install_executable($localArtifact, $workspaceArtifact);
-        require_artifact($workspaceArtifact, 'compiler-workspace language-server executable');
-    }
     fwrite(STDOUT, "local compiler crate: {$compiler}\n");
 }
 
@@ -166,28 +165,49 @@ function local_server_marker(string $root, bool $release): string
     return $root . "/target/{$profile}/doria-lsp.local-compiler";
 }
 
-function install_server(string $root): void
+function install_server(string $root, ?string $compilerPath = null): void
 {
+    if ($compilerPath !== null) {
+        build_server_with_local_compiler($root, true, $compilerPath);
+        $destination = cargo_install_root()
+            . '/bin/'
+            . (PHP_OS_FAMILY === 'Windows' ? 'doria-lsp.exe' : 'doria-lsp');
+        install_executable(server_artifact($root, true), $destination);
+        require_artifact($destination, 'globally installed language server');
+        fwrite(STDOUT, "\nInstalled compiler-matched doria-lsp: {$destination}\n");
+        return;
+    }
+
     run_command(
         ['cargo', 'install', '--path', $root . '/server', '--locked', '--force'],
         $root
     );
 
-    $cargoHome = getenv('CARGO_INSTALL_ROOT');
-    if ($cargoHome === false || $cargoHome === '') {
-        $cargoHome = getenv('CARGO_HOME');
-    }
-    if ($cargoHome === false || $cargoHome === '') {
-        $userHome = PHP_OS_FAMILY === 'Windows' ? getenv('USERPROFILE') : getenv('HOME');
-        $cargoHome = ($userHome === false || $userHome === '') ? null : $userHome . '/.cargo';
-    }
-
     $executable = PHP_OS_FAMILY === 'Windows' ? 'doria-lsp.exe' : 'doria-lsp';
-    if ($cargoHome !== null) {
-        require_artifact($cargoHome . '/bin/' . $executable, 'globally installed language server');
-    }
+    require_artifact(
+        cargo_install_root() . '/bin/' . $executable,
+        'globally installed language server',
+    );
 
     fwrite(STDOUT, "\nVerify the installation with: doria-lsp --version\n");
+}
+
+function cargo_install_root(): string
+{
+    foreach (['CARGO_INSTALL_ROOT', 'CARGO_HOME'] as $name) {
+        $value = getenv($name);
+        if ($value !== false && $value !== '') {
+            return rtrim($value, '/\\');
+        }
+    }
+    $home = getenv(PHP_OS_FAMILY === 'Windows' ? 'USERPROFILE' : 'HOME');
+    if ($home === false || $home === '') {
+        throw new RuntimeException(
+            'could not determine Cargo install root; set CARGO_INSTALL_ROOT or CARGO_HOME'
+        );
+    }
+
+    return rtrim($home, '/\\') . '/.cargo';
 }
 
 function build_vscode(string $root, ?string $compilerPath = null): void
@@ -326,13 +346,26 @@ function resolve_compiler_source(string $root, string $path): array
 function install_executable(string $source, string $destination): void
 {
     ensure_directory(dirname($destination));
-    if (!copy($source, $destination)) {
+    $temporary = $destination . '.install-' . getmypid();
+    if (!copy($source, $temporary)) {
         throw new RuntimeException(
-            "could not install local-compiler language server: {$destination}"
+            "could not stage language-server executable: {$temporary}"
         );
     }
-    if (PHP_OS_FAMILY !== 'Windows' && !chmod($destination, 0755)) {
-        throw new RuntimeException("could not make language-server executable: {$destination}");
+    if (PHP_OS_FAMILY !== 'Windows' && !chmod($temporary, 0755)) {
+        @unlink($temporary);
+        throw new RuntimeException("could not make language-server executable: {$temporary}");
+    }
+    if (PHP_OS_FAMILY === 'Windows' && is_file($destination) && !unlink($destination)) {
+        @unlink($temporary);
+        throw new RuntimeException(
+            "could not replace the running language server at {$destination}; "
+                . 'stop the IDE or language-server process and retry'
+        );
+    }
+    if (!rename($temporary, $destination)) {
+        @unlink($temporary);
+        throw new RuntimeException("could not install language-server executable: {$destination}");
     }
 }
 
@@ -492,7 +525,7 @@ Targets:
   help            Show this help
 
 Options:
-  --compiler-path Build doria-lsp against a local Doria repository or doriac crate.
+  --compiler-path Build or install doria-lsp against a local Doria repository or doriac crate.
                   Supported by server, server-release, vscode, editors, and all.
                   This development mode leaves Cargo.toml and Cargo.lock unchanged.
 

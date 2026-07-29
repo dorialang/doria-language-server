@@ -1,6 +1,7 @@
 "use strict";
 
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 function resolveServerPath({
@@ -8,6 +9,9 @@ function resolveServerPath({
   environmentPath,
   workspaceRoot,
   extensionPath,
+  cargoInstallRoot = process.env.CARGO_INSTALL_ROOT,
+  cargoHome = process.env.CARGO_HOME,
+  homeDirectory = os.homedir(),
   platform = process.platform,
   pathExists = fs.existsSync
 }) {
@@ -32,16 +36,18 @@ function resolveServerPath({
   }
 
   const executable = platform === "win32" ? "doria-lsp.exe" : "doria-lsp";
-  if (workspaceRoot) {
-    const workspaceBinary = path.join(workspaceRoot, "target", "debug", executable);
-    if (pathExists(workspaceBinary)) {
-      return { command: workspaceBinary, source: "workspace", rejectedPaths };
-    }
-  }
-
   const bundledBinary = path.join(extensionPath, "bin", executable);
   if (pathExists(bundledBinary)) {
     return { command: bundledBinary, source: "bundled", rejectedPaths };
+  }
+
+  const cargoBinary = path.join(
+    cargoInstallRoot || cargoHome || path.join(homeDirectory, ".cargo"),
+    "bin",
+    executable
+  );
+  if (pathExists(cargoBinary)) {
+    return { command: cargoBinary, source: "Cargo install", rejectedPaths };
   }
 
   return { command: executable, source: "PATH", rejectedPaths };

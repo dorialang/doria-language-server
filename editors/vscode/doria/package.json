@@ -170,12 +170,12 @@
         "doria.languageServer.path": {
           "type": "string",
           "default": "",
-          "description": "Path to the doria-lsp executable. Leave empty to use DORIA_LSP_PATH, workspace target/debug/doria-lsp, the bundled server, or doria-lsp from PATH."
+          "description": "Path to the doria-lsp executable. Leave empty to use DORIA_LSP_PATH, the bundled server, Cargo's installed server, or doria-lsp from PATH."
         },
         "doria.compiler.path": {
           "type": "string",
           "default": "",
-          "description": "Path to the doriac executable used by standalone-file launch profiles. Leave empty to use DORIAC_PATH, workspace target/debug/doriac, or doriac from PATH."
+          "description": "Path to the doriac executable used by standalone-file launch profiles. Leave empty to use DORIAC_PATH, Cargo's installed compiler, or doriac from PATH."
         },
         "doria.baton.path": {
           "type": "string",
