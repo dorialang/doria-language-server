@@ -73,7 +73,7 @@ function build_server_with_local_compiler(
     string $root,
     bool $release,
     string $compilerPath
-): void {
+): string {
     $compilerSource = resolve_compiler_source($root, $compilerPath);
     $compiler = $compilerSource['crate'];
     $runner = $root . '/target/local-doria-lsp-runner';
@@ -139,6 +139,8 @@ RUST
 
     require_artifact($artifact, 'language-server executable');
     fwrite(STDOUT, "local compiler crate: {$compiler}\n");
+
+    return $artifact;
 }
 
 function remove_local_server_override(string $root, bool $release): void
@@ -168,11 +170,11 @@ function local_server_marker(string $root, bool $release): string
 function install_server(string $root, ?string $compilerPath = null): void
 {
     if ($compilerPath !== null) {
-        build_server_with_local_compiler($root, true, $compilerPath);
+        $artifact = build_server_with_local_compiler($root, true, $compilerPath);
         $destination = cargo_install_root()
             . '/bin/'
             . (PHP_OS_FAMILY === 'Windows' ? 'doria-lsp.exe' : 'doria-lsp');
-        install_executable(server_artifact($root, true), $destination);
+        install_executable($artifact, $destination);
         require_artifact($destination, 'globally installed language server');
         fwrite(STDOUT, "\nInstalled compiler-matched doria-lsp: {$destination}\n");
         return;
