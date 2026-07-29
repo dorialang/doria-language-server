@@ -269,6 +269,34 @@ function main(): void
 }
 
 #[test]
+fn standalone_blocks_have_no_false_diagnostics() {
+    let diagnostics = diagnostics_for_document(
+        "file:///standalone-block.doria",
+        r#"
+class Counter
+{
+    writable int $value = 0;
+}
+
+function main(): void
+{
+    let $counter = new WritableSharedReference(new Counter());
+
+    {
+        let writable $access = $counter->acquireWritableAccess();
+        $access->value++;
+    }
+
+    let $access = $counter->acquireReadonlyAccess();
+    echo "{$access->value}\n";
+}
+"#,
+    );
+
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
 fn writable_shared_diagnostics_come_from_the_compiler_surface() {
     let cases = [
         (

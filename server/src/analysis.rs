@@ -332,6 +332,7 @@ impl<'a> SnapshotBuilder<'a> {
                 self.visit_expr(&foreach.iterable, current_class, parent_class);
                 self.visit_block(&foreach.body, current_class, parent_class);
             }
+            Stmt::Block(block) => self.visit_block(block, current_class, parent_class),
             Stmt::Increment(increment) => {
                 self.visit_expr(&increment.target, current_class, parent_class)
             }
@@ -927,6 +928,32 @@ function main(): int
         assert!(static_call
             .markdown
             .contains("static function Counter::next(int $value): int"));
+    }
+
+    #[test]
+    fn standalone_blocks_preserve_semantic_method_hovers() {
+        let source = r#"class Counter
+{
+    function ping(): void
+    {
+    }
+}
+
+function main(): void
+{
+    let $counter = new Counter();
+    {
+        $counter->ping();
+    }
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("test.doria", source);
+        assert!(snapshot.diagnostics().is_empty());
+
+        let call = snapshot
+            .hover_at_offset(source.rfind("ping").expect("method call"))
+            .expect("method call inside standalone block should have semantic hover");
+        assert!(call.markdown.contains("function Counter::ping(): void"));
     }
 
     #[test]
