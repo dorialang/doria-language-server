@@ -63,8 +63,8 @@ No `.vscode/launch.json` is required. To keep an explicit profile:
 Baton is resolved from `doria.baton.path`, then `BATON_PATH`, then `PATH`.
 Standalone source files can use the **Doria: Run standalone file** snippet,
 which runs the selected `program` through `doriac run`; that opt-in mode resolves
-the compiler from `doria.compiler.path`, `DORIAC_PATH`, a workspace
-`target/debug/doriac`, then `PATH`.
+the compiler from `doria.compiler.path`, `DORIAC_PATH`, Cargo's installed bin
+directory, then `PATH`.
 
 These are execution profiles. Source-level breakpoints and stepping will remain
 disabled until the Doria toolchain exposes a debugger protocol.
@@ -78,7 +78,7 @@ php scripts/build.php server
 export DORIA_LSP_PATH="/absolute/path/to/doria-language-server/target/debug/doria-lsp"
 ```
 
-The executable is under the repository-level `target/debug/` directory, not under `server/`. On Windows, use `target\debug\doria-lsp.exe`.
+The executable is under the repository-level `target/debug/` directory, not under `server/`. Use this mutable build only through an explicit setting or `DORIA_LSP_PATH`; on Windows, its name is `doria-lsp.exe`.
 
 To install the server globally instead:
 
@@ -100,8 +100,8 @@ Only existing configured and environment paths are used. Stale paths are ignored
 ```text
 1. doria.languageServer.path
 2. DORIA_LSP_PATH
-3. target/debug/doria-lsp in the open workspace
-4. doria-lsp bundled in the installed extension
+3. doria-lsp bundled in the installed extension
+4. Cargo's installed bin directory
 5. doria-lsp on PATH
 ```
 

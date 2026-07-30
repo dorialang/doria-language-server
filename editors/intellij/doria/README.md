@@ -26,7 +26,7 @@ From the root of this repository:
 php scripts/build.php server
 ```
 
-Point the plugin setting or `DORIA_LSP_PATH` at `target/debug/doria-lsp` (`target\debug\doria-lsp.exe` on Windows). If a release binary is already on `PATH`, no explicit configuration is required.
+Point the plugin setting or `DORIA_LSP_PATH` at an explicit development build when needed. Normally, install the compiled server into Cargo's bin directory with `php scripts/build.php install-server`; the plugin resolves that platform-neutral location before falling back to `PATH`.
 
 ## Build the plugin
 
@@ -118,7 +118,7 @@ The plugin looks for `doria-lsp` in this order:
 ```text
 1. Doria settings: Language server path
 2. DORIA_LSP_PATH environment variable
-3. target/debug/doria-lsp in the open project
+3. Cargo's installed bin directory
 4. doria-lsp on PATH
 ```
 

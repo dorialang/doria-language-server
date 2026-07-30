@@ -1,6 +1,7 @@
 "use strict";
 
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 function resolveExecutablePath({
@@ -8,8 +9,10 @@ function resolveExecutablePath({
   environmentPath,
   workspaceRoot,
   executableName,
-  workspaceCandidates = [],
   windowsExecutableExtension = true,
+  cargoInstallRoot = process.env.CARGO_INSTALL_ROOT,
+  cargoHome = process.env.CARGO_HOME,
+  homeDirectory = os.homedir(),
   platform = process.platform,
   pathExists = fs.existsSync
 }) {
@@ -36,13 +39,13 @@ function resolveExecutablePath({
   const executable = platform === "win32" && windowsExecutableExtension
     ? `${executableName}.exe`
     : executableName;
-  if (workspaceRoot && workspaceCandidates.length > 0) {
-    for (const candidate of workspaceCandidates) {
-      const workspaceExecutable = path.join(workspaceRoot, ...candidate, executable);
-      if (pathExists(workspaceExecutable)) {
-        return { command: workspaceExecutable, source: "workspace", rejectedPaths };
-      }
-    }
+  const cargoExecutable = path.join(
+    cargoInstallRoot || cargoHome || path.join(homeDirectory, ".cargo"),
+    "bin",
+    executable
+  );
+  if (pathExists(cargoExecutable)) {
+    return { command: cargoExecutable, source: "Cargo install", rejectedPaths };
   }
 
   return { command: executable, source: "PATH", rejectedPaths };
@@ -59,8 +62,7 @@ function resolveBatonPath(options) {
 function resolveCompilerPath(options) {
   return resolveExecutablePath({
     ...options,
-    executableName: "doriac",
-    workspaceCandidates: [["target", "debug"]]
+    executableName: "doriac"
   });
 }
 

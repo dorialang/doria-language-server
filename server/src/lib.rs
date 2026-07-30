@@ -4,13 +4,18 @@ use std::process::ExitCode;
 
 use serde_json::{json, Value};
 
-use doriac::diagnostics::Diagnostic;
+use doriac::diagnostics::{
+    prepare_diagnostics, Diagnostic, DiagnosticFix, DiagnosticSeverity, DiagnosticSource,
+    FixApplicability, LabelRole,
+};
 use doriac::lexer::{Token, TokenKind};
 use doriac::source::Span;
 
 mod analysis;
+mod string_surface;
 
 use analysis::AnalysisSnapshot;
+use string_surface::{STRING_COMPANION_METHODS, STRING_PROPERTIES};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LspPosition {
@@ -29,8 +34,12 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    match arguments.into_iter().next().as_ref().map(AsRef::as_ref) {
-        Some("--version" | "-V") => {
+    let arguments = arguments
+        .into_iter()
+        .map(|argument| argument.as_ref().to_string())
+        .collect::<Vec<_>>();
+    match arguments.as_slice() {
+        [argument] if argument == "--version" || argument == "-V" => {
             println!(
                 "doria-lsp {} (Doria {})",
                 SERVER_VERSION,
@@ -38,17 +47,30 @@ where
             );
             ExitCode::SUCCESS
         }
-        Some("--help" | "-h") => {
+        [argument, format] if argument == "--version" && format == "--json" => {
             println!(
-                "doria-lsp [--version]\n\nWithout arguments, starts the Doria language server over stdio."
+                "{}",
+                json!({
+                    "schema": 1,
+                    "component": "doria-lsp",
+                    "version": SERVER_VERSION,
+                    "toolchainVersion": toolchain_version(),
+                    "compilerCommit": doriac::BUILD_COMMIT,
+                })
             );
             ExitCode::SUCCESS
         }
-        Some(argument) => {
+        [argument] if argument == "--help" || argument == "-h" => {
+            println!(
+                "doria-lsp [--version [--json]]\n\nWithout arguments, starts the Doria language server over stdio."
+            );
+            ExitCode::SUCCESS
+        }
+        [argument, ..] => {
             eprintln!("unknown argument: {argument}");
             ExitCode::from(2)
         }
-        None => match run_stdio() {
+        [] => match run_stdio() {
             Ok(()) => ExitCode::SUCCESS,
             Err(message) => {
                 eprintln!("{message}");
@@ -154,40 +176,66 @@ pub fn position_to_byte_offset(text: &str, line: u32, character: u32) -> usize {
 }
 
 pub fn diagnostics_for_document(uri: &str, text: &str) -> Vec<Value> {
-    AnalysisSnapshot::analyze(uri, text)
-        .diagnostics()
+    let snapshot = AnalysisSnapshot::analyze(uri, text);
+    diagnostics_to_lsp(uri, text, snapshot.diagnostics())
+}
+
+fn diagnostics_to_lsp(uri: &str, text: &str, diagnostics: &[Diagnostic]) -> Vec<Value> {
+    prepare_diagnostics(diagnostics)
         .iter()
         .map(|diagnostic| diagnostic_to_lsp(uri, text, diagnostic))
         .collect()
 }
 
 pub fn code_actions_for_document(uri: &str, text: &str) -> Vec<Value> {
-    AnalysisSnapshot::analyze(uri, text)
-        .diagnostics()
+    prepare_diagnostics(AnalysisSnapshot::analyze(uri, text).diagnostics())
         .iter()
-        .filter_map(|diagnostic| {
-            let fix = diagnostic.fix.as_ref()?;
-            let edit = json!({
-                "range": span_to_range(text, fix.span),
-                "newText": fix.replacement,
-            });
-            let mut changes = serde_json::Map::new();
-            changes.insert(uri.to_string(), Value::Array(vec![edit]));
-
-            Some(json!({
-                "title": diagnostic
-                    .help
-                    .as_deref()
-                    .unwrap_or("Apply compiler-suggested fix"),
-                "kind": "quickfix",
-                "diagnostics": [diagnostic_to_lsp(uri, text, diagnostic)],
-                "isPreferred": true,
-                "edit": {
-                    "changes": changes,
-                },
-            }))
+        .flat_map(|diagnostic| {
+            diagnostic
+                .fixes
+                .iter()
+                .filter_map(move |fix| code_action_for_fix(uri, text, diagnostic, fix))
         })
         .collect()
+}
+
+fn code_action_for_fix(
+    uri: &str,
+    text: &str,
+    diagnostic: &Diagnostic,
+    fix: &DiagnosticFix,
+) -> Option<Value> {
+    if fix.applicability != FixApplicability::MachineApplicable
+        || fix
+            .edits
+            .iter()
+            .any(|edit| !matches!(&edit.source, DiagnosticSource::Current))
+    {
+        return None;
+    }
+    let mut changes = serde_json::Map::new();
+    for edit in &fix.edits {
+        let lsp_edit = json!({
+            "range": span_to_range(text, edit.span),
+            "newText": edit.replacement,
+        });
+        changes
+            .entry(uri.to_string())
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("code-action change is always an array")
+            .push(lsp_edit);
+    }
+
+    Some(json!({
+        "title": fix.title,
+        "kind": "quickfix",
+        "diagnostics": [diagnostic_to_lsp(uri, text, diagnostic)],
+        "isPreferred": true,
+        "edit": {
+            "changes": changes,
+        },
+    }))
 }
 
 impl Server {
@@ -351,12 +399,7 @@ impl Server {
             return Ok(());
         };
 
-        let diagnostics = document
-            .analysis
-            .diagnostics()
-            .iter()
-            .map(|diagnostic| diagnostic_to_lsp(uri, &document.text, diagnostic))
-            .collect::<Vec<_>>();
+        let diagnostics = diagnostics_to_lsp(uri, &document.text, document.analysis.diagnostics());
         let mut params = json!({
             "uri": uri,
             "diagnostics": diagnostics,
@@ -678,6 +721,30 @@ fn completion_items() -> Value {
             ),
         })
     }));
+    items.extend(STRING_PROPERTIES.iter().map(|property| {
+        json!({
+            "label": property.name,
+            "kind": 10,
+            "detail": property.signature,
+            "documentation": property.documentation,
+        })
+    }));
+    items.extend(STRING_COMPANION_METHODS.iter().map(|method| {
+        json!({
+            "label": format!("String::{}", method.name),
+            "kind": 3,
+            "detail": method.signature,
+            "documentation": method.documentation,
+        })
+    }));
+    items.extend(SHARED_OWNERSHIP_METHODS.iter().map(|method| {
+        json!({
+            "label": method.name,
+            "kind": 2,
+            "detail": method.signature,
+            "documentation": method.documentation,
+        })
+    }));
     items.extend([
         json!({
             "label": "Int::toFloat",
@@ -713,10 +780,10 @@ fn shared_ownership_type_description(name: &str) -> Option<&'static str> {
     match name {
         "SharedReference" => Some("`SharedReference<T>` is an owning readonly shared reference to a class payload. Construct it with `shared new T(...)`; `share()` adds an owner, `createWeakReference()` creates a weak handle, and member access forwards readonly to `T`."),
         "WeakReference" => Some("`WeakReference<T>` is a non-owning reference created from `SharedReference<T>`. `acquire()` returns `?SharedReference<T>` and yields `null` after the final strong owner releases the payload."),
-        "WritableSharedReference" => Some("Compiler-known writable shared-owner type. Its runtime-checked access guards land in the next Stage 25a implementation slice; it never converts to or from `SharedReference<T>`."),
-        "WritableWeakReference" => Some("Compiler-known weak form of `WritableSharedReference<T>`. Its runtime behavior lands with the writable Stage 25a family."),
-        "ReadonlySharedReferenceAccess" => Some("Compiler-known readonly access guard for `WritableSharedReference<T>`. Its runtime behavior lands with the writable Stage 25a family."),
-        "WritableSharedReferenceAccess" => Some("Compiler-known writable access guard for `WritableSharedReference<T>`. Its runtime behavior lands with the writable Stage 25a family."),
+        "WritableSharedReference" => Some("`WritableSharedReference<T>` owns a payload through the writable shared family. `share()` adds an owner, `createWeakReference()` creates a writable weak handle, and controlled payload access comes only from `acquireReadonlyAccess()` or `acquireWritableAccess()`. It never converts to or from `SharedReference<T>`."),
+        "WritableWeakReference" => Some("`WritableWeakReference<T>` is the non-owning writable-family handle. `acquire()` returns `?WritableSharedReference<T>` and never crosses into the readonly family."),
+        "ReadonlySharedReferenceAccess" => Some("`ReadonlySharedReferenceAccess<T>` is an owned move value that keeps a writable shared payload alive and forwards readonly properties, methods, indexing, and iteration. Destroying it releases readonly access before its strong ownership claim."),
+        "WritableSharedReferenceAccess" => Some("`WritableSharedReferenceAccess<T>` is an owned move value that exclusively forwards writable payload operations. The binding must be `writable` to mutate through it; destruction releases writable access before its strong ownership claim."),
         _ => None,
     }
 }
@@ -765,11 +832,13 @@ fn hover_at_offset_with_analysis(
     let token_index = tokens.iter().position(|token| {
         !matches!(token.kind, TokenKind::Eof)
             && token.span.start <= offset
-            && offset <= token.span.end
+            && offset < token.span.end
     })?;
     let token = &tokens[token_index];
-    let description = integer_conversion_hover_at(&tokens, token_index)
-        .or_else(|| hover_description(&token.kind))?;
+    let description = string_companion_hover_at(&tokens, token_index)
+        .or_else(|| integer_conversion_hover_at(&tokens, token_index).map(ToOwned::to_owned))
+        .or_else(|| builtin_method_hover_at(&tokens, token_index))
+        .or_else(|| hover_description(&token.kind).map(ToOwned::to_owned))?;
 
     Some(json!({
         "contents": {
@@ -778,6 +847,85 @@ fn hover_at_offset_with_analysis(
         },
         "range": span_to_range(text, token.span),
     }))
+}
+
+fn string_companion_hover_at(tokens: &[Token], token_index: usize) -> Option<String> {
+    if token_index < 2 || !matches!(tokens[token_index - 1].kind, TokenKind::DoubleColon) {
+        return None;
+    }
+    let TokenKind::Identifier(companion) = &tokens[token_index - 2].kind else {
+        return None;
+    };
+    let TokenKind::Identifier(method) = &tokens[token_index].kind else {
+        return None;
+    };
+    if companion != "String" {
+        return None;
+    }
+    let member = string_surface::string_companion_method(method)?;
+    Some(format!(
+        "```doria\n{}\n```\n\n{}",
+        member.signature, member.documentation
+    ))
+}
+
+struct BuiltinMethod {
+    name: &'static str,
+    signature: &'static str,
+    documentation: &'static str,
+}
+
+const SHARED_OWNERSHIP_METHODS: &[BuiltinMethod] = &[
+    BuiltinMethod {
+        name: "share",
+        signature: "function share(): SharedReference<T> | WritableSharedReference<T>",
+        documentation:
+            "Creates one additional owner in the receiver's existing shared-ownership family.",
+    },
+    BuiltinMethod {
+        name: "createWeakReference",
+        signature:
+            "function createWeakReference(): WeakReference<T> | WritableWeakReference<T>",
+        documentation:
+            "Creates a non-owning reference in the receiver's existing shared-ownership family.",
+    },
+    BuiltinMethod {
+        name: "acquire",
+        signature: "function acquire(): ?SharedReference<T> | ?WritableSharedReference<T>",
+        documentation: "Attempts to create a strong owner from a weak reference without changing ownership families. Returns `null` after the payload has been destroyed.",
+    },
+    BuiltinMethod {
+        name: "acquireReadonlyAccess",
+        signature: "function acquireReadonlyAccess(): ReadonlySharedReferenceAccess<T>",
+        documentation: "Acquires owned readonly access to a writable shared payload. Multiple readonly accesses may coexist.",
+    },
+    BuiltinMethod {
+        name: "acquireWritableAccess",
+        signature: "function acquireWritableAccess(): WritableSharedReferenceAccess<T>",
+        documentation:
+            "Acquires owned exclusive writable access to a writable shared payload.",
+    },
+];
+
+fn builtin_method_hover_at(tokens: &[Token], token_index: usize) -> Option<String> {
+    if token_index == 0
+        || !matches!(
+            tokens[token_index - 1].kind,
+            TokenKind::Arrow | TokenKind::QuestionArrow
+        )
+    {
+        return None;
+    }
+    let TokenKind::Identifier(name) = &tokens[token_index].kind else {
+        return None;
+    };
+    let method = SHARED_OWNERSHIP_METHODS
+        .iter()
+        .find(|method| method.name == name)?;
+    Some(format!(
+        "```doria\n{}\n```\n\n{}",
+        method.signature, method.documentation
+    ))
 }
 
 fn integer_conversion_hover_at(tokens: &[Token], token_index: usize) -> Option<&'static str> {
@@ -898,6 +1046,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "List" => Some("`List<T>` is the growable, insertion-ordered sequence: `add`, `insertAt`, `removeAt`, `pop`, `contains`, `first`/`last`, and the `count`/`isEmpty` properties (decision 0100). An owned move type."),
             "Dictionary" => Some("`Dictionary<K, V>` is the insertion-ordered map: `get` (`?V`), `set`, `remove` (`?V`), `has`, the `keys`/`values` projections, and `count`/`isEmpty` (decision 0100). Keys require `Hashable`. An owned move type."),
             "Set" => Some("`Set<T>` is the insertion-ordered unique-element collection: `Set::from`, `add`, `remove`, `contains`, `union`/`intersect`/`difference`, and `count`/`isEmpty` (decision 0100). Elements require `Hashable`. An owned move type."),
+            "String" => Some("`String` is the companion for canonical string operations. Text indices and lengths use Unicode extended grapheme clusters unless the API explicitly says bytes."),
             name @ ("SharedReference" | "WeakReference" | "WritableSharedReference"
             | "WritableWeakReference" | "ReadonlySharedReferenceAccess"
             | "WritableSharedReferenceAccess") => shared_ownership_type_description(name),
@@ -930,45 +1079,107 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
 }
 
 fn diagnostic_to_lsp(uri: &str, text: &str, diagnostic: &Diagnostic) -> Value {
-    let message = if let Some(help) = &diagnostic.help {
-        format!("{}\nHelp: {help}", diagnostic.message)
-    } else {
-        diagnostic.message.clone()
-    };
+    let primary = diagnostic
+        .labels
+        .iter()
+        .find(|label| label.role == LabelRole::Primary)
+        .or_else(|| diagnostic.labels.first());
+    let primary_span = primary.map_or(diagnostic.span, |label| label.span);
+    let mut message = diagnostic.title.clone();
+    if let Some(primary) = primary.filter(|label| !label.message.is_empty()) {
+        message.push('\n');
+        message.push_str(&primary.message);
+    }
+    if let Some(explanation) = &diagnostic.explanation {
+        message.push_str("\n\nWhy: ");
+        message.push_str(explanation);
+    }
+    for help in &diagnostic.helps {
+        message.push_str("\nHelp: ");
+        message.push_str(help);
+    }
 
     let mut value = json!({
-        "range": span_to_range(text, diagnostic.span),
-        "severity": 1,
+        "range": span_to_range(text, primary_span),
+        "severity": lsp_severity(diagnostic.severity),
         "code": diagnostic.code,
         "source": "doriac",
         "message": message,
+        "codeDescription": diagnostic.documentation.as_ref().and_then(|docs| {
+            docs.url.as_ref().map(|url| json!({ "href": url }))
+        }),
     });
-    if let Some(fix) = &diagnostic.fix {
-        value["data"] = json!({
-            "fix": {
-                "range": span_to_range(text, fix.span),
-                "newText": fix.replacement,
+    value["data"] = json!({
+        "kind": diagnostic.kind.as_str(),
+        "causeId": diagnostic.cause_id,
+        "fixes": diagnostic.fixes.iter().map(|fix| json!({
+            "title": fix.title,
+            "applicability": fix.applicability.as_str(),
+            "edits": fix.edits.iter().map(|edit| json!({
+                "uri": diagnostic_source_uri(uri, &edit.source),
+                "range": span_to_range(
+                    if matches!(&edit.source, DiagnosticSource::Current) { text } else { "" },
+                    edit.span,
+                ),
+                "newText": edit.replacement,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    });
+    if let Some(fix) = diagnostic
+        .fixes
+        .iter()
+        .find_map(|fix| match fix.edits.as_slice() {
+            [edit]
+                if fix.applicability == FixApplicability::MachineApplicable
+                    && matches!(&edit.source, DiagnosticSource::Current) =>
+            {
+                Some(edit)
             }
+            _ => None,
+        })
+    {
+        value["data"]["fix"] = json!({
+            "range": span_to_range(text, fix.span),
+            "newText": fix.replacement,
         });
     }
-    if !diagnostic.related.is_empty() {
-        value["relatedInformation"] = Value::Array(
-            diagnostic
-                .related
-                .iter()
-                .map(|related| {
-                    json!({
-                        "location": {
-                            "uri": uri,
-                            "range": span_to_range(text, related.span),
-                        },
-                        "message": related.message,
-                    })
-                })
-                .collect(),
-        );
+    let related = diagnostic
+        .labels
+        .iter()
+        .filter(|label| label.role == LabelRole::Secondary)
+        .map(|label| {
+            json!({
+                "location": {
+                    "uri": diagnostic_source_uri(uri, &label.source),
+                    "range": span_to_range(
+                        if matches!(&label.source, DiagnosticSource::Current) { text } else { "" },
+                        label.span,
+                    ),
+                },
+                "message": label.message,
+            })
+        })
+        .collect::<Vec<_>>();
+    if !related.is_empty() {
+        value["relatedInformation"] = Value::Array(related);
     }
     value
+}
+
+fn lsp_severity(severity: DiagnosticSeverity) -> u8 {
+    match severity {
+        DiagnosticSeverity::Error => 1,
+        DiagnosticSeverity::Warning => 2,
+        DiagnosticSeverity::Note => 3,
+    }
+}
+
+fn diagnostic_source_uri(current_uri: &str, source: &DiagnosticSource) -> String {
+    match source {
+        DiagnosticSource::Current => current_uri.to_string(),
+        DiagnosticSource::Path(path) if path.contains("://") => path.clone(),
+        DiagnosticSource::Path(path) => format!("file://{path}"),
+    }
 }
 
 fn span_to_range(text: &str, span: Span) -> Value {
@@ -1082,6 +1293,7 @@ fn send_message<W: Write>(writer: &mut W, message: &Value) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use doriac::diagnostics::{FixEdit, LabelRole};
 
     #[test]
     fn initialize_reports_canonical_toolchain_calver() {
@@ -1403,6 +1615,44 @@ function main(): void
         assert!(text.contains("function toString(): string"));
         assert!(text.contains("Other interfaces are not supported by this compiler"));
     }
+
+    #[test]
+    fn completions_and_hover_expose_the_executable_string_surface() {
+        for method in STRING_COMPANION_METHODS {
+            let item = completion_item(&format!("String::{}", method.name));
+            assert_eq!(item["detail"], method.signature);
+            assert_eq!(item["documentation"], method.documentation);
+        }
+        for property in STRING_PROPERTIES {
+            let item = completion_item(property.name);
+            assert_eq!(item["detail"], property.signature);
+            assert_eq!(item["documentation"], property.documentation);
+        }
+
+        let labels = completion_labels();
+        assert!(labels.contains(&"String::containsIgnoreCase".to_string()));
+        assert!(labels.contains(&"String::countOccurrences".to_string()));
+        assert!(!labels.contains(&"trim".to_string()));
+
+        let source = r#"function main(): void
+{
+    echo String::indexOfIgnoreCase("Straße", "STRASSE") ?? -1;
+}
+"#;
+        let hover = hover_at_offset(
+            source,
+            source
+                .find("indexOfIgnoreCase")
+                .expect("String companion call"),
+        )
+        .expect("String companion should provide hover information");
+        let markdown = hover["contents"]["value"]
+            .as_str()
+            .expect("hover should be Markdown");
+        assert!(markdown.contains("String::indexOfIgnoreCase(string $text, string $needle): ?int"));
+        assert!(markdown.contains("original grapheme sequence"));
+    }
+
     #[test]
     fn hover_help_tracks_stage22_narrowing() {
         let null_hover = hover_description(&TokenKind::Null).expect("null should have hover text");
@@ -1451,6 +1701,44 @@ function main(): void
             .expect("WeakReference hover");
         assert!(weak.contains("`acquire()`"));
         assert!(weak.contains("`?SharedReference<T>`"));
+
+        let writable = hover_description(&TokenKind::Identifier(
+            "WritableSharedReference".to_string(),
+        ))
+        .expect("WritableSharedReference hover");
+        assert!(writable.contains("`acquireReadonlyAccess()`"));
+        assert!(writable.contains("`acquireWritableAccess()`"));
+        assert!(!writable.contains("next Stage 25a"));
+
+        for member in [
+            "share",
+            "createWeakReference",
+            "acquire",
+            "acquireReadonlyAccess",
+            "acquireWritableAccess",
+        ] {
+            assert_eq!(completion_item(member)["kind"], 2);
+            let source = format!("$value->{member}();");
+            let hover = hover_at_offset(&source, source.find(member).unwrap())
+                .unwrap_or_else(|| panic!("{member} should provide member-call hover information"));
+            assert!(hover["contents"]["value"]
+                .as_str()
+                .is_some_and(|contents| contents.contains("function")));
+        }
+
+        let source = "$value?->acquire();";
+        let acquire = hover_at_offset(source, source.find("acquire").unwrap())
+            .expect("acquire should provide fallback hover");
+        let acquire = acquire["contents"]["value"]
+            .as_str()
+            .expect("hover contents should be markdown");
+        assert!(acquire
+            .contains("function acquire(): ?SharedReference<T> | ?WritableSharedReference<T>"));
+        assert!(acquire.contains("Returns `null`"));
+        assert!(
+            hover_at_offset("share;", 1).is_none(),
+            "an unrelated identifier must not receive ownership-method hover"
+        );
     }
 
     #[test]
@@ -1681,5 +1969,132 @@ function main(): void
             assert!(hover.contains(required_hover), "{name}: {hover}");
         }
         assert!(!completion_labels().contains(&"print".to_string()));
+    }
+
+    #[test]
+    fn structured_diagnostics_preserve_severity_related_utf16_and_fix_safety() {
+        let uri = "file:///main.doria";
+        let text = "let $emoji = \"😀\";\n$x = 1;\n";
+        let use_span = Span::new(text.find("$x").unwrap(), text.find("$x").unwrap() + 2);
+        let emoji = text.find('😀').unwrap();
+        let diagnostic = Diagnostic::new("E0201", "example warning", use_span)
+            .with_title("Example Warning")
+            .with_severity(DiagnosticSeverity::Warning)
+            .with_label(
+                DiagnosticSource::Current,
+                Span::new(emoji, emoji + "😀".len()),
+                LabelRole::Secondary,
+                "wide character here",
+            )
+            .with_structured_fix(
+                "Review Both Files",
+                FixApplicability::RequiresReview,
+                vec![
+                    FixEdit {
+                        source: DiagnosticSource::Current,
+                        span: use_span,
+                        replacement: "$value".to_string(),
+                    },
+                    FixEdit {
+                        source: DiagnosticSource::Path("/other.doria".to_string()),
+                        span: Span::new(0, 1),
+                        replacement: "x".to_string(),
+                    },
+                ],
+            );
+
+        let lsp = diagnostic_to_lsp(uri, text, &diagnostic);
+        assert_eq!(lsp["severity"], 2);
+        assert_eq!(
+            lsp["relatedInformation"][0]["location"]["range"]["start"]["character"],
+            14
+        );
+        assert_eq!(
+            lsp["relatedInformation"][0]["location"]["range"]["end"]["character"],
+            16
+        );
+        assert_eq!(lsp["data"]["fixes"][0]["applicability"], "requiresReview");
+        assert!(
+            code_action_for_fix(uri, text, &diagnostic, &diagnostic.fixes[0]).is_none(),
+            "requires-review fixes must never become automatic code actions"
+        );
+
+        let cross_file = Diagnostic::new("E0201", "cross-file fix", use_span).with_structured_fix(
+            "Edit Both Files",
+            FixApplicability::MachineApplicable,
+            vec![
+                FixEdit {
+                    source: DiagnosticSource::Current,
+                    span: use_span,
+                    replacement: "$value".to_string(),
+                },
+                FixEdit {
+                    source: DiagnosticSource::Path("/other.doria".to_string()),
+                    span: Span::new(8, 12),
+                    replacement: "name".to_string(),
+                },
+            ],
+        );
+        assert!(
+            code_action_for_fix(uri, text, &cross_file, &cross_file.fixes[0]).is_none(),
+            "cross-file fixes need target text before they can become automatic actions"
+        );
+        assert!(
+            diagnostic_to_lsp(uri, text, &cross_file)["data"]["fix"].is_null(),
+            "the legacy single-edit field must not advertise part of a multi-file fix"
+        );
+    }
+
+    #[test]
+    fn live_diagnostics_use_compiler_owned_duplicate_and_cause_grouping() {
+        let uri = "file:///main.doria";
+        let text = "$missing;\n$other;\n";
+        let root = Diagnostic::new("E0201", "unknown identifier `$missing`", Span::new(0, 8))
+            .with_cause("missing");
+        let duplicate = root.clone();
+        let consequence =
+            Diagnostic::new("E0403", "cannot determine the value type", Span::new(0, 8))
+                .with_cause("missing")
+                .as_consequence();
+        let independent =
+            Diagnostic::new("E0201", "unknown identifier `$other`", Span::new(10, 16));
+
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document {
+                text: text.to_string(),
+                version: Some(7),
+                analysis: AnalysisSnapshot::from_diagnostics(vec![
+                    root,
+                    duplicate,
+                    consequence,
+                    independent,
+                ]),
+            },
+        );
+        let mut output = Vec::new();
+        server.publish_diagnostics(uri, &mut output).unwrap();
+        let body_start = output
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("LSP header terminator")
+            + 4;
+        let notification: Value =
+            serde_json::from_slice(&output[body_start..]).expect("diagnostic notification");
+        let diagnostics = notification["params"]["diagnostics"]
+            .as_array()
+            .expect("published diagnostics should be an array");
+
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(
+            diagnostics[0]["relatedInformation"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(diagnostics[1]["range"]["start"]["line"], 1);
+        assert_eq!(notification["params"]["version"], 7);
     }
 }

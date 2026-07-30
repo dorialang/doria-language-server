@@ -1381,7 +1381,7 @@ function check_fixture(): void
         '\n\t\r\s',
         'use App\Repositories\UserRepository;',
         'get_time()',
-        'str_starts_with($name, "Dor")',
+        'String::startsWith($name, "Dor")',
         'Int::wrappingAdd(1, 2)',
         '$name->isEmpty()',
         '$message->retryAfter(seconds: 30)',
@@ -1400,6 +1400,10 @@ function check_fixture(): void
     foreach ($requiredSnippets as $snippet) {
         require_check(str_contains($fixtureText, $snippet), 'shared editor fixture is missing ' . $snippet);
     }
+    require_check(
+        !str_contains($fixtureText, 'str_starts_with('),
+        'shared editor fixture must not publish the removed Doria str_* String surface',
+    );
 
     $stage13TypeSnippets = [
         'int8 $minimumInt8 = -128;',

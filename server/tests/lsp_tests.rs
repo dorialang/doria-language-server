@@ -54,7 +54,7 @@ $count = 1;
     assert!(diagnostics[0]["message"]
         .as_str()
         .expect("message should be string")
-        .contains("readonly variable"));
+        .contains("Cannot Write to Readonly Binding"));
 }
 
 #[test]
@@ -100,7 +100,7 @@ fn exposes_writable_constructor_removal_as_a_preferred_code_action() {
         .find(|action| {
             action["title"]
                 .as_str()
-                .is_some_and(|title| title.contains("construction grants `__construct`"))
+                .is_some_and(|title| title.contains("Construction Grants `__construct`"))
         })
         .expect("writable lifecycle diagnostic should expose a quick fix");
 
@@ -197,6 +197,44 @@ class Counter
 }
 
 #[test]
+fn executable_string_surface_has_no_false_diagnostics() {
+    let diagnostics = diagnostics_for_document(
+        "file:///strings.doria",
+        r#"function main(): void
+{
+    string $text = String::trim("  Straße 👍🏾  ");
+    int $characters = $text->length;
+    int $bytes = $text->byteLength;
+    bool $found = String::containsIgnoreCase($text, "STRASSE");
+    int $count = String::countOccurrences("ha ha", "ha");
+    string $title = String::upperFirst("doria");
+    echo "{$characters}:{$bytes}:{$found}:{$count}:{$title}\n";
+}
+"#,
+    );
+
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn string_diagnostics_keep_utf16_positions_after_emoji() {
+    let source = r#"function main(): void { echo "😀"; String::contains("text", 1); }"#;
+    let diagnostics = diagnostics_for_document("file:///strings.doria", source);
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0408")
+        .expect("wrong String argument type should be reported");
+    let argument = source.rfind('1').expect("invalid argument");
+    let expected = byte_offset_to_position(source, argument);
+
+    assert_eq!(diagnostic["range"]["start"]["line"], expected.line);
+    assert_eq!(
+        diagnostic["range"]["start"]["character"],
+        expected.character
+    );
+}
+
+#[test]
 fn readonly_shared_ownership_has_no_false_diagnostics() {
     let diagnostics = diagnostics_for_document(
         "file:///shared.doria",
@@ -211,12 +249,20 @@ function inspect(SharedReference<Node> $node): void
     echo $node->name;
 }
 
+function choose(
+    take ?SharedReference<Node> $left,
+    take ?SharedReference<Node> $right,
+): ?SharedReference<Node>
+{
+    return $left ?? $right;
+}
+
 function main(): void
 {
     let $root = shared new Node("root");
     let $weak = $root->createWeakReference();
     inspect($root->share());
-    let $live = $weak->acquire();
+    let $live = choose($weak->acquire(), null);
     if ($live != null) {
         inspect($live);
     }
@@ -224,6 +270,130 @@ function main(): void
 "#,
     );
     assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn writable_shared_ownership_has_no_false_diagnostics() {
+    let diagnostics = diagnostics_for_document(
+        "file:///writable-shared.doria",
+        r#"
+class Counter
+{
+    writable int $value = 0;
+}
+
+function update(WritableSharedReference<Counter> $counter): void
+{
+    let writable $write = $counter->acquireWritableAccess();
+    $write->value++;
+}
+
+function main(): void
+{
+    let $counter = new WritableSharedReference(new Counter());
+    let $second = $counter->share();
+    let $weak = $counter->createWeakReference();
+    update($counter);
+
+    let $live = $weak->acquire();
+    if ($live != null) {
+        let $read = $second->acquireReadonlyAccess();
+        echo $read->value;
+    }
+}
+"#,
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn standalone_blocks_have_no_false_diagnostics() {
+    let diagnostics = diagnostics_for_document(
+        "file:///standalone-block.doria",
+        r#"
+class Counter
+{
+    writable int $value = 0;
+}
+
+function main(): void
+{
+    let $counter = new WritableSharedReference(new Counter());
+
+    {
+        let writable $access = $counter->acquireWritableAccess();
+        $access->value++;
+    }
+
+    let $access = $counter->acquireReadonlyAccess();
+    echo "{$access->value}\n";
+}
+"#,
+    );
+
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn writable_shared_diagnostics_come_from_the_compiler_surface() {
+    let cases = [
+        (
+            "file:///direct-access.doria",
+            r#"
+class Counter { writable int $value = 0; }
+let $counter = new WritableSharedReference(new Counter());
+echo $counter->value;
+"#,
+            "E0548",
+        ),
+        (
+            "file:///readonly-access-write.doria",
+            r#"
+class Counter { writable int $value = 0; }
+let $counter = new WritableSharedReference(new Counter());
+let $read = $counter->acquireReadonlyAccess();
+$read->value = 1;
+"#,
+            "E0201",
+        ),
+        (
+            "file:///family-crossing.doria",
+            r#"
+class Counter {}
+let $counter = new WritableSharedReference(new Counter());
+SharedReference<Counter> $wrong = $counter;
+"#,
+            "E0403",
+        ),
+        (
+            "file:///direct-access-construction.doria",
+            r#"
+class Counter {}
+let $bad = new ReadonlySharedReferenceAccess<Counter>();
+"#,
+            "E0543",
+        ),
+        (
+            "file:///use-after-move.doria",
+            r#"
+class Counter {}
+let $counter = new WritableSharedReference(new Counter());
+let $moved = $counter;
+let $bad = $counter->share();
+"#,
+            "E0470",
+        ),
+    ];
+
+    for (uri, source, expected_code) in cases {
+        let diagnostics = diagnostics_for_document(uri, source);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic["code"] == expected_code),
+            "{uri} should report {expected_code}: {diagnostics:#?}"
+        );
+    }
 }
 
 #[test]

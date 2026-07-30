@@ -3,6 +3,7 @@ package dev.doria.intellij.lsp
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.SystemInfo
 import dev.doria.intellij.settings.DoriaSettings
+import java.nio.file.Path
 import java.nio.file.Paths
 
 object DoriaLspServerPathResolver {
@@ -17,16 +18,23 @@ object DoriaLspServerPathResolver {
             return fromEnvironment
         }
 
-        val workspaceBinary = workspaceBinary(project)
-        if (workspaceBinary != null && workspaceBinary.toFile().exists()) {
-            return workspaceBinary.toAbsolutePath().toString()
+        val installedBinary = cargoBinCandidates(
+            System.getenv(),
+            System.getProperty("user.home"),
+        ).firstOrNull { it.toFile().exists() }
+        if (installedBinary != null) {
+            return installedBinary.toAbsolutePath().toString()
         }
 
         return executableName()
     }
 
-    private fun workspaceBinary(project: Project) =
-        project.basePath?.let { basePath -> Paths.get(basePath, "target", "debug", executableName()) }
+    internal fun cargoBinCandidates(environment: Map<String, String>, userHome: String): List<Path> {
+        val root = environment["CARGO_INSTALL_ROOT"]?.takeIf { it.isNotBlank() }
+            ?: environment["CARGO_HOME"]?.takeIf { it.isNotBlank() }
+            ?: Paths.get(userHome, ".cargo").toString()
+        return listOf(Paths.get(root, "bin", executableName()))
+    }
 
     private fun executableName(): String = if (SystemInfo.isWindows) "doria-lsp.exe" else "doria-lsp"
 

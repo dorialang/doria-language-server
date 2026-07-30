@@ -12,6 +12,13 @@ This repository owns Doria's language server, syntax highlighting, shared editor
 ## Guardrails
 
 - Do not duplicate compiler parsing, semantic checking, or diagnostics in editor clients.
+- Preserve the compiler's structured diagnostic model. Use its primary label for
+  the LSP range, secondary labels for related information, explicit severity,
+  and compiler-owned cause grouping. Do not regroup or suppress findings by
+  matching prose.
+- Publish automatic quick fixes only for compiler fixes marked Machine
+  Applicable. Requires Review and Informational fixes may remain diagnostic
+  detail but are not automatic code actions.
 - Keep VS Code and IntelliJ / JetBrains syntax highlighting aligned.
 - Treat TextMate and IntelliJ lexing as presentation only, never as compiler implementation.
 - Planned keywords may be highlighted, but documentation and UI must not claim compiler support prematurely.

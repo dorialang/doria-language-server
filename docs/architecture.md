@@ -25,6 +25,14 @@ The compiler owns tokenization, parsing, semantic and type checking, diagnostic 
 
 The server owns LSP transport, document state, UTF-16/UTF-8 position conversion, protocol capability negotiation, and conversion of compiler results into LSP diagnostics, completion, hover, and code actions.
 
+That conversion is loss-aware. The compiler's primary diagnostic label supplies
+the LSP range; secondary labels are exported as related information with UTF-16
+positions; explanations and Help remain readable diagnostic detail; stable
+codes, severity, kind, cause identity, documentation links, and structured fixes
+are retained. Duplicate and cause grouping stay compiler-owned. Only
+Machine Applicable fixes become automatic code actions, so clients never guess
+at a semantic correction.
+
 The server may organize IDE-friendly data but must not create a second semantic checker.
 Each open document has one versioned compiler-backed analysis snapshot containing
 diagnostics, symbols, and resolved source occurrences. Diagnostics and semantic

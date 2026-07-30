@@ -10,6 +10,12 @@ This repository is the home of `doria-lsp`, syntax highlighting, and IDE integra
 
 This repository owns the standalone `doria-lsp` binary, editor clients, shared syntax fixtures, and their release artifacts. The server consumes a commit-pinned `doriac` library dependency; it does not duplicate the compiler's lexer, parser, semantic checker, or diagnostics.
 
+Compiler diagnostics remain structured through the editor boundary: the primary
+label becomes the editor range, secondary labels become related locations,
+severity and stable codes are preserved, and only fixes the compiler marks
+Machine Applicable are offered as automatic quick fixes. This keeps the CLI,
+editors, and Playground aligned on one diagnostic meaning.
+
 Current editor support includes:
 
 - VS Code language registration, TextMate highlighting, editor configuration,
@@ -108,9 +114,13 @@ Both editor clients resolve the server in this order:
 
 1. The editor's explicit Doria language-server setting.
 2. `DORIA_LSP_PATH`.
-3. `target/debug/doria-lsp` in the open project.
-4. The platform-matched `doria-lsp` bundled with the editor package.
+3. The platform-matched `doria-lsp` bundled with the editor package, when present.
+4. Cargo's installed bin directory.
 5. `doria-lsp` on `PATH`.
+
+Repository-local `target/debug` binaries are used only when selected explicitly.
+This prevents an old or partially rebuilt workspace artifact from silently
+becoming the IDE's language server.
 
 ## Development
 
@@ -153,10 +163,17 @@ php scripts/build.php server --compiler-path ../doria
 
 Use `all` instead of `server` to package both editor clients in the same command.
 The local compiler mode creates a disposable runner under `target/`, writes the
-resulting executable to the normal `target/debug/doria-lsp` path in both
-repositories, and does not change the commit-pinned `Cargo.toml` or `Cargo.lock`.
-This lets both editor clients discover the matching server from an open compiler
-workspace. Restart the language server or IDE after replacing a running executable.
+resulting executable under this repository's `target/`, and does not change the
+commit-pinned `Cargo.toml` or `Cargo.lock`. Install a compiler-matched server with:
+
+```bash
+php scripts/build.php install-server --compiler-path ../doria
+```
+
+Editor clients prefer explicit settings or environment overrides, then bundled
+or Cargo-installed release artifacts. They do not silently execute mutable
+workspace `target/debug` binaries. Restart the language server or IDE after
+replacing a running executable.
 
 ## Versioning
 
