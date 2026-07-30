@@ -4,7 +4,10 @@ use std::process::ExitCode;
 
 use serde_json::{json, Value};
 
-use doriac::diagnostics::Diagnostic;
+use doriac::diagnostics::{
+    prepare_diagnostics, Diagnostic, DiagnosticFix, DiagnosticSeverity, DiagnosticSource,
+    FixApplicability, LabelRole,
+};
 use doriac::lexer::{Token, TokenKind};
 use doriac::source::Span;
 
@@ -171,40 +174,63 @@ pub fn position_to_byte_offset(text: &str, line: u32, character: u32) -> usize {
 }
 
 pub fn diagnostics_for_document(uri: &str, text: &str) -> Vec<Value> {
-    AnalysisSnapshot::analyze(uri, text)
-        .diagnostics()
+    let snapshot = AnalysisSnapshot::analyze(uri, text);
+    diagnostics_to_lsp(uri, text, snapshot.diagnostics())
+}
+
+fn diagnostics_to_lsp(uri: &str, text: &str, diagnostics: &[Diagnostic]) -> Vec<Value> {
+    prepare_diagnostics(diagnostics)
         .iter()
         .map(|diagnostic| diagnostic_to_lsp(uri, text, diagnostic))
         .collect()
 }
 
 pub fn code_actions_for_document(uri: &str, text: &str) -> Vec<Value> {
-    AnalysisSnapshot::analyze(uri, text)
-        .diagnostics()
+    prepare_diagnostics(AnalysisSnapshot::analyze(uri, text).diagnostics())
         .iter()
-        .filter_map(|diagnostic| {
-            let fix = diagnostic.fix.as_ref()?;
-            let edit = json!({
-                "range": span_to_range(text, fix.span),
-                "newText": fix.replacement,
-            });
-            let mut changes = serde_json::Map::new();
-            changes.insert(uri.to_string(), Value::Array(vec![edit]));
-
-            Some(json!({
-                "title": diagnostic
-                    .help
-                    .as_deref()
-                    .unwrap_or("Apply compiler-suggested fix"),
-                "kind": "quickfix",
-                "diagnostics": [diagnostic_to_lsp(uri, text, diagnostic)],
-                "isPreferred": true,
-                "edit": {
-                    "changes": changes,
-                },
-            }))
+        .flat_map(|diagnostic| {
+            diagnostic
+                .fixes
+                .iter()
+                .filter_map(move |fix| code_action_for_fix(uri, text, diagnostic, fix))
         })
         .collect()
+}
+
+fn code_action_for_fix(
+    uri: &str,
+    text: &str,
+    diagnostic: &Diagnostic,
+    fix: &DiagnosticFix,
+) -> Option<Value> {
+    if fix.applicability != FixApplicability::MachineApplicable {
+        return None;
+    }
+    let mut changes = serde_json::Map::new();
+    for edit in &fix.edits {
+        let edit_uri = diagnostic_source_uri(uri, &edit.source);
+        let source_text = if edit_uri == uri { text } else { "" };
+        let lsp_edit = json!({
+            "range": span_to_range(source_text, edit.span),
+            "newText": edit.replacement,
+        });
+        changes
+            .entry(edit_uri)
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("code-action change is always an array")
+            .push(lsp_edit);
+    }
+
+    Some(json!({
+        "title": fix.title,
+        "kind": "quickfix",
+        "diagnostics": [diagnostic_to_lsp(uri, text, diagnostic)],
+        "isPreferred": true,
+        "edit": {
+            "changes": changes,
+        },
+    }))
 }
 
 impl Server {
@@ -990,45 +1016,100 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
 }
 
 fn diagnostic_to_lsp(uri: &str, text: &str, diagnostic: &Diagnostic) -> Value {
-    let message = if let Some(help) = &diagnostic.help {
-        format!("{}\nHelp: {help}", diagnostic.message)
-    } else {
-        diagnostic.message.clone()
-    };
+    let primary = diagnostic
+        .labels
+        .iter()
+        .find(|label| label.role == LabelRole::Primary)
+        .or_else(|| diagnostic.labels.first());
+    let primary_span = primary.map_or(diagnostic.span, |label| label.span);
+    let mut message = diagnostic.title.clone();
+    if let Some(primary) = primary.filter(|label| !label.message.is_empty()) {
+        message.push('\n');
+        message.push_str(&primary.message);
+    }
+    if let Some(explanation) = &diagnostic.explanation {
+        message.push_str("\n\nWhy: ");
+        message.push_str(explanation);
+    }
+    for help in &diagnostic.helps {
+        message.push_str("\nHelp: ");
+        message.push_str(help);
+    }
 
     let mut value = json!({
-        "range": span_to_range(text, diagnostic.span),
-        "severity": 1,
+        "range": span_to_range(text, primary_span),
+        "severity": lsp_severity(diagnostic.severity),
         "code": diagnostic.code,
         "source": "doriac",
         "message": message,
+        "codeDescription": diagnostic.documentation.as_ref().and_then(|docs| {
+            docs.url.as_ref().map(|url| json!({ "href": url }))
+        }),
     });
-    if let Some(fix) = &diagnostic.fix {
-        value["data"] = json!({
-            "fix": {
-                "range": span_to_range(text, fix.span),
-                "newText": fix.replacement,
-            }
+    value["data"] = json!({
+        "kind": diagnostic.kind.as_str(),
+        "causeId": diagnostic.cause_id,
+        "fixes": diagnostic.fixes.iter().map(|fix| json!({
+            "title": fix.title,
+            "applicability": fix.applicability.as_str(),
+            "edits": fix.edits.iter().map(|edit| json!({
+                "uri": diagnostic_source_uri(uri, &edit.source),
+                "range": span_to_range(
+                    if matches!(&edit.source, DiagnosticSource::Current) { text } else { "" },
+                    edit.span,
+                ),
+                "newText": edit.replacement,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    });
+    if let Some(fix) = diagnostic
+        .fixes
+        .iter()
+        .find(|fix| fix.applicability == FixApplicability::MachineApplicable)
+        .and_then(|fix| fix.edits.first())
+    {
+        value["data"]["fix"] = json!({
+            "range": span_to_range(text, fix.span),
+            "newText": fix.replacement,
         });
     }
-    if !diagnostic.related.is_empty() {
-        value["relatedInformation"] = Value::Array(
-            diagnostic
-                .related
-                .iter()
-                .map(|related| {
-                    json!({
-                        "location": {
-                            "uri": uri,
-                            "range": span_to_range(text, related.span),
-                        },
-                        "message": related.message,
-                    })
-                })
-                .collect(),
-        );
+    let related = diagnostic
+        .labels
+        .iter()
+        .filter(|label| label.role == LabelRole::Secondary)
+        .map(|label| {
+            json!({
+                "location": {
+                    "uri": diagnostic_source_uri(uri, &label.source),
+                    "range": span_to_range(
+                        if matches!(&label.source, DiagnosticSource::Current) { text } else { "" },
+                        label.span,
+                    ),
+                },
+                "message": label.message,
+            })
+        })
+        .collect::<Vec<_>>();
+    if !related.is_empty() {
+        value["relatedInformation"] = Value::Array(related);
     }
     value
+}
+
+fn lsp_severity(severity: DiagnosticSeverity) -> u8 {
+    match severity {
+        DiagnosticSeverity::Error => 1,
+        DiagnosticSeverity::Warning => 2,
+        DiagnosticSeverity::Note => 3,
+    }
+}
+
+fn diagnostic_source_uri(current_uri: &str, source: &DiagnosticSource) -> String {
+    match source {
+        DiagnosticSource::Current => current_uri.to_string(),
+        DiagnosticSource::Path(path) if path.contains("://") => path.clone(),
+        DiagnosticSource::Path(path) => format!("file://{path}"),
+    }
 }
 
 fn span_to_range(text: &str, span: Span) -> Value {
@@ -1142,6 +1223,7 @@ fn send_message<W: Write>(writer: &mut W, message: &Value) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use doriac::diagnostics::{FixEdit, LabelRole};
 
     #[test]
     fn initialize_reports_canonical_toolchain_calver() {
@@ -1763,5 +1845,82 @@ function main(): void
             assert!(hover.contains(required_hover), "{name}: {hover}");
         }
         assert!(!completion_labels().contains(&"print".to_string()));
+    }
+
+    #[test]
+    fn structured_diagnostics_preserve_severity_related_utf16_and_fix_safety() {
+        let uri = "file:///main.doria";
+        let text = "let $emoji = \"😀\";\n$x = 1;\n";
+        let use_span = Span::new(text.find("$x").unwrap(), text.find("$x").unwrap() + 2);
+        let emoji = text.find('😀').unwrap();
+        let diagnostic = Diagnostic::new("E0201", "example warning", use_span)
+            .with_title("Example Warning")
+            .with_severity(DiagnosticSeverity::Warning)
+            .with_label(
+                DiagnosticSource::Current,
+                Span::new(emoji, emoji + "😀".len()),
+                LabelRole::Secondary,
+                "wide character here",
+            )
+            .with_structured_fix(
+                "Review Both Files",
+                FixApplicability::RequiresReview,
+                vec![
+                    FixEdit {
+                        source: DiagnosticSource::Current,
+                        span: use_span,
+                        replacement: "$value".to_string(),
+                    },
+                    FixEdit {
+                        source: DiagnosticSource::Path("/other.doria".to_string()),
+                        span: Span::new(0, 1),
+                        replacement: "x".to_string(),
+                    },
+                ],
+            );
+
+        let lsp = diagnostic_to_lsp(uri, text, &diagnostic);
+        assert_eq!(lsp["severity"], 2);
+        assert_eq!(
+            lsp["relatedInformation"][0]["location"]["range"]["start"]["character"],
+            14
+        );
+        assert_eq!(
+            lsp["relatedInformation"][0]["location"]["range"]["end"]["character"],
+            16
+        );
+        assert_eq!(lsp["data"]["fixes"][0]["applicability"], "requiresReview");
+        assert!(
+            code_action_for_fix(uri, text, &diagnostic, &diagnostic.fixes[0]).is_none(),
+            "requires-review fixes must never become automatic code actions"
+        );
+    }
+
+    #[test]
+    fn lsp_uses_compiler_owned_duplicate_and_cause_grouping() {
+        let uri = "file:///main.doria";
+        let text = "$missing;\n$other;\n";
+        let root = Diagnostic::new("E0201", "unknown identifier `$missing`", Span::new(0, 8))
+            .with_cause("missing");
+        let duplicate = root.clone();
+        let consequence =
+            Diagnostic::new("E0403", "cannot determine the value type", Span::new(0, 8))
+                .with_cause("missing")
+                .as_consequence();
+        let independent =
+            Diagnostic::new("E0201", "unknown identifier `$other`", Span::new(10, 16));
+
+        let diagnostics =
+            diagnostics_to_lsp(uri, text, &[root, duplicate, consequence, independent]);
+
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(
+            diagnostics[0]["relatedInformation"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(diagnostics[1]["range"]["start"]["line"], 1);
     }
 }

@@ -219,7 +219,7 @@ dependencies = [
 [[package]]
 name = "doriac"
 version = "2026.3.1-canary"
-source = "git+https://github.com/dorialang/doria?rev=efc63edb012761ff0f35b3f50de9a0d0d8f07101#efc63edb012761ff0f35b3f50de9a0d0d8f07101"
+source = "git+https://github.com/dorialang/doria?rev=62334bf08e1ce4bcf8ea5fe4af2975267d800168#62334bf08e1ce4bcf8ea5fe4af2975267d800168"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -228,6 +228,7 @@ dependencies = [
  "cranelift-object",
  "ryu",
  "serde_json",
+ "unicode-width",
 ]
 
 [[package]]
@@ -453,6 +454,12 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-width"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
 name = "wasmtime-internal-core"

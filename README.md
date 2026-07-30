@@ -10,6 +10,12 @@ This repository is the home of `doria-lsp`, syntax highlighting, and IDE integra
 
 This repository owns the standalone `doria-lsp` binary, editor clients, shared syntax fixtures, and their release artifacts. The server consumes a commit-pinned `doriac` library dependency; it does not duplicate the compiler's lexer, parser, semantic checker, or diagnostics.
 
+Compiler diagnostics remain structured through the editor boundary: the primary
+label becomes the editor range, secondary labels become related locations,
+severity and stable codes are preserved, and only fixes the compiler marks
+Machine Applicable are offered as automatic quick fixes. This keeps the CLI,
+editors, and Playground aligned on one diagnostic meaning.
+
 Current editor support includes:
 
 - VS Code language registration, TextMate highlighting, editor configuration,

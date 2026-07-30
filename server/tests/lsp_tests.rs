@@ -54,7 +54,7 @@ $count = 1;
     assert!(diagnostics[0]["message"]
         .as_str()
         .expect("message should be string")
-        .contains("readonly variable"));
+        .contains("Cannot Write to Readonly Binding"));
 }
 
 #[test]
@@ -100,7 +100,7 @@ fn exposes_writable_constructor_removal_as_a_preferred_code_action() {
         .find(|action| {
             action["title"]
                 .as_str()
-                .is_some_and(|title| title.contains("construction grants `__construct`"))
+                .is_some_and(|title| title.contains("Construction Grants `__construct`"))
         })
         .expect("writable lifecycle diagnostic should expose a quick fix");
 
