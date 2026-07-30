@@ -138,9 +138,9 @@ function main(List<string> $args): void
 
     let $displayName = $maybeUser?->name ?? "anonymous";
 
-    // Naming charter: built-in free functions are snake_case; member APIs are camelCase.
+    // Naming charter: cross-domain built-ins are snake_case; type-specific APIs use companions.
     let $now = get_time();
-    let $startsWithDor = str_starts_with($name, "Dor");
+    let $startsWithDor = String::startsWith($name, "Dor");
     let $wrapped = Int::wrappingAdd(1, 2);
     let $empty = $name->isEmpty();
     Message $message = new Message();
