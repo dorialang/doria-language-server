@@ -21,6 +21,12 @@ References are returned only when the compiler can resolve them safely. Existing
 keyword, primitive type, and compiler-intrinsic hover remains available as a lexical
 fallback.
 
+Compiler-known ownership and collection methods use the same signature-first
+presentation. When the compiler resolves the receiver, hover substitutes its concrete
+generic arguments and exact return type; for example, `WeakReference<Theme>::acquire()`
+returns `?SharedReference<Theme>`. In incomplete code, the lexical fallback still shows
+the generic callable signature rather than documentation alone.
+
 The server never guesses a symbol from spelling alone. Ambiguous or unresolved
 identifiers return no semantic hover.
 

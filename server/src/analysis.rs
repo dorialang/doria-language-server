@@ -8,6 +8,7 @@ use doriac::diagnostics::Diagnostic;
 use doriac::lexer::{Token, TokenKind};
 use doriac::semantics::{CallableTarget, SemanticInfo};
 use doriac::source::Span;
+use doriac::types::{ResolvedType, SharedHandleKind};
 
 #[derive(Debug, Clone)]
 pub(crate) struct SemanticHover {
@@ -371,12 +372,32 @@ impl<'a> SnapshotBuilder<'a> {
                 method,
                 args,
                 span,
-                ..
+                null_safe,
             } => {
                 self.visit_expr(object, current_class, parent_class);
                 for argument in args {
                     self.visit_expr(&argument.value, current_class, parent_class);
                 }
+                let method_span =
+                    self.member_name_span(Span::new(object.span().end, span.end), method);
+                let builtin_hover = self.semantic_info.and_then(|info| {
+                    let receiver = info.expression_type(object.span())?;
+                    compiler_known_method_hover(
+                        receiver,
+                        method,
+                        *null_safe,
+                        info.expression_type(*span),
+                    )
+                });
+                if let (Some(method_span), Some(hover)) = (method_span, builtin_hover) {
+                    self.add_symbol(
+                        method_span,
+                        hover.signature,
+                        Some(hover.documentation.to_string()),
+                    );
+                    return;
+                }
+
                 let target = self.semantic_info.and_then(|info| info.call_target(*span));
                 let resolved_class = match target {
                     Some(CallableTarget::Method {
@@ -388,9 +409,7 @@ impl<'a> SnapshotBuilder<'a> {
                 };
                 if let Some(class_name) = resolved_class {
                     if let Some(symbol) = self.resolve_method(class_name, method) {
-                        if let Some(method_span) =
-                            self.member_name_span(Span::new(object.span().end, span.end), method)
-                        {
+                        if let Some(method_span) = method_span {
                             self.occurrences.push(Occurrence {
                                 span: method_span,
                                 symbol,
@@ -540,6 +559,232 @@ impl<'a> SnapshotBuilder<'a> {
 
     fn member_name_span(&self, search_span: Span, name: &str) -> Option<Span> {
         find_identifier_span(self.tokens, search_span, name)
+    }
+}
+
+struct CompilerKnownMethodHover {
+    signature: String,
+    documentation: &'static str,
+}
+
+fn compiler_known_method_hover(
+    receiver: &ResolvedType,
+    method: &str,
+    null_safe: bool,
+    resolved_return: Option<&ResolvedType>,
+) -> Option<CompilerKnownMethodHover> {
+    let receiver_type = non_nullable_type(receiver);
+    let (parameters, fallback_return, documentation) =
+        shared_ownership_method(receiver_type, method)
+            .or_else(|| collection_method(receiver_type, method))?;
+    let return_type = resolved_return
+        .filter(|ty| !matches!(ty, ResolvedType::Unsupported))
+        .map(display_resolved_type)
+        .unwrap_or_else(|| {
+            if null_safe && fallback_return != "void" && !fallback_return.starts_with('?') {
+                format!("?{fallback_return}")
+            } else {
+                fallback_return
+            }
+        });
+
+    Some(CompilerKnownMethodHover {
+        signature: format!(
+            "function {}::{method}({parameters}): {return_type}",
+            display_resolved_type(receiver)
+        ),
+        documentation,
+    })
+}
+
+fn shared_ownership_method(
+    receiver: &ResolvedType,
+    method: &str,
+) -> Option<(String, String, &'static str)> {
+    use SharedHandleKind::*;
+
+    let ResolvedType::SharedHandle(kind, payload) = receiver else {
+        return None;
+    };
+    let payload = display_resolved_type(payload);
+    let (return_type, documentation) = match (*kind, method) {
+        (SharedReference, "share") => (
+            format!("SharedReference<{payload}>"),
+            "Creates one additional owner in the receiver's readonly shared-ownership family.",
+        ),
+        (SharedReference, "createWeakReference") => (
+            format!("WeakReference<{payload}>"),
+            "Creates a non-owning reference in the receiver's readonly shared-ownership family.",
+        ),
+        (WritableSharedReference, "share") => (
+            format!("WritableSharedReference<{payload}>"),
+            "Creates one additional owner in the receiver's writable shared-ownership family.",
+        ),
+        (WritableSharedReference, "createWeakReference") => (
+            format!("WritableWeakReference<{payload}>"),
+            "Creates a non-owning reference in the receiver's writable shared-ownership family.",
+        ),
+        (WeakReference, "acquire") => (
+            format!("?SharedReference<{payload}>"),
+            "Attempts to create a readonly strong owner. Returns `null` after the payload has been destroyed.",
+        ),
+        (WritableWeakReference, "acquire") => (
+            format!("?WritableSharedReference<{payload}>"),
+            "Attempts to create a writable-family strong owner. Returns `null` after the payload has been destroyed.",
+        ),
+        (WritableSharedReference, "acquireReadonlyAccess") => (
+            format!("ReadonlySharedReferenceAccess<{payload}>"),
+            "Acquires owned readonly access to the payload. Multiple readonly accesses may coexist.",
+        ),
+        (WritableSharedReference, "acquireWritableAccess") => (
+            format!("WritableSharedReferenceAccess<{payload}>"),
+            "Acquires owned exclusive writable access to the payload.",
+        ),
+        _ => return None,
+    };
+    Some((String::new(), return_type, documentation))
+}
+
+fn collection_method(
+    receiver: &ResolvedType,
+    method: &str,
+) -> Option<(String, String, &'static str)> {
+    let collection = match receiver {
+        ResolvedType::SharedHandle(kind, payload) if kind.is_access() => payload.as_ref(),
+        receiver => receiver,
+    };
+    let (parameters, return_type, documentation) = match (collection, method) {
+        (ResolvedType::List(value), "add") => (
+            format!("{} $value", display_resolved_type(value)),
+            "void".to_string(),
+            "Appends a value to this writable list.",
+        ),
+        (ResolvedType::List(value), "insertAt") => (
+            format!("int $index, {} $value", display_resolved_type(value)),
+            "void".to_string(),
+            "Inserts a value at the given index in this writable list.",
+        ),
+        (ResolvedType::List(value), "removeAt") => (
+            "int $index".to_string(),
+            display_resolved_type(value),
+            "Removes and returns the value at the given index.",
+        ),
+        (ResolvedType::List(value), "pop") => (
+            String::new(),
+            format!("?{}", display_resolved_type(value)),
+            "Removes and returns the final value, or `null` when the list is empty.",
+        ),
+        (ResolvedType::List(value), "contains") => (
+            format!("{} $value", display_resolved_type(value)),
+            "bool".to_string(),
+            "Reports whether this list contains an equal value.",
+        ),
+        (ResolvedType::Dictionary(key, value), "set") => (
+            format!(
+                "{} $key, {} $value",
+                display_resolved_type(key),
+                display_resolved_type(value)
+            ),
+            "void".to_string(),
+            "Stores a value for the key in this writable dictionary.",
+        ),
+        (ResolvedType::Dictionary(key, value), "get") => (
+            format!("{} $key", display_resolved_type(key)),
+            format!("?{}", display_resolved_type(value)),
+            "Returns the value for the key, or `null` when the key is absent.",
+        ),
+        (ResolvedType::Dictionary(key, _), "has") => (
+            format!("{} $key", display_resolved_type(key)),
+            "bool".to_string(),
+            "Reports whether this dictionary contains the key.",
+        ),
+        (ResolvedType::Dictionary(key, value), "remove") => (
+            format!("{} $key", display_resolved_type(key)),
+            format!("?{}", display_resolved_type(value)),
+            "Removes and returns the value for the key, or `null` when the key is absent.",
+        ),
+        (ResolvedType::Set(value), "add") => (
+            format!("{} $value", display_resolved_type(value)),
+            "bool".to_string(),
+            "Adds a value and reports whether the set changed.",
+        ),
+        (ResolvedType::Set(value), "remove") => (
+            format!("{} $value", display_resolved_type(value)),
+            "bool".to_string(),
+            "Removes a value and reports whether the set changed.",
+        ),
+        (ResolvedType::Set(value), "contains") => (
+            format!("{} $value", display_resolved_type(value)),
+            "bool".to_string(),
+            "Reports whether this set contains the value.",
+        ),
+        (ResolvedType::Set(value), method @ ("union" | "intersect" | "difference")) => (
+            format!("Set<{}> $other", display_resolved_type(value)),
+            format!("Set<{}>", display_resolved_type(value)),
+            match method {
+                "union" => "Returns a set containing values from either set.",
+                "intersect" => "Returns a set containing values present in both sets.",
+                "difference" => "Returns a set containing values absent from the other set.",
+                _ => unreachable!(),
+            },
+        ),
+        (ResolvedType::Bytes, "toArray") => (
+            String::new(),
+            "uint8[]".to_string(),
+            "Copies this byte buffer into a fixed-length `uint8[]`.",
+        ),
+        _ => return None,
+    };
+    Some((parameters, return_type, documentation))
+}
+
+fn non_nullable_type(ty: &ResolvedType) -> &ResolvedType {
+    match ty {
+        ResolvedType::Nullable(inner) => inner,
+        ty => ty,
+    }
+}
+
+fn display_resolved_type(ty: &ResolvedType) -> String {
+    match ty {
+        ResolvedType::Void => "void".to_string(),
+        ResolvedType::Integer(integer) => integer.to_string(),
+        ResolvedType::Float(float) => float.to_string(),
+        ResolvedType::String => "string".to_string(),
+        ResolvedType::Bytes => "Bytes".to_string(),
+        ResolvedType::Bool => "bool".to_string(),
+        ResolvedType::Null => "null".to_string(),
+        ResolvedType::Mixed => "mixed".to_string(),
+        ResolvedType::TypeParameter(name) => name.clone(),
+        ResolvedType::Nullable(inner) => format!("?{}", display_resolved_type(inner)),
+        ResolvedType::Class(class) => {
+            if class.arguments.is_empty() {
+                class.name.clone()
+            } else {
+                format!(
+                    "{}<{}>",
+                    class.name,
+                    class
+                        .arguments
+                        .iter()
+                        .map(display_resolved_type)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+        }
+        ResolvedType::TypedArray(element) => format!("{}[]", display_resolved_type(element)),
+        ResolvedType::List(element) => format!("List<{}>", display_resolved_type(element)),
+        ResolvedType::Dictionary(key, value) => format!(
+            "Dictionary<{}, {}>",
+            display_resolved_type(key),
+            display_resolved_type(value)
+        ),
+        ResolvedType::Set(element) => format!("Set<{}>", display_resolved_type(element)),
+        ResolvedType::SharedHandle(kind, payload) => {
+            format!("{}<{}>", kind.source_name(), display_resolved_type(payload))
+        }
+        ResolvedType::Unsupported => "Unknown".to_string(),
     }
 }
 
@@ -1005,5 +1250,62 @@ function main(): void
         assert!(construction
             .markdown
             .contains("class Box<T implements Displayable>"));
+    }
+
+    #[test]
+    fn compiler_known_method_hovers_substitute_concrete_return_types() {
+        let source = r#"class Theme
+{
+    function __construct(string $name) {}
+}
+
+function releasedTheme(): WeakReference<Theme>
+{
+    let $theme = shared new Theme("dark");
+    return $theme->createWeakReference();
+}
+
+function main(): void
+{
+    let $observer = releasedTheme();
+    let $released = $observer->acquire();
+
+    let $settings = new WritableSharedReference(new Theme("light"));
+    let $writableObserver = $settings->createWeakReference();
+    let $writableReleased = $writableObserver->acquire();
+
+    writable Dictionary<string, int> $scores = ["Ada" => 3];
+    let $score = $scores->get("Ada");
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("test.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+
+        let readonly = snapshot
+            .hover_at_offset(source.find("$observer->acquire").unwrap() + "$observer->".len())
+            .expect("readonly acquire should provide semantic hover");
+        assert!(readonly
+            .markdown
+            .contains("function WeakReference<Theme>::acquire(): ?SharedReference<Theme>"));
+
+        let writable = snapshot
+            .hover_at_offset(
+                source.find("$writableObserver->acquire").unwrap() + "$writableObserver->".len(),
+            )
+            .expect("writable acquire should provide semantic hover");
+        assert!(writable.markdown.contains(
+            "function WritableWeakReference<Theme>::acquire(): ?WritableSharedReference<Theme>"
+        ));
+
+        let dictionary = snapshot
+            .hover_at_offset(source.find("$scores->get").unwrap() + "$scores->".len())
+            .expect("dictionary get should provide semantic hover");
+        assert!(dictionary
+            .markdown
+            .contains("function Dictionary<string, int>::get(string $key): ?int"));
     }
 }

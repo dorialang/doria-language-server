@@ -721,44 +721,14 @@ fn completion_items() -> Value {
             ),
         })
     }));
-    items.extend(
-        [
-            (
-                "share",
-                "function share(): SharedReference<T> | WritableSharedReference<T>",
-                "Creates one additional owner in the receiver's existing shared-ownership family.",
-            ),
-            (
-                "createWeakReference",
-                "function createWeakReference(): WeakReference<T> | WritableWeakReference<T>",
-                "Creates a non-owning reference in the receiver's existing shared-ownership family.",
-            ),
-            (
-                "acquire",
-                "function acquire(): ?SharedReference<T> | ?WritableSharedReference<T>",
-                "Attempts to create a strong owner from a weak reference without changing ownership families.",
-            ),
-            (
-                "acquireReadonlyAccess",
-                "function acquireReadonlyAccess(): ReadonlySharedReferenceAccess<T>",
-                "Acquires owned readonly access to a writable shared payload. Multiple readonly accesses may coexist.",
-            ),
-            (
-                "acquireWritableAccess",
-                "function acquireWritableAccess(): WritableSharedReferenceAccess<T>",
-                "Acquires owned exclusive writable access to a writable shared payload.",
-            ),
-        ]
-        .into_iter()
-        .map(|(label, detail, documentation)| {
-            json!({
-                "label": label,
-                "kind": 2,
-                "detail": detail,
-                "documentation": documentation,
-            })
-        }),
-    );
+    items.extend(SHARED_OWNERSHIP_METHODS.iter().map(|method| {
+        json!({
+            "label": method.name,
+            "kind": 2,
+            "detail": method.signature,
+            "documentation": method.documentation,
+        })
+    }));
     items.extend([
         json!({
             "label": "Int::toFloat",
@@ -850,7 +820,9 @@ fn hover_at_offset_with_analysis(
     })?;
     let token = &tokens[token_index];
     let description = integer_conversion_hover_at(&tokens, token_index)
-        .or_else(|| hover_description(&token.kind))?;
+        .map(ToOwned::to_owned)
+        .or_else(|| builtin_method_hover(&token.kind))
+        .or_else(|| hover_description(&token.kind).map(ToOwned::to_owned))?;
 
     Some(json!({
         "contents": {
@@ -859,6 +831,57 @@ fn hover_at_offset_with_analysis(
         },
         "range": span_to_range(text, token.span),
     }))
+}
+
+struct BuiltinMethod {
+    name: &'static str,
+    signature: &'static str,
+    documentation: &'static str,
+}
+
+const SHARED_OWNERSHIP_METHODS: &[BuiltinMethod] = &[
+    BuiltinMethod {
+        name: "share",
+        signature: "function share(): SharedReference<T> | WritableSharedReference<T>",
+        documentation:
+            "Creates one additional owner in the receiver's existing shared-ownership family.",
+    },
+    BuiltinMethod {
+        name: "createWeakReference",
+        signature:
+            "function createWeakReference(): WeakReference<T> | WritableWeakReference<T>",
+        documentation:
+            "Creates a non-owning reference in the receiver's existing shared-ownership family.",
+    },
+    BuiltinMethod {
+        name: "acquire",
+        signature: "function acquire(): ?SharedReference<T> | ?WritableSharedReference<T>",
+        documentation: "Attempts to create a strong owner from a weak reference without changing ownership families. Returns `null` after the payload has been destroyed.",
+    },
+    BuiltinMethod {
+        name: "acquireReadonlyAccess",
+        signature: "function acquireReadonlyAccess(): ReadonlySharedReferenceAccess<T>",
+        documentation: "Acquires owned readonly access to a writable shared payload. Multiple readonly accesses may coexist.",
+    },
+    BuiltinMethod {
+        name: "acquireWritableAccess",
+        signature: "function acquireWritableAccess(): WritableSharedReferenceAccess<T>",
+        documentation:
+            "Acquires owned exclusive writable access to a writable shared payload.",
+    },
+];
+
+fn builtin_method_hover(kind: &TokenKind) -> Option<String> {
+    let TokenKind::Identifier(name) = kind else {
+        return None;
+    };
+    let method = SHARED_OWNERSHIP_METHODS
+        .iter()
+        .find(|method| method.name == name)?;
+    Some(format!(
+        "```doria\n{}\n```\n\n{}",
+        method.signature, method.documentation
+    ))
 }
 
 fn integer_conversion_hover_at(tokens: &[Token], token_index: usize) -> Option<&'static str> {
@@ -982,11 +1005,6 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             name @ ("SharedReference" | "WeakReference" | "WritableSharedReference"
             | "WritableWeakReference" | "ReadonlySharedReferenceAccess"
             | "WritableSharedReferenceAccess") => shared_ownership_type_description(name),
-            "share" => Some("`share()` creates one additional strong owner in the receiver's current shared-ownership family."),
-            "createWeakReference" => Some("`createWeakReference()` creates a non-owning handle in the receiver's current shared-ownership family."),
-            "acquire" => Some("`acquire()` attempts to create a strong owner from a weak reference and returns `null` after the payload is destroyed. It never changes ownership families."),
-            "acquireReadonlyAccess" => Some("`acquireReadonlyAccess()` returns an owned `ReadonlySharedReferenceAccess<T>` and registers one readonly access on the writable shared allocation."),
-            "acquireWritableAccess" => Some("`acquireWritableAccess()` returns an owned `WritableSharedReferenceAccess<T>` and registers exclusive writable access on the writable shared allocation."),
             "mixed" => Some("The dynamic boundary type: a boxed runtime value that accepts any type but rejects every operation until narrowed with the exact `is` type-test operator. `?mixed` adds nullability."),
             "resource" => Some("Reserved for future PHP interop; not a usable core type."),
             companion @ ("Int" | "Int8" | "Int16" | "Int32" | "Int64" | "UInt8"
@@ -1611,10 +1629,16 @@ function main(): void
         ] {
             assert_eq!(completion_item(member)["kind"], 2);
             assert!(
-                hover_description(&TokenKind::Identifier(member.to_string())).is_some(),
+                builtin_method_hover(&TokenKind::Identifier(member.to_string())).is_some(),
                 "{member} should provide hover information"
             );
         }
+
+        let acquire = builtin_method_hover(&TokenKind::Identifier("acquire".to_string()))
+            .expect("acquire should provide fallback hover");
+        assert!(acquire
+            .contains("function acquire(): ?SharedReference<T> | ?WritableSharedReference<T>"));
+        assert!(acquire.contains("Returns `null`"));
     }
 
     #[test]
