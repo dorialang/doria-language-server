@@ -60,6 +60,14 @@ impl AnalysisSnapshot {
         &self.diagnostics
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_diagnostics(diagnostics: Vec<Diagnostic>) -> Self {
+        Self {
+            diagnostics,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn hover_at_offset(&self, offset: usize) -> Option<SemanticHover> {
         let occurrence = self
             .occurrences

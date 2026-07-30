@@ -205,19 +205,22 @@ fn code_action_for_fix(
     diagnostic: &Diagnostic,
     fix: &DiagnosticFix,
 ) -> Option<Value> {
-    if fix.applicability != FixApplicability::MachineApplicable {
+    if fix.applicability != FixApplicability::MachineApplicable
+        || fix
+            .edits
+            .iter()
+            .any(|edit| !matches!(&edit.source, DiagnosticSource::Current))
+    {
         return None;
     }
     let mut changes = serde_json::Map::new();
     for edit in &fix.edits {
-        let edit_uri = diagnostic_source_uri(uri, &edit.source);
-        let source_text = if edit_uri == uri { text } else { "" };
         let lsp_edit = json!({
-            "range": span_to_range(source_text, edit.span),
+            "range": span_to_range(text, edit.span),
             "newText": edit.replacement,
         });
         changes
-            .entry(edit_uri)
+            .entry(uri.to_string())
             .or_insert_with(|| Value::Array(Vec::new()))
             .as_array_mut()
             .expect("code-action change is always an array")
@@ -396,12 +399,7 @@ impl Server {
             return Ok(());
         };
 
-        let diagnostics = document
-            .analysis
-            .diagnostics()
-            .iter()
-            .map(|diagnostic| diagnostic_to_lsp(uri, &document.text, diagnostic))
-            .collect::<Vec<_>>();
+        let diagnostics = diagnostics_to_lsp(uri, &document.text, document.analysis.diagnostics());
         let mut params = json!({
             "uri": uri,
             "diagnostics": diagnostics,
@@ -834,12 +832,12 @@ fn hover_at_offset_with_analysis(
     let token_index = tokens.iter().position(|token| {
         !matches!(token.kind, TokenKind::Eof)
             && token.span.start <= offset
-            && offset <= token.span.end
+            && offset < token.span.end
     })?;
     let token = &tokens[token_index];
     let description = string_companion_hover_at(&tokens, token_index)
         .or_else(|| integer_conversion_hover_at(&tokens, token_index).map(ToOwned::to_owned))
-        .or_else(|| builtin_method_hover(&token.kind))
+        .or_else(|| builtin_method_hover_at(&tokens, token_index))
         .or_else(|| hover_description(&token.kind).map(ToOwned::to_owned))?;
 
     Some(json!({
@@ -909,8 +907,16 @@ const SHARED_OWNERSHIP_METHODS: &[BuiltinMethod] = &[
     },
 ];
 
-fn builtin_method_hover(kind: &TokenKind) -> Option<String> {
-    let TokenKind::Identifier(name) = kind else {
+fn builtin_method_hover_at(tokens: &[Token], token_index: usize) -> Option<String> {
+    if token_index == 0
+        || !matches!(
+            tokens[token_index - 1].kind,
+            TokenKind::Arrow | TokenKind::QuestionArrow
+        )
+    {
+        return None;
+    }
+    let TokenKind::Identifier(name) = &tokens[token_index].kind else {
         return None;
     };
     let method = SHARED_OWNERSHIP_METHODS
@@ -1122,8 +1128,15 @@ fn diagnostic_to_lsp(uri: &str, text: &str, diagnostic: &Diagnostic) -> Value {
     if let Some(fix) = diagnostic
         .fixes
         .iter()
-        .find(|fix| fix.applicability == FixApplicability::MachineApplicable)
-        .and_then(|fix| fix.edits.first())
+        .find_map(|fix| match fix.edits.as_slice() {
+            [edit]
+                if fix.applicability == FixApplicability::MachineApplicable
+                    && matches!(&edit.source, DiagnosticSource::Current) =>
+            {
+                Some(edit)
+            }
+            _ => None,
+        })
     {
         value["data"]["fix"] = json!({
             "range": span_to_range(text, fix.span),
@@ -1705,17 +1718,27 @@ function main(): void
             "acquireWritableAccess",
         ] {
             assert_eq!(completion_item(member)["kind"], 2);
-            assert!(
-                builtin_method_hover(&TokenKind::Identifier(member.to_string())).is_some(),
-                "{member} should provide hover information"
-            );
+            let source = format!("$value->{member}();");
+            let hover = hover_at_offset(&source, source.find(member).unwrap())
+                .unwrap_or_else(|| panic!("{member} should provide member-call hover information"));
+            assert!(hover["contents"]["value"]
+                .as_str()
+                .is_some_and(|contents| contents.contains("function")));
         }
 
-        let acquire = builtin_method_hover(&TokenKind::Identifier("acquire".to_string()))
+        let source = "$value?->acquire();";
+        let acquire = hover_at_offset(source, source.find("acquire").unwrap())
             .expect("acquire should provide fallback hover");
+        let acquire = acquire["contents"]["value"]
+            .as_str()
+            .expect("hover contents should be markdown");
         assert!(acquire
             .contains("function acquire(): ?SharedReference<T> | ?WritableSharedReference<T>"));
         assert!(acquire.contains("Returns `null`"));
+        assert!(
+            hover_at_offset("share;", 1).is_none(),
+            "an unrelated identifier must not receive ownership-method hover"
+        );
     }
 
     #[test]
@@ -1995,10 +2018,35 @@ function main(): void
             code_action_for_fix(uri, text, &diagnostic, &diagnostic.fixes[0]).is_none(),
             "requires-review fixes must never become automatic code actions"
         );
+
+        let cross_file = Diagnostic::new("E0201", "cross-file fix", use_span).with_structured_fix(
+            "Edit Both Files",
+            FixApplicability::MachineApplicable,
+            vec![
+                FixEdit {
+                    source: DiagnosticSource::Current,
+                    span: use_span,
+                    replacement: "$value".to_string(),
+                },
+                FixEdit {
+                    source: DiagnosticSource::Path("/other.doria".to_string()),
+                    span: Span::new(8, 12),
+                    replacement: "name".to_string(),
+                },
+            ],
+        );
+        assert!(
+            code_action_for_fix(uri, text, &cross_file, &cross_file.fixes[0]).is_none(),
+            "cross-file fixes need target text before they can become automatic actions"
+        );
+        assert!(
+            diagnostic_to_lsp(uri, text, &cross_file)["data"]["fix"].is_null(),
+            "the legacy single-edit field must not advertise part of a multi-file fix"
+        );
     }
 
     #[test]
-    fn lsp_uses_compiler_owned_duplicate_and_cause_grouping() {
+    fn live_diagnostics_use_compiler_owned_duplicate_and_cause_grouping() {
         let uri = "file:///main.doria";
         let text = "$missing;\n$other;\n";
         let root = Diagnostic::new("E0201", "unknown identifier `$missing`", Span::new(0, 8))
@@ -2011,8 +2059,32 @@ function main(): void
         let independent =
             Diagnostic::new("E0201", "unknown identifier `$other`", Span::new(10, 16));
 
-        let diagnostics =
-            diagnostics_to_lsp(uri, text, &[root, duplicate, consequence, independent]);
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document {
+                text: text.to_string(),
+                version: Some(7),
+                analysis: AnalysisSnapshot::from_diagnostics(vec![
+                    root,
+                    duplicate,
+                    consequence,
+                    independent,
+                ]),
+            },
+        );
+        let mut output = Vec::new();
+        server.publish_diagnostics(uri, &mut output).unwrap();
+        let body_start = output
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("LSP header terminator")
+            + 4;
+        let notification: Value =
+            serde_json::from_slice(&output[body_start..]).expect("diagnostic notification");
+        let diagnostics = notification["params"]["diagnostics"]
+            .as_array()
+            .expect("published diagnostics should be an array");
 
         assert_eq!(diagnostics.len(), 2);
         assert_eq!(
@@ -2023,5 +2095,6 @@ function main(): void
             1
         );
         assert_eq!(diagnostics[1]["range"]["start"]["line"], 1);
+        assert_eq!(notification["params"]["version"], 7);
     }
 }
