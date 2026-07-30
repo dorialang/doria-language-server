@@ -12,8 +12,10 @@ use doriac::lexer::{Token, TokenKind};
 use doriac::source::Span;
 
 mod analysis;
+mod string_surface;
 
 use analysis::AnalysisSnapshot;
+use string_surface::{STRING_COMPANION_METHODS, STRING_PROPERTIES};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LspPosition {
@@ -721,6 +723,22 @@ fn completion_items() -> Value {
             ),
         })
     }));
+    items.extend(STRING_PROPERTIES.iter().map(|property| {
+        json!({
+            "label": property.name,
+            "kind": 10,
+            "detail": property.signature,
+            "documentation": property.documentation,
+        })
+    }));
+    items.extend(STRING_COMPANION_METHODS.iter().map(|method| {
+        json!({
+            "label": format!("String::{}", method.name),
+            "kind": 3,
+            "detail": method.signature,
+            "documentation": method.documentation,
+        })
+    }));
     items.extend(SHARED_OWNERSHIP_METHODS.iter().map(|method| {
         json!({
             "label": method.name,
@@ -819,8 +837,8 @@ fn hover_at_offset_with_analysis(
             && offset <= token.span.end
     })?;
     let token = &tokens[token_index];
-    let description = integer_conversion_hover_at(&tokens, token_index)
-        .map(ToOwned::to_owned)
+    let description = string_companion_hover_at(&tokens, token_index)
+        .or_else(|| integer_conversion_hover_at(&tokens, token_index).map(ToOwned::to_owned))
         .or_else(|| builtin_method_hover(&token.kind))
         .or_else(|| hover_description(&token.kind).map(ToOwned::to_owned))?;
 
@@ -831,6 +849,26 @@ fn hover_at_offset_with_analysis(
         },
         "range": span_to_range(text, token.span),
     }))
+}
+
+fn string_companion_hover_at(tokens: &[Token], token_index: usize) -> Option<String> {
+    if token_index < 2 || !matches!(tokens[token_index - 1].kind, TokenKind::DoubleColon) {
+        return None;
+    }
+    let TokenKind::Identifier(companion) = &tokens[token_index - 2].kind else {
+        return None;
+    };
+    let TokenKind::Identifier(method) = &tokens[token_index].kind else {
+        return None;
+    };
+    if companion != "String" {
+        return None;
+    }
+    let member = string_surface::string_companion_method(method)?;
+    Some(format!(
+        "```doria\n{}\n```\n\n{}",
+        member.signature, member.documentation
+    ))
 }
 
 struct BuiltinMethod {
@@ -1002,6 +1040,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "List" => Some("`List<T>` is the growable, insertion-ordered sequence: `add`, `insertAt`, `removeAt`, `pop`, `contains`, `first`/`last`, and the `count`/`isEmpty` properties (decision 0100). An owned move type."),
             "Dictionary" => Some("`Dictionary<K, V>` is the insertion-ordered map: `get` (`?V`), `set`, `remove` (`?V`), `has`, the `keys`/`values` projections, and `count`/`isEmpty` (decision 0100). Keys require `Hashable`. An owned move type."),
             "Set" => Some("`Set<T>` is the insertion-ordered unique-element collection: `Set::from`, `add`, `remove`, `contains`, `union`/`intersect`/`difference`, and `count`/`isEmpty` (decision 0100). Elements require `Hashable`. An owned move type."),
+            "String" => Some("`String` is the companion for canonical string operations. Text indices and lengths use Unicode extended grapheme clusters unless the API explicitly says bytes."),
             name @ ("SharedReference" | "WeakReference" | "WritableSharedReference"
             | "WritableWeakReference" | "ReadonlySharedReferenceAccess"
             | "WritableSharedReferenceAccess") => shared_ownership_type_description(name),
@@ -1563,6 +1602,44 @@ function main(): void
         assert!(text.contains("function toString(): string"));
         assert!(text.contains("Other interfaces are not supported by this compiler"));
     }
+
+    #[test]
+    fn completions_and_hover_expose_the_executable_string_surface() {
+        for method in STRING_COMPANION_METHODS {
+            let item = completion_item(&format!("String::{}", method.name));
+            assert_eq!(item["detail"], method.signature);
+            assert_eq!(item["documentation"], method.documentation);
+        }
+        for property in STRING_PROPERTIES {
+            let item = completion_item(property.name);
+            assert_eq!(item["detail"], property.signature);
+            assert_eq!(item["documentation"], property.documentation);
+        }
+
+        let labels = completion_labels();
+        assert!(labels.contains(&"String::containsIgnoreCase".to_string()));
+        assert!(labels.contains(&"String::countOccurrences".to_string()));
+        assert!(!labels.contains(&"trim".to_string()));
+
+        let source = r#"function main(): void
+{
+    echo String::indexOfIgnoreCase("Straße", "STRASSE") ?? -1;
+}
+"#;
+        let hover = hover_at_offset(
+            source,
+            source
+                .find("indexOfIgnoreCase")
+                .expect("String companion call"),
+        )
+        .expect("String companion should provide hover information");
+        let markdown = hover["contents"]["value"]
+            .as_str()
+            .expect("hover should be Markdown");
+        assert!(markdown.contains("String::indexOfIgnoreCase(string $text, string $needle): ?int"));
+        assert!(markdown.contains("original grapheme sequence"));
+    }
+
     #[test]
     fn hover_help_tracks_stage22_narrowing() {
         let null_hover = hover_description(&TokenKind::Null).expect("null should have hover text");

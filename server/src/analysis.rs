@@ -10,6 +10,8 @@ use doriac::semantics::{CallableTarget, SemanticInfo};
 use doriac::source::Span;
 use doriac::types::{ResolvedType, SharedHandleKind};
 
+use crate::string_surface::{string_companion_method, string_property};
+
 #[derive(Debug, Clone)]
 pub(crate) struct SemanticHover {
     pub(crate) span: Span,
@@ -449,6 +451,19 @@ impl<'a> SnapshotBuilder<'a> {
                 for argument in args {
                     self.visit_expr(&argument.value, current_class, parent_class);
                 }
+                if matches!(qualifier, StaticQualifier::Class(class) if class == "String") {
+                    if let (Some(member), Some(method_span)) = (
+                        string_companion_method(method),
+                        self.member_name_span(Span::new(qualifier_span.end, span.end), method),
+                    ) {
+                        self.add_symbol(
+                            method_span,
+                            member.signature.to_string(),
+                            Some(member.documentation.to_string()),
+                        );
+                        return;
+                    }
+                }
                 let target = self.semantic_info.and_then(|info| info.call_target(*span));
                 let class_name = match target {
                     Some(CallableTarget::Method {
@@ -492,8 +507,40 @@ impl<'a> SnapshotBuilder<'a> {
                     }
                 }
             }
-            Expr::PropertyAccess { object, .. } => {
-                self.visit_expr(object, current_class, parent_class)
+            Expr::PropertyAccess {
+                object,
+                property,
+                span,
+                ..
+            } => {
+                self.visit_expr(object, current_class, parent_class);
+                let is_string = self
+                    .semantic_info
+                    .and_then(|info| info.expression_type(object.span()))
+                    .is_some_and(|ty| matches!(non_nullable_type(ty), ResolvedType::String));
+                if is_string {
+                    if let (Some(member), Some(property_span)) = (
+                        string_property(property),
+                        self.member_name_span(Span::new(object.span().end, span.end), property),
+                    ) {
+                        let return_type = self
+                            .semantic_info
+                            .and_then(|info| info.expression_type(*span))
+                            .map(display_resolved_type)
+                            .unwrap_or_else(|| {
+                                member
+                                    .signature
+                                    .split_once(' ')
+                                    .map_or("unknown", |(ty, _)| ty)
+                                    .to_string()
+                            });
+                        self.add_symbol(
+                            property_span,
+                            format!("{return_type} ${property}"),
+                            Some(member.documentation.to_string()),
+                        );
+                    }
+                }
             }
             Expr::StaticMember { .. } => {}
             Expr::IsType { expr, .. } | Expr::Grouped { expr, .. } | Expr::Unary { expr, .. } => {
@@ -1250,6 +1297,44 @@ function main(): void
         assert!(construction
             .markdown
             .contains("class Box<T implements Displayable>"));
+    }
+
+    #[test]
+    fn string_intrinsic_hovers_use_the_canonical_surface() {
+        let source = r#"function main(): void
+{
+    string $text = "Straße";
+    int $length = $text->length;
+    bool $found = String::containsIgnoreCase($text, "STRASSE");
+    string $title = String::upperFirst("doria");
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("test.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "canonical String calls should not produce diagnostics: {:?}",
+            snapshot.diagnostics()
+        );
+
+        let length = snapshot
+            .hover_at_offset(source.rfind("length").expect("length property"))
+            .expect("String length should have semantic hover");
+        assert!(length.markdown.contains("int $length"));
+        assert!(length.markdown.contains("extended grapheme clusters"));
+
+        let contains = snapshot
+            .hover_at_offset(
+                source
+                    .find("containsIgnoreCase")
+                    .expect("String companion call"),
+            )
+            .expect("String companion call should have semantic hover");
+        assert!(contains
+            .markdown
+            .contains("String::containsIgnoreCase(string $text, string $needle): bool"));
+        assert!(contains
+            .markdown
+            .contains("full default Unicode case folding"));
     }
 
     #[test]

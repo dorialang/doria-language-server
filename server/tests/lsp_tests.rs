@@ -197,6 +197,44 @@ class Counter
 }
 
 #[test]
+fn executable_string_surface_has_no_false_diagnostics() {
+    let diagnostics = diagnostics_for_document(
+        "file:///strings.doria",
+        r#"function main(): void
+{
+    string $text = String::trim("  Straße 👍🏾  ");
+    int $characters = $text->length;
+    int $bytes = $text->byteLength;
+    bool $found = String::containsIgnoreCase($text, "STRASSE");
+    int $count = String::countOccurrences("ha ha", "ha");
+    string $title = String::upperFirst("doria");
+    echo "{$characters}:{$bytes}:{$found}:{$count}:{$title}\n";
+}
+"#,
+    );
+
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn string_diagnostics_keep_utf16_positions_after_emoji() {
+    let source = r#"function main(): void { echo "😀"; String::contains("text", 1); }"#;
+    let diagnostics = diagnostics_for_document("file:///strings.doria", source);
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0408")
+        .expect("wrong String argument type should be reported");
+    let argument = source.rfind('1').expect("invalid argument");
+    let expected = byte_offset_to_position(source, argument);
+
+    assert_eq!(diagnostic["range"]["start"]["line"], expected.line);
+    assert_eq!(
+        diagnostic["range"]["start"]["character"],
+        expected.character
+    );
+}
+
+#[test]
 fn readonly_shared_ownership_has_no_false_diagnostics() {
     let diagnostics = diagnostics_for_document(
         "file:///shared.doria",
