@@ -14,7 +14,7 @@ use doriac::source::Span;
 mod analysis;
 mod string_surface;
 
-use analysis::AnalysisSnapshot;
+use analysis::{AnalysisSnapshot, SemanticCompletion};
 use string_surface::{STRING_COMPANION_METHODS, STRING_PROPERTIES};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,7 +267,7 @@ impl Server {
             "textDocument/didClose" => self.did_close(message.get("params"), writer)?,
             "textDocument/completion" => {
                 if let Some(id) = id {
-                    send_response(writer, id, completion_items())?;
+                    send_response(writer, id, self.completion(message.get("params")))?;
                 }
             }
             "textDocument/hover" => {
@@ -432,6 +432,54 @@ impl Server {
         let document = self.documents.get(uri)?;
         let offset = position_to_byte_offset(&document.text, line, character);
         hover_at_offset_with_analysis(&document.text, offset, &document.analysis)
+    }
+
+    fn completion(&self, params: Option<&Value>) -> Value {
+        let Some(params) = params else {
+            return completion_items();
+        };
+        let Some(uri) = params
+            .get("textDocument")
+            .and_then(|document| document.get("uri"))
+            .and_then(Value::as_str)
+        else {
+            return completion_items();
+        };
+        let Some(line) = params
+            .get("position")
+            .and_then(|position| position.get("line"))
+            .and_then(Value::as_u64)
+        else {
+            return completion_items();
+        };
+        let Some(character) = params
+            .get("position")
+            .and_then(|position| position.get("character"))
+            .and_then(Value::as_u64)
+        else {
+            return completion_items();
+        };
+        let Some(document) = self.documents.get(uri) else {
+            return completion_items();
+        };
+        let offset = position_to_byte_offset(&document.text, line as u32, character as u32);
+        if let Some(completions) = document.analysis.member_completions_at_offset(offset) {
+            return semantic_completion_items(completions);
+        }
+
+        // An accessor with no member name is incomplete source, so preserve the
+        // compiler as the semantic authority by analyzing a temporary property
+        // token at the cursor instead of guessing from nearby text.
+        if document.text[..offset].ends_with("->") {
+            const PLACEHOLDER: &str = "__doria_completion";
+            let mut source = document.text.clone();
+            source.insert_str(offset, PLACEHOLDER);
+            let analysis = AnalysisSnapshot::analyze(uri, &source);
+            if let Some(completions) = analysis.member_completions_at_offset(offset) {
+                return semantic_completion_items(completions);
+            }
+        }
+        completion_items()
     }
 
     fn code_actions(&self, params: Option<&Value>) -> Value {
@@ -765,6 +813,24 @@ fn completion_items() -> Value {
     })
 }
 
+fn semantic_completion_items(completions: Vec<SemanticCompletion>) -> Value {
+    let items = completions
+        .into_iter()
+        .map(|completion| {
+            json!({
+                "label": completion.label,
+                "kind": completion.kind,
+                "detail": completion.detail,
+                "documentation": completion.documentation,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "isIncomplete": false,
+        "items": items,
+    })
+}
+
 fn scalar_runtime_type_description(name: &str) -> Option<&'static str> {
     match name {
         "float" => Some("Implemented canonical IEEE 754 binary64 scalar type; exact alias of `float64`."),
@@ -777,12 +843,12 @@ fn scalar_runtime_type_description(name: &str) -> Option<&'static str> {
 
 fn shared_ownership_type_description(name: &str) -> Option<&'static str> {
     match name {
-        "SharedReference" => Some("`SharedReference<T>` is an owning readonly shared reference to a class payload. Construct it with `shared new T(...)`; `share()` adds an owner, `createWeakReference()` creates a weak handle, and member access forwards readonly to `T`."),
-        "WeakReference" => Some("`WeakReference<T>` is a non-owning reference created from `SharedReference<T>`. `acquire()` returns `?SharedReference<T>` and yields `null` after the final strong owner releases the payload."),
-        "WritableSharedReference" => Some("`WritableSharedReference<T>` owns a payload through the writable shared family. `share()` adds an owner, `createWeakReference()` creates a writable weak handle, and controlled payload access comes only from `acquireReadonlyAccess()` or `acquireWritableAccess()`. It never converts to or from `SharedReference<T>`."),
-        "WritableWeakReference" => Some("`WritableWeakReference<T>` is the non-owning writable-family handle. `acquire()` returns `?WritableSharedReference<T>` and never crosses into the readonly family."),
-        "ReadonlySharedReferenceAccess" => Some("`ReadonlySharedReferenceAccess<T>` is an owned move value that keeps a writable shared payload alive and forwards readonly properties, methods, indexing, and iteration. Destroying it releases readonly access before its strong ownership claim."),
-        "WritableSharedReferenceAccess" => Some("`WritableSharedReferenceAccess<T>` is an owned move value that exclusively forwards writable payload operations. The binding must be `writable` to mutate through it; destruction releases writable access before its strong ownership claim."),
+        "SharedReference" => Some("`SharedReference<T>` is a non-thread-safe owning move value for a readonly shared class payload. Construct it with `shared new T(...)`; ownership is duplicated only by explicit `share()`. It never converts to the writable family, and readonly shared collection, scalar, string, and `mixed` payload execution remain unsupported."),
+        "WeakReference" => Some("`WeakReference<T>` is a non-thread-safe non-owning move value created from `SharedReference<T>`. `acquire()` returns `?SharedReference<T>` while the class payload is alive and `null` after final strong release; it never crosses ownership families."),
+        "WritableSharedReference" => Some("`WritableSharedReference<T>` is a non-thread-safe owning move value in the writable shared family. Ownership is duplicated only by explicit `share()`; payload access requires a lifetime-owning object obtained with `acquireReadonlyAccess()` or `acquireWritableAccess()`. It never converts to `SharedReference<T>`. Class, generic class, typed-array, List, Dictionary, Set, and Bytes payloads execute; scalar, string, and `mixed` composition remain deferred."),
+        "WritableWeakReference" => Some("`WritableWeakReference<T>` is the non-thread-safe non-owning move value for the writable family. `acquire()` returns `?WritableSharedReference<T>` while the payload is alive and never crosses into the readonly family."),
+        "ReadonlySharedReferenceAccess" => Some("`ReadonlySharedReferenceAccess<T>` is a non-thread-safe owned move value that keeps a writable-family payload alive for its full lifetime and forwards readonly properties, methods, indexing, and iteration. It cannot be shared, weakened, copied, or converted between families."),
+        "WritableSharedReferenceAccess" => Some("`WritableSharedReferenceAccess<T>` is a non-thread-safe owned move value that keeps exclusive writable payload access for its full lifetime. Its binding must be `writable` to mutate through it; it cannot be shared, weakened, copied, or converted between families."),
         _ => None,
     }
 }
@@ -1738,6 +1804,45 @@ function main(): void
             hover_at_offset("share;", 1).is_none(),
             "an unrelated identifier must not receive ownership-method hover"
         );
+    }
+
+    #[test]
+    fn incomplete_member_completion_uses_the_resolved_shared_receiver() {
+        let uri = "file:///completion.doria";
+        let source = r#"class Counter
+{
+    function inspect(): int { return 1; }
+    writable function increment(): void {}
+}
+
+function main(): void
+{
+    let $counter = shared new Counter();
+    $counter->;
+}
+"#;
+        let offset = source.find("->;").expect("completion accessor") + 2;
+        let position = byte_offset_to_position(source, offset);
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document::new(uri, source.to_string(), Some(1)),
+        );
+        let response = server.completion(Some(&json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": position.line, "character": position.character },
+        })));
+        let labels = response["items"]
+            .as_array()
+            .expect("completion items")
+            .iter()
+            .filter_map(|item| item["label"].as_str())
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&"share"));
+        assert!(labels.contains(&"createWeakReference"));
+        assert!(labels.contains(&"referencedValue"));
+        assert!(labels.contains(&"inspect"));
+        assert!(!labels.contains(&"increment"));
     }
 
     #[test]

@@ -295,6 +295,17 @@ function share(
     echo "shared";
 }
 
+class SharedEditorPayload
+{
+    string $name = "editor";
+}
+
+function sharedProjection(): void
+{
+    let $reference = shared new SharedEditorPayload();
+    echo $reference->referencedValue->name;
+}
+
 // Planned/future: enums and expression-position match.
 enum Option
 {

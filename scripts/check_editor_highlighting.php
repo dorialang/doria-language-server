@@ -539,6 +539,11 @@ function check_vscode_grammar(): void
         str_contains($grammarText, 'keyword.operator.type-test.doria'),
         'VS Code must scope the Stage 22 is operator as a type-test operator'
     );
+    require_check(
+        str_contains($grammarText, 'storage.modifier.mutability.doria') &&
+            str_contains($grammarText, 'variable.other.property.doria'),
+        'VS Code must scope shared construction as a modifier and referencedValue as a property'
+    );
     foreach ([
         'keyword.declaration.constant.doria',
         'constant.other.doria',
@@ -1396,6 +1401,8 @@ function check_fixture(): void
         'let $runtimeSizedFlags = [true; $args->count];',
         '$message->tenantId',
         '$repository->findById($id)',
+        'let $reference = shared new SharedEditorPayload();',
+        '$reference->referencedValue->name',
     ];
     foreach ($requiredSnippets as $snippet) {
         require_check(str_contains($fixtureText, $snippet), 'shared editor fixture is missing ' . $snippet);

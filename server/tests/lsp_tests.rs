@@ -447,6 +447,33 @@ let $bad = $counter->share();
 }
 
 #[test]
+fn shared_operation_diagnostics_preserve_utf16_ranges_after_emoji() {
+    let source = r#"class Counter {}
+function main(): void
+{
+    echo "😀";
+    let $counter = new WritableSharedReference(new Counter());
+    let $moved = $counter;
+    let $bad = $counter->share();
+}
+"#;
+    let diagnostics = diagnostics_for_document("file:///utf16-shared.doria", source);
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0470")
+        .expect("use-after-move diagnostic");
+    let moved_use = source
+        .rfind("$counter->share")
+        .expect("moved shared operation");
+    let expected = byte_offset_to_position(source, moved_use);
+    assert_eq!(diagnostic["range"]["start"]["line"], expected.line);
+    assert_eq!(
+        diagnostic["range"]["start"]["character"],
+        expected.character
+    );
+}
+
+#[test]
 fn duplicate_member_diagnostics_publish_the_original_declaration() {
     let uri = "file:///duplicate.doria";
     let text = "class Example { const FOO = 1; static int $FOO = 2; }";

@@ -59,6 +59,27 @@ class DoriaLexerTest : TestCase() {
         assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
     }
 
+    fun testSharedOwnershipTypesAndReferencedValueUseTypeAndPropertyTokens() {
+        val tokens = lex(
+            "SharedReference<User> \$user; " +
+                "WritableSharedReferenceAccess<User> \$access; " +
+                "echo \$user->referencedValue->name;",
+        )
+
+        assertEquals(
+            DoriaTokenTypes.COLLECTION_TYPE,
+            tokens.first { it.text == "SharedReference" }.type,
+        )
+        assertEquals(
+            DoriaTokenTypes.COLLECTION_TYPE,
+            tokens.first { it.text == "WritableSharedReferenceAccess" }.type,
+        )
+        assertEquals(
+            DoriaTokenTypes.PROPERTY,
+            tokens.first { it.text == "referencedValue" }.type,
+        )
+    }
+
     private fun lex(source: String): List<Token> {
         val lexer = DoriaLexer()
         lexer.start(source)

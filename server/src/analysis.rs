@@ -23,6 +23,17 @@ pub(crate) struct AnalysisSnapshot {
     diagnostics: Vec<Diagnostic>,
     symbols: Vec<Symbol>,
     occurrences: Vec<Occurrence>,
+    member_receivers: Vec<MemberReceiver>,
+    class_members: HashMap<String, Vec<ClassMemberCompletion>>,
+    class_parents: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SemanticCompletion {
+    pub(crate) label: String,
+    pub(crate) kind: u32,
+    pub(crate) detail: String,
+    pub(crate) documentation: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +46,21 @@ struct Symbol {
 struct Occurrence {
     span: Span,
     symbol: usize,
+}
+
+#[derive(Debug, Clone)]
+struct MemberReceiver {
+    span: Span,
+    receiver: ResolvedType,
+    current_class: Option<String>,
+    writable_payload_access: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ClassMemberCompletion {
+    completion: SemanticCompletion,
+    writable: bool,
+    internal: bool,
 }
 
 impl AnalysisSnapshot {
@@ -86,6 +112,105 @@ impl AnalysisSnapshot {
             markdown,
         })
     }
+
+    pub(crate) fn member_completions_at_offset(
+        &self,
+        offset: usize,
+    ) -> Option<Vec<SemanticCompletion>> {
+        let context = self
+            .member_receivers
+            .iter()
+            .filter(|context| context.span.start <= offset && offset <= context.span.end)
+            .min_by_key(|context| context.span.end.saturating_sub(context.span.start))?;
+        Some(self.member_completions(context))
+    }
+
+    fn member_completions(&self, context: &MemberReceiver) -> Vec<SemanticCompletion> {
+        use SharedHandleKind::*;
+
+        let receiver = non_nullable_type(&context.receiver);
+        if let ResolvedType::Class(class) = receiver {
+            return self.class_member_completions(
+                &class.name,
+                context.writable_payload_access,
+                context,
+            );
+        }
+        let ResolvedType::SharedHandle(kind, payload) = receiver else {
+            return Vec::new();
+        };
+        let mut completions = match kind {
+            SharedReference => vec![
+                shared_method_completion(&context.receiver, "share"),
+                shared_method_completion(&context.receiver, "createWeakReference"),
+                SemanticCompletion {
+                    label: "referencedValue".to_string(),
+                    kind: 10,
+                    detail: format!("{} $referencedValue", display_resolved_type(payload)),
+                    documentation: Some("Readonly, allocation-free projection to the payload for resolving wrapper/member name collisions. It does not change either ownership count.".to_string()),
+                },
+            ],
+            WeakReference => vec![shared_method_completion(&context.receiver, "acquire")],
+            WritableSharedReference => vec![
+                shared_method_completion(&context.receiver, "share"),
+                shared_method_completion(&context.receiver, "createWeakReference"),
+                shared_method_completion(&context.receiver, "acquireReadonlyAccess"),
+                shared_method_completion(&context.receiver, "acquireWritableAccess"),
+            ],
+            WritableWeakReference => {
+                vec![shared_method_completion(&context.receiver, "acquire")]
+            }
+            ReadonlySharedReferenceAccess | WritableSharedReferenceAccess => Vec::new(),
+        };
+
+        let forwards_payload = matches!(
+            kind,
+            SharedReference | ReadonlySharedReferenceAccess | WritableSharedReferenceAccess
+        );
+        if !forwards_payload {
+            return completions;
+        }
+        let writable = *kind == WritableSharedReferenceAccess;
+        let ResolvedType::Class(class) = payload.as_ref() else {
+            return completions;
+        };
+        completions.extend(self.class_member_completions(&class.name, writable, context));
+        let mut labels = HashSet::new();
+        completions.retain(|completion| labels.insert(completion.label.clone()));
+        completions
+    }
+
+    fn class_member_completions(
+        &self,
+        class_name: &str,
+        writable: bool,
+        context: &MemberReceiver,
+    ) -> Vec<SemanticCompletion> {
+        let mut completions = Vec::new();
+        let mut current = Some(class_name);
+        let mut visited = HashSet::new();
+        while let Some(class_name) = current {
+            if !visited.insert(class_name) {
+                break;
+            }
+            if let Some(members) = self.class_members.get(class_name) {
+                completions.extend(
+                    members
+                        .iter()
+                        .filter(|member| {
+                            (writable || !member.writable)
+                                && (!member.internal
+                                    || context.current_class.as_deref() == Some(class_name))
+                        })
+                        .map(|member| member.completion.clone()),
+                );
+            }
+            current = self.class_parents.get(class_name).map(String::as_str);
+        }
+        let mut labels = HashSet::new();
+        completions.retain(|completion| labels.insert(completion.label.clone()));
+        completions
+    }
 }
 
 struct SnapshotBuilder<'a> {
@@ -97,8 +222,10 @@ struct SnapshotBuilder<'a> {
     occurrences: Vec<Occurrence>,
     classes: HashMap<String, usize>,
     class_parents: HashMap<String, String>,
+    class_members: HashMap<String, Vec<ClassMemberCompletion>>,
     methods: HashMap<(String, String), usize>,
     functions: HashMap<String, usize>,
+    member_receivers: Vec<MemberReceiver>,
 }
 
 impl<'a> SnapshotBuilder<'a> {
@@ -117,8 +244,10 @@ impl<'a> SnapshotBuilder<'a> {
             occurrences: Vec::new(),
             classes: HashMap::new(),
             class_parents: HashMap::new(),
+            class_members: HashMap::new(),
             methods: HashMap::new(),
             functions: HashMap::new(),
+            member_receivers: Vec::new(),
         }
     }
 
@@ -129,6 +258,9 @@ impl<'a> SnapshotBuilder<'a> {
             diagnostics: self.diagnostics,
             symbols: self.symbols,
             occurrences: self.occurrences,
+            member_receivers: self.member_receivers,
+            class_members: self.class_members,
+            class_parents: self.class_parents,
         }
     }
 
@@ -175,8 +307,41 @@ impl<'a> SnapshotBuilder<'a> {
         }
 
         for member in &class.members {
-            if let ClassMember::Method(method) = member {
-                self.collect_method(&class.name, method);
+            match member {
+                ClassMember::Method(method) => {
+                    self.collect_method(&class.name, method);
+                    self.class_members
+                        .entry(class.name.clone())
+                        .or_default()
+                        .push(ClassMemberCompletion {
+                            completion: SemanticCompletion {
+                                label: method.name.clone(),
+                                kind: 2,
+                                detail: function_signature(method, Some(&class.name)),
+                                documentation: phpdoc_before(self.text, method.span.start),
+                            },
+                            writable: method.writable_this,
+                            internal: matches!(method.access, MemberAccess::Internal),
+                        });
+                }
+                ClassMember::Property(property) => {
+                    self.class_members
+                        .entry(class.name.clone())
+                        .or_default()
+                        .push(ClassMemberCompletion {
+                            completion: SemanticCompletion {
+                                label: property.name.clone(),
+                                kind: 10,
+                                detail: format!("{} ${}", property.ty, property.name),
+                                documentation: phpdoc_before(self.text, property.span.start),
+                            },
+                            // Property completion represents a read. Mutability matters only
+                            // when the property is used as an assignment place.
+                            writable: false,
+                            internal: matches!(property.access, MemberAccess::Internal),
+                        });
+                }
+                ClassMember::Constant(_) => {}
             }
         }
     }
@@ -390,6 +555,7 @@ impl<'a> SnapshotBuilder<'a> {
                 }
                 let method_span =
                     self.member_name_span(Span::new(object.span().end, span.end), method);
+                self.record_member_receiver(method_span, object, current_class);
                 let builtin_hover = self.semantic_info.and_then(|info| {
                     let receiver = info.expression_type(object.span())?;
                     compiler_known_method_hover(
@@ -522,15 +688,42 @@ impl<'a> SnapshotBuilder<'a> {
                 ..
             } => {
                 self.visit_expr(object, current_class, parent_class);
+                let property_span =
+                    self.member_name_span(Span::new(object.span().end, span.end), property);
+                self.record_member_receiver(property_span, object, current_class);
+                let receiver = self
+                    .semantic_info
+                    .and_then(|info| info.expression_type(object.span()));
+                if matches!(
+                    receiver.map(non_nullable_type),
+                    Some(ResolvedType::SharedHandle(
+                        SharedHandleKind::SharedReference,
+                        _
+                    ))
+                ) && property == "referencedValue"
+                {
+                    let Some(ResolvedType::SharedHandle(_, payload)) =
+                        receiver.map(non_nullable_type)
+                    else {
+                        unreachable!("shared-reference receiver checked above");
+                    };
+                    if let Some(property_span) = property_span {
+                        self.add_symbol(
+                            property_span,
+                            format!("{} $referencedValue", display_resolved_type(payload)),
+                            Some("Readonly, allocation-free projection to the payload for resolving wrapper/member name collisions. It does not change either ownership count.".to_string()),
+                        );
+                    }
+                    return;
+                }
                 let is_string = self
                     .semantic_info
                     .and_then(|info| info.expression_type(object.span()))
                     .is_some_and(|ty| matches!(non_nullable_type(ty), ResolvedType::String));
                 if is_string {
-                    if let (Some(member), Some(property_span)) = (
-                        string_property(property),
-                        self.member_name_span(Span::new(object.span().end, span.end), property),
-                    ) {
+                    if let (Some(member), Some(property_span)) =
+                        (string_property(property), property_span)
+                    {
                         let return_type = self
                             .semantic_info
                             .and_then(|info| info.expression_type(*span))
@@ -615,11 +808,64 @@ impl<'a> SnapshotBuilder<'a> {
     fn member_name_span(&self, search_span: Span, name: &str) -> Option<Span> {
         find_identifier_span(self.tokens, search_span, name)
     }
+
+    fn record_member_receiver(
+        &mut self,
+        member_span: Option<Span>,
+        object: &Expr,
+        current_class: Option<&str>,
+    ) {
+        let Some(span) = member_span else {
+            return;
+        };
+        let Some(receiver) = self
+            .semantic_info
+            .and_then(|info| info.expression_type(object.span()))
+            .cloned()
+        else {
+            return;
+        };
+        self.member_receivers.push(MemberReceiver {
+            span,
+            receiver,
+            current_class: current_class.map(ToOwned::to_owned),
+            writable_payload_access: !is_readonly_shared_projection(object, self.semantic_info),
+        });
+    }
+}
+
+fn is_readonly_shared_projection(expression: &Expr, semantic_info: Option<&SemanticInfo>) -> bool {
+    let Expr::PropertyAccess {
+        object, property, ..
+    } = expression
+    else {
+        return false;
+    };
+    property == "referencedValue"
+        && semantic_info
+            .and_then(|info| info.expression_type(object.span()))
+            .is_some_and(|receiver| {
+                matches!(
+                    non_nullable_type(receiver),
+                    ResolvedType::SharedHandle(SharedHandleKind::SharedReference, _)
+                )
+            })
 }
 
 struct CompilerKnownMethodHover {
     signature: String,
     documentation: &'static str,
+}
+
+fn shared_method_completion(receiver: &ResolvedType, method: &str) -> SemanticCompletion {
+    let (parameters, return_type, documentation) = shared_ownership_method(receiver, method)
+        .unwrap_or_else(|| panic!("missing shared-ownership method metadata for `{method}`"));
+    SemanticCompletion {
+        label: method.to_string(),
+        kind: 2,
+        detail: format!("function {method}({parameters}): {return_type}"),
+        documentation: Some(documentation.to_string()),
+    }
 }
 
 fn compiler_known_method_hover(
@@ -1400,5 +1646,108 @@ function main(): void
         assert!(dictionary
             .markdown
             .contains("function Dictionary<string, int>::get(string $key): ?int"));
+    }
+
+    #[test]
+    fn shared_member_completion_respects_wrapper_family_and_payload_access() {
+        let source = r#"class Counter
+{
+    writable int $value = 0;
+    string $name = "counter";
+
+    function inspect(): int { return $this->value; }
+    writable function increment(): void { $this->value++; }
+    function share(): void {}
+}
+
+function main(): void
+{
+    let $readonly = shared new Counter();
+    $readonly->share();
+
+    let $owner = new WritableSharedReference(new Counter());
+    $owner->acquireReadonlyAccess();
+    let $read = $owner->acquireReadonlyAccess();
+    $read->inspect();
+    let writable $write = $owner->acquireWritableAccess();
+    $write->increment();
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("test.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+
+        let labels_at = |needle: &str| {
+            let offset = source.find(needle).expect("completion needle") + needle.len() - 1;
+            snapshot
+                .member_completions_at_offset(offset)
+                .expect("member completion context")
+                .into_iter()
+                .map(|completion| completion.label)
+                .collect::<Vec<_>>()
+        };
+
+        let readonly = labels_at("$readonly->share");
+        assert!(readonly.contains(&"share".to_string()));
+        assert!(readonly.contains(&"createWeakReference".to_string()));
+        assert!(readonly.contains(&"referencedValue".to_string()));
+        assert!(readonly.contains(&"inspect".to_string()));
+        assert!(!readonly.contains(&"increment".to_string()));
+        assert_eq!(readonly.iter().filter(|label| *label == "share").count(), 1);
+
+        let owner = labels_at("$owner->acquireReadonlyAccess");
+        assert!(owner.contains(&"acquireWritableAccess".to_string()));
+        assert!(!owner.contains(&"inspect".to_string()));
+        assert!(!owner.contains(&"referencedValue".to_string()));
+
+        let read = labels_at("$read->inspect");
+        assert!(read.contains(&"inspect".to_string()));
+        assert!(!read.contains(&"increment".to_string()));
+        assert!(read.contains(&"share".to_string()));
+        assert!(!read.contains(&"referencedValue".to_string()));
+
+        let write = labels_at("$write->increment");
+        assert!(write.contains(&"inspect".to_string()));
+        assert!(write.contains(&"increment".to_string()));
+        assert!(write.contains(&"share".to_string()));
+        assert!(!write.contains(&"referencedValue".to_string()));
+    }
+
+    #[test]
+    fn referenced_value_hover_uses_the_concrete_payload_type() {
+        let source = r#"class Counter
+{
+    string $referencedValue = "payload";
+}
+
+function main(): void
+{
+    let $counter = shared new Counter();
+    echo $counter->referencedValue->referencedValue;
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("test.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+        let offset = source.find("referencedValue").expect("payload declaration");
+        let wrapper_offset = source[offset + 1..]
+            .find("referencedValue")
+            .expect("wrapper projection")
+            + offset
+            + 1;
+        let hover = snapshot
+            .hover_at_offset(wrapper_offset)
+            .expect("referencedValue hover");
+        assert!(hover.markdown.contains("Counter $referencedValue"));
+        assert!(hover.markdown.contains("allocation-free"));
+        assert!(hover
+            .markdown
+            .contains("does not change either ownership count"));
     }
 }
