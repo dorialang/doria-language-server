@@ -25,6 +25,9 @@ pub struct LspPosition {
 
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+const READ_LINE_SIGNATURE: &str = "read_line(string $prompt = \"\"): ?string";
+const READ_LINE_DOCUMENTATION: &str = "`read_line(string $prompt = \"\"): ?string` writes the prompt exactly with no added newline, flushes stdout before reading one UTF-8 line, returns `null` only at EOF, and returns `\"\"` for a blank line.";
+
 pub fn toolchain_version() -> &'static str {
     doriac::TOOLCHAIN_VERSION
 }
@@ -670,11 +673,7 @@ fn completion_items() -> Value {
     }));
     items.extend(
         [
-            (
-                "read_line",
-                "read_line(): ?string",
-                "Reads one UTF-8 line, strips LF or CRLF, and returns null only at EOF.",
-            ),
+            ("read_line", READ_LINE_SIGNATURE, READ_LINE_DOCUMENTATION),
             (
                 "sprintf",
                 "sprintf(string $format, ...): string",
@@ -1057,7 +1056,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "panic" => Some(
                 "Built-in fatal runtime function: `panic(\"message\");`. Panics are not catchable and exit with status 101.",
             ),
-            "read_line" => Some("`read_line(): ?string` reads one UTF-8 line, strips LF or CRLF, preserves empty and unterminated final lines, and returns `null` only at EOF."),
+            "read_line" => Some(READ_LINE_DOCUMENTATION),
             "sprintf" => Some("`sprintf(string $format, ...): string` uses a compile-time-checked literal format string."),
             "printf" => Some("`printf(string $format, ...): void` uses the same checked formatter as `sprintf`, adds no newline, and returns void."),
             "read_file" => Some("`read_file(string $path): string` reads complete UTF-8 text and panics on failure."),
@@ -1940,7 +1939,7 @@ function main(): void
     #[test]
     fn completions_and_hover_expose_stage17_builtins() {
         for (name, signature, required_hover) in [
-            ("read_line", "read_line(): ?string", "only at EOF"),
+            ("read_line", READ_LINE_SIGNATURE, "only at EOF"),
             (
                 "sprintf",
                 "sprintf(string $format, ...): string",
@@ -1969,6 +1968,30 @@ function main(): void
             assert!(hover.contains(required_hover), "{name}: {hover}");
         }
         assert!(!completion_labels().contains(&"print".to_string()));
+    }
+
+    #[test]
+    fn read_line_hover_shows_the_prompt_parameter() {
+        let hover = hover_description(&TokenKind::Identifier("read_line".to_string()))
+            .expect("read_line should have hover text");
+        assert!(hover.contains("string $prompt"));
+    }
+
+    #[test]
+    fn read_line_hover_shows_the_empty_string_default() {
+        let hover = hover_description(&TokenKind::Identifier("read_line".to_string()))
+            .expect("read_line should have hover text");
+        assert!(hover.contains("$prompt = \"\""));
+    }
+
+    #[test]
+    fn completions_do_not_offer_camel_case_read_line() {
+        assert!(!completion_labels().contains(&"readLine".to_string()));
+    }
+
+    #[test]
+    fn completions_do_not_offer_the_php_readline_spelling() {
+        assert!(!completion_labels().contains(&"readline".to_string()));
     }
 
     #[test]

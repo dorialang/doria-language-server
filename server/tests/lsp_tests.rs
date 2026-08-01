@@ -58,6 +58,56 @@ $count = 1;
 }
 
 #[test]
+fn accepts_zero_argument_read_line_without_false_diagnostics() {
+    let diagnostics = diagnostics_for_document(
+        "file:///input.doria",
+        "function main(): void { let $line = read_line(); }",
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn accepts_prompted_read_line_without_false_diagnostics() {
+    let diagnostics = diagnostics_for_document(
+        "file:///input.doria",
+        "function main(): void { let $line = read_line(\"Name: \"); }",
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn publishes_the_compiler_diagnostic_for_a_non_string_prompt() {
+    let diagnostics = diagnostics_for_document(
+        "file:///input.doria",
+        "function main(): void { let $line = read_line(1); }",
+    );
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0453")
+        .expect("the compiler prompt-type diagnostic should be published");
+    assert!(diagnostic["message"]
+        .as_str()
+        .expect("diagnostic message")
+        .contains("expects `string`"));
+}
+
+#[test]
+fn preserves_php_readline_migration_guidance() {
+    let diagnostics = diagnostics_for_document(
+        "file:///input.doria",
+        "function main(): void { let $line = readline(); }",
+    );
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0461")
+        .expect("the PHP spelling diagnostic should be published");
+    assert!(diagnostic["message"]
+        .as_str()
+        .expect("diagnostic message")
+        .contains("read_line"));
+}
+
+#[test]
 fn exposes_literal_brace_fix_data_at_original_source_span() {
     let text = "echo \"literal {word}\";";
     let diagnostics = diagnostics_for_document("file:///brace.doria", text);
