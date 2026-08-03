@@ -58,6 +58,37 @@ $count = 1;
 }
 
 #[test]
+fn grouped_local_declarations_use_compiler_diagnostics_without_false_positives() {
+    let accepted = diagnostics_for_document(
+        "file:///grouped.doria",
+        r#"function main(): void
+{
+    let $left, $right = 1;
+    let writable $red, $blue = 2;
+    int $minimum, $maximum = 3;
+    writable string $first, $second = "value";
+    echo "{$left}:{$right}:{$red}:{$blue}:{$minimum}:{$maximum}:{$first}:{$second}";
+}
+"#,
+    );
+    assert!(accepted.is_empty(), "{accepted:#?}");
+
+    let duplicate = diagnostics_for_document(
+        "file:///duplicate.doria",
+        "function main(): void { let $value, $value = 1; }",
+    );
+    assert!(duplicate
+        .iter()
+        .any(|diagnostic| diagnostic["code"] == "E0103"));
+
+    let owned = diagnostics_for_document(
+        "file:///owned.doria",
+        "class Token {} function main(): void { let $left, $right = new Token(); }",
+    );
+    assert!(owned.iter().any(|diagnostic| diagnostic["code"] == "E0551"));
+}
+
+#[test]
 fn accepts_zero_argument_read_line_without_false_diagnostics() {
     let diagnostics = diagnostics_for_document(
         "file:///input.doria",

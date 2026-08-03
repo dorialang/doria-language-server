@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use doriac::ast::{
     Block, ClassDecl, ClassMember, ElseBranch, Expr, ForIncrement, ForInitializer, FunctionDecl,
-    Item, MemberAccess, Program, StaticQualifier, Stmt,
+    Item, MemberAccess, Program, StaticQualifier, Stmt, VarDecl,
 };
 use doriac::diagnostics::Diagnostic;
 use doriac::lexer::{Token, TokenKind};
@@ -26,6 +26,7 @@ pub(crate) struct AnalysisSnapshot {
     member_receivers: Vec<MemberReceiver>,
     class_members: HashMap<String, Vec<ClassMemberCompletion>>,
     class_parents: HashMap<String, String>,
+    local_visibilities: Vec<LocalVisibility>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +41,7 @@ pub(crate) struct SemanticCompletion {
 struct Symbol {
     signature: String,
     documentation: Option<String>,
+    local_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -61,6 +63,20 @@ struct ClassMemberCompletion {
     completion: SemanticCompletion,
     writable: bool,
     internal: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LocalVisibility {
+    symbol: usize,
+    start: usize,
+    end: usize,
+    depth: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocalCompletion {
+    pub(crate) label: String,
+    pub(crate) detail: String,
 }
 
 impl AnalysisSnapshot {
@@ -211,6 +227,57 @@ impl AnalysisSnapshot {
         completions.retain(|completion| labels.insert(completion.label.clone()));
         completions
     }
+
+    pub(crate) fn local_completions_at_offset(&self, offset: usize) -> Vec<LocalCompletion> {
+        let mut visible = self
+            .local_visibilities
+            .iter()
+            .filter(|visibility| visibility.start <= offset && offset <= visibility.end)
+            .collect::<Vec<_>>();
+        visible.sort_by_key(|visibility| (visibility.depth, visibility.start));
+
+        let mut by_name = HashMap::new();
+        for visibility in visible {
+            let Some(symbol) = self.symbols.get(visibility.symbol) else {
+                continue;
+            };
+            let Some(name) = &symbol.local_name else {
+                continue;
+            };
+            by_name.insert(
+                name.clone(),
+                LocalCompletion {
+                    label: format!("${name}"),
+                    detail: symbol.signature.clone(),
+                },
+            );
+        }
+        let mut completions = by_name.into_values().collect::<Vec<_>>();
+        completions.sort_by(|left, right| left.label.cmp(&right.label));
+        completions
+    }
+
+    pub(crate) fn reference_spans_at_offset(&self, offset: usize) -> Vec<Span> {
+        let Some(symbol) = self.symbol_at_offset(offset) else {
+            return Vec::new();
+        };
+        let mut spans = self
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.symbol == symbol)
+            .map(|occurrence| occurrence.span)
+            .collect::<Vec<_>>();
+        spans.sort_by_key(|span| (span.start, span.end));
+        spans
+    }
+
+    fn symbol_at_offset(&self, offset: usize) -> Option<usize> {
+        self.occurrences
+            .iter()
+            .filter(|occurrence| span_contains(occurrence.span, offset))
+            .min_by_key(|occurrence| occurrence.span.end.saturating_sub(occurrence.span.start))
+            .map(|occurrence| occurrence.symbol)
+    }
 }
 
 struct SnapshotBuilder<'a> {
@@ -226,6 +293,9 @@ struct SnapshotBuilder<'a> {
     methods: HashMap<(String, String), usize>,
     functions: HashMap<String, usize>,
     member_receivers: Vec<MemberReceiver>,
+    local_scopes: Vec<HashMap<String, usize>>,
+    local_scope_ends: Vec<usize>,
+    local_visibilities: Vec<LocalVisibility>,
 }
 
 impl<'a> SnapshotBuilder<'a> {
@@ -248,6 +318,9 @@ impl<'a> SnapshotBuilder<'a> {
             methods: HashMap::new(),
             functions: HashMap::new(),
             member_receivers: Vec::new(),
+            local_scopes: Vec::new(),
+            local_scope_ends: Vec::new(),
+            local_visibilities: Vec::new(),
         }
     }
 
@@ -261,6 +334,7 @@ impl<'a> SnapshotBuilder<'a> {
             member_receivers: self.member_receivers,
             class_members: self.class_members,
             class_parents: self.class_parents,
+            local_visibilities: self.local_visibilities,
         }
     }
 
@@ -368,6 +442,7 @@ impl<'a> SnapshotBuilder<'a> {
         self.symbols.push(Symbol {
             signature,
             documentation,
+            local_name: None,
         });
         self.occurrences.push(Occurrence {
             span: selection_span,
@@ -396,6 +471,7 @@ impl<'a> SnapshotBuilder<'a> {
     }
 
     fn collect_references(&mut self, program: &Program) {
+        self.push_local_scope(self.text.len());
         for item in &program.items {
             match item {
                 Item::Class(class) => {
@@ -438,6 +514,7 @@ impl<'a> SnapshotBuilder<'a> {
                 _ => {}
             }
         }
+        self.pop_local_scope();
     }
 
     fn visit_block(
@@ -446,9 +523,11 @@ impl<'a> SnapshotBuilder<'a> {
         current_class: Option<&str>,
         parent_class: Option<&str>,
     ) {
+        self.push_local_scope(block.span.end);
         for statement in &block.statements {
             self.visit_stmt(statement, current_class, parent_class);
         }
+        self.pop_local_scope();
     }
 
     fn visit_stmt(
@@ -459,7 +538,7 @@ impl<'a> SnapshotBuilder<'a> {
     ) {
         match statement {
             Stmt::VarDecl(declaration) => {
-                self.visit_expr(&declaration.initializer, current_class, parent_class)
+                self.visit_local_declaration(declaration, current_class, parent_class)
             }
             Stmt::Assignment(assignment) => {
                 self.visit_expr(&assignment.target, current_class, parent_class);
@@ -481,9 +560,10 @@ impl<'a> SnapshotBuilder<'a> {
                 self.visit_block(&while_statement.body, current_class, parent_class);
             }
             Stmt::For(for_statement) => {
+                self.push_local_scope(for_statement.span.end);
                 if let Some(initializer) = &for_statement.initializer {
                     if let ForInitializer::VarDecl(declaration) = initializer {
-                        self.visit_expr(&declaration.initializer, current_class, parent_class);
+                        self.visit_local_declaration(declaration, current_class, parent_class);
                     }
                     if let ForInitializer::Assignment(assignment) = initializer {
                         self.visit_expr(&assignment.target, current_class, parent_class);
@@ -503,6 +583,7 @@ impl<'a> SnapshotBuilder<'a> {
                     }
                 }
                 self.visit_block(&for_statement.body, current_class, parent_class);
+                self.pop_local_scope();
             }
             Stmt::Foreach(foreach) => {
                 self.visit_expr(&foreach.iterable, current_class, parent_class);
@@ -515,6 +596,74 @@ impl<'a> SnapshotBuilder<'a> {
             Stmt::Expr { expr, .. } => self.visit_expr(expr, current_class, parent_class),
             _ => {}
         }
+    }
+
+    fn visit_local_declaration(
+        &mut self,
+        declaration: &VarDecl,
+        current_class: Option<&str>,
+        parent_class: Option<&str>,
+    ) {
+        self.visit_expr(&declaration.initializer, current_class, parent_class);
+        let ty = declaration
+            .ty
+            .as_ref()
+            .map(ToString::to_string)
+            .or_else(|| {
+                self.semantic_info
+                    .and_then(|info| info.expression_type(declaration.initializer.span()))
+                    .map(display_resolved_type)
+            })
+            .unwrap_or_else(|| "Unknown".to_string());
+        let prefix = if declaration.writable {
+            "writable "
+        } else {
+            ""
+        };
+        let visibility_end = self
+            .local_scope_ends
+            .last()
+            .copied()
+            .unwrap_or(self.text.len());
+        let depth = self.local_scopes.len();
+        for binding in &declaration.bindings {
+            let symbol = self.symbols.len();
+            self.symbols.push(Symbol {
+                signature: format!("{prefix}{ty} ${}", binding.name),
+                documentation: None,
+                local_name: Some(binding.name.clone()),
+            });
+            self.occurrences.push(Occurrence {
+                span: binding.span,
+                symbol,
+            });
+            self.local_visibilities.push(LocalVisibility {
+                symbol,
+                start: declaration.span.end,
+                end: visibility_end,
+                depth,
+            });
+            if let Some(scope) = self.local_scopes.last_mut() {
+                scope.insert(binding.name.clone(), symbol);
+            }
+        }
+    }
+
+    fn push_local_scope(&mut self, end: usize) {
+        self.local_scopes.push(HashMap::new());
+        self.local_scope_ends.push(end);
+    }
+
+    fn pop_local_scope(&mut self) {
+        self.local_scopes.pop();
+        self.local_scope_ends.pop();
+    }
+
+    fn resolve_local(&self, name: &str) -> Option<usize> {
+        self.local_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).copied())
     }
 
     fn visit_else_branch(
@@ -542,6 +691,14 @@ impl<'a> SnapshotBuilder<'a> {
         parent_class: Option<&str>,
     ) {
         match expression {
+            Expr::Variable { name, span } => {
+                if let Some(symbol) = self.resolve_local(name) {
+                    self.occurrences.push(Occurrence {
+                        span: *span,
+                        symbol,
+                    });
+                }
+            }
             Expr::MethodCall {
                 object,
                 method,
@@ -980,7 +1137,10 @@ fn collection_method(
             "bool".to_string(),
             "Reports whether this list contains an equal value.",
         ),
-        (ResolvedType::Dictionary(key, value), "set") => (
+        (
+            ResolvedType::Dictionary(key, value) | ResolvedType::SortedDictionary(key, value),
+            "set",
+        ) => (
             format!(
                 "{} $key, {} $value",
                 display_resolved_type(key),
@@ -989,32 +1149,38 @@ fn collection_method(
             "void".to_string(),
             "Stores a value for the key in this writable dictionary.",
         ),
-        (ResolvedType::Dictionary(key, value), "get") => (
+        (
+            ResolvedType::Dictionary(key, value) | ResolvedType::SortedDictionary(key, value),
+            "get",
+        ) => (
             format!("{} $key", display_resolved_type(key)),
             format!("?{}", display_resolved_type(value)),
             "Returns the value for the key, or `null` when the key is absent.",
         ),
-        (ResolvedType::Dictionary(key, _), "has") => (
+        (ResolvedType::Dictionary(key, _) | ResolvedType::SortedDictionary(key, _), "has") => (
             format!("{} $key", display_resolved_type(key)),
             "bool".to_string(),
             "Reports whether this dictionary contains the key.",
         ),
-        (ResolvedType::Dictionary(key, value), "remove") => (
+        (
+            ResolvedType::Dictionary(key, value) | ResolvedType::SortedDictionary(key, value),
+            "remove",
+        ) => (
             format!("{} $key", display_resolved_type(key)),
             format!("?{}", display_resolved_type(value)),
             "Removes and returns the value for the key, or `null` when the key is absent.",
         ),
-        (ResolvedType::Set(value), "add") => (
+        (ResolvedType::Set(value) | ResolvedType::SortedSet(value), "add") => (
             format!("{} $value", display_resolved_type(value)),
             "bool".to_string(),
             "Adds a value and reports whether the set changed.",
         ),
-        (ResolvedType::Set(value), "remove") => (
+        (ResolvedType::Set(value) | ResolvedType::SortedSet(value), "remove") => (
             format!("{} $value", display_resolved_type(value)),
             "bool".to_string(),
             "Removes a value and reports whether the set changed.",
         ),
-        (ResolvedType::Set(value), "contains") => (
+        (ResolvedType::Set(value) | ResolvedType::SortedSet(value), "contains") => (
             format!("{} $value", display_resolved_type(value)),
             "bool".to_string(),
             "Reports whether this set contains the value.",
@@ -1028,6 +1194,36 @@ fn collection_method(
                 "difference" => "Returns a set containing values absent from the other set.",
                 _ => unreachable!(),
             },
+        ),
+        (ResolvedType::SortedSet(value), method @ ("union" | "intersect" | "difference")) => (
+            format!("SortedSet<{}> $other", display_resolved_type(value)),
+            format!("SortedSet<{}>", display_resolved_type(value)),
+            match method {
+                "union" => "Returns a sorted set containing values from either set.",
+                "intersect" => "Returns a sorted set containing values present in both sets.",
+                "difference" => "Returns a sorted set containing values absent from the other set.",
+                _ => unreachable!(),
+            },
+        ),
+        (ResolvedType::PriorityQueue(value), "push") => (
+            format!("{} $value", display_resolved_type(value)),
+            "void".to_string(),
+            "Adds a value to this writable min-priority queue.",
+        ),
+        (ResolvedType::PriorityQueue(value), "pop") => (
+            String::new(),
+            format!("?{}", display_resolved_type(value)),
+            "Removes and returns the minimum value, or `null` when the queue is empty.",
+        ),
+        (ResolvedType::Deque(value), "pushFront" | "pushBack") => (
+            format!("{} $value", display_resolved_type(value)),
+            "void".to_string(),
+            "Adds a value at the selected end of this writable deque.",
+        ),
+        (ResolvedType::Deque(value), "popFront" | "popBack") => (
+            String::new(),
+            format!("?{}", display_resolved_type(value)),
+            "Removes and returns the value at the selected end, or `null` when the deque is empty.",
         ),
         (ResolvedType::Bytes, "toArray") => (
             String::new(),
@@ -1081,7 +1277,19 @@ fn display_resolved_type(ty: &ResolvedType) -> String {
             display_resolved_type(key),
             display_resolved_type(value)
         ),
+        ResolvedType::SortedDictionary(key, value) => format!(
+            "SortedDictionary<{}, {}>",
+            display_resolved_type(key),
+            display_resolved_type(value)
+        ),
         ResolvedType::Set(element) => format!("Set<{}>", display_resolved_type(element)),
+        ResolvedType::SortedSet(element) => {
+            format!("SortedSet<{}>", display_resolved_type(element))
+        }
+        ResolvedType::PriorityQueue(element) => {
+            format!("PriorityQueue<{}>", display_resolved_type(element))
+        }
+        ResolvedType::Deque(element) => format!("Deque<{}>", display_resolved_type(element)),
         ResolvedType::SharedHandle(kind, payload) => {
             format!("{}<{}>", kind.source_name(), display_resolved_type(payload))
         }
@@ -1615,6 +1823,14 @@ function main(): void
 
     writable Dictionary<string, int> $scores = ["Ada" => 3];
     let $score = $scores->get("Ada");
+    writable SortedDictionary<string, int> $sortedScores = SortedDictionary::from(["Ada" => 3]);
+    let $sortedScore = $sortedScores->get("Ada");
+    writable SortedSet<int> $numbers = SortedSet::from([1, 2]);
+    let $combined = $numbers->union(SortedSet::from([3]));
+    writable PriorityQueue<int> $work = PriorityQueue::from([2, 1]);
+    let $next = $work->pop();
+    writable Deque<string> $line = Deque::from(["middle"]);
+    $line->pushFront("first");
 }
 "#;
         let snapshot = AnalysisSnapshot::analyze("test.doria", source);
@@ -1646,6 +1862,108 @@ function main(): void
         assert!(dictionary
             .markdown
             .contains("function Dictionary<string, int>::get(string $key): ?int"));
+
+        let sorted_dictionary = snapshot
+            .hover_at_offset(source.find("$sortedScores->get").unwrap() + "$sortedScores->".len())
+            .expect("sorted dictionary get should provide semantic hover");
+        assert!(sorted_dictionary
+            .markdown
+            .contains("function SortedDictionary<string, int>::get(string $key): ?int"));
+
+        let sorted_set = snapshot
+            .hover_at_offset(source.find("$numbers->union").unwrap() + "$numbers->".len())
+            .expect("sorted set union should provide semantic hover");
+        assert!(sorted_set
+            .markdown
+            .contains("function SortedSet<int>::union(SortedSet<int> $other): SortedSet<int>"));
+
+        let priority_queue = snapshot
+            .hover_at_offset(source.find("$work->pop").unwrap() + "$work->".len())
+            .expect("priority queue pop should provide semantic hover");
+        assert!(priority_queue
+            .markdown
+            .contains("function PriorityQueue<int>::pop(): ?int"));
+
+        let deque = snapshot
+            .hover_at_offset(source.find("$line->pushFront").unwrap() + "$line->".len())
+            .expect("deque pushFront should provide semantic hover");
+        assert!(deque
+            .markdown
+            .contains("function Deque<string>::pushFront(string $value): void"));
+    }
+
+    #[test]
+    fn grouped_locals_have_independent_symbols_hovers_completions_and_references() {
+        let source = r#"function main(): void
+{
+    let writable $left, $right = 10;
+    int $minimum, $maximum = 5;
+    $left = 20;
+    echo "{$left}:{$right}:{$minimum}:{$maximum}";
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("test.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+
+        for name in ["$left", "$right"] {
+            let declaration = source.find(name).expect("grouped binding");
+            let hover = snapshot
+                .hover_at_offset(declaration)
+                .expect("each grouped binding should have a hover");
+            assert!(hover.markdown.contains(&format!("writable int {name}")));
+            assert_eq!(&source[hover.span.start..hover.span.end], name);
+        }
+        for name in ["$minimum", "$maximum"] {
+            let declaration = source.find(name).expect("explicit grouped binding");
+            let hover = snapshot
+                .hover_at_offset(declaration)
+                .expect("each explicit grouped binding should have a hover");
+            assert!(hover.markdown.contains(&format!("int {name}")));
+        }
+
+        let completion_offset = source.find("echo").expect("completion point");
+        let completions = snapshot.local_completions_at_offset(completion_offset);
+        assert!(completions.iter().any(|item| item.label == "$left"));
+        assert!(completions.iter().any(|item| item.label == "$right"));
+        assert!(completions.iter().any(|item| item.label == "$minimum"));
+        assert!(completions.iter().any(|item| item.label == "$maximum"));
+
+        let left = snapshot.reference_spans_at_offset(source.find("$left").unwrap());
+        let right = snapshot.reference_spans_at_offset(source.find("$right").unwrap());
+        assert_eq!(left.len(), 3, "declaration, assignment, and interpolation");
+        assert_eq!(right.len(), 2, "declaration and interpolation");
+        assert!(left
+            .iter()
+            .all(|span| &source[span.start..span.end] == "$left"));
+        assert!(right
+            .iter()
+            .all(|span| &source[span.start..span.end] == "$right"));
+    }
+
+    #[test]
+    fn grouped_local_scope_and_shadowing_keep_symbols_distinct() {
+        let source = r#"function main(): void
+{
+    let $value, $peer = 1;
+    {
+        let $value, $inner = 2;
+        echo "{$value}:{$inner}";
+    }
+    echo "{$value}:{$peer}";
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("test.doria", source);
+        assert!(snapshot.diagnostics().is_empty());
+        let inner_declaration = source.match_indices("$value").nth(1).unwrap().0;
+        let inner = snapshot.reference_spans_at_offset(inner_declaration);
+        assert_eq!(inner.len(), 2);
+        let outer = snapshot.reference_spans_at_offset(source.find("$value").unwrap());
+        assert_eq!(outer.len(), 2);
+        assert!(inner.iter().all(|span| !outer.contains(span)));
     }
 
     #[test]

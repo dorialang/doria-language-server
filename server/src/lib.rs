@@ -282,6 +282,16 @@ impl Server {
                     send_response(writer, id, actions)?;
                 }
             }
+            "textDocument/references" => {
+                if let Some(id) = id {
+                    send_response(writer, id, self.references(message.get("params")))?;
+                }
+            }
+            "textDocument/rename" => {
+                if let Some(id) = id {
+                    send_response(writer, id, self.rename(message.get("params")))?;
+                }
+            }
             _ => {
                 if let Some(id) = id {
                     send_error(
@@ -435,34 +445,9 @@ impl Server {
     }
 
     fn completion(&self, params: Option<&Value>) -> Value {
-        let Some(params) = params else {
+        let Some((uri, document, offset)) = self.uri_document_and_offset(params) else {
             return completion_items();
         };
-        let Some(uri) = params
-            .get("textDocument")
-            .and_then(|document| document.get("uri"))
-            .and_then(Value::as_str)
-        else {
-            return completion_items();
-        };
-        let Some(line) = params
-            .get("position")
-            .and_then(|position| position.get("line"))
-            .and_then(Value::as_u64)
-        else {
-            return completion_items();
-        };
-        let Some(character) = params
-            .get("position")
-            .and_then(|position| position.get("character"))
-            .and_then(Value::as_u64)
-        else {
-            return completion_items();
-        };
-        let Some(document) = self.documents.get(uri) else {
-            return completion_items();
-        };
-        let offset = position_to_byte_offset(&document.text, line as u32, character as u32);
         if let Some(completions) = document.analysis.member_completions_at_offset(offset) {
             return semantic_completion_items(completions);
         }
@@ -474,12 +459,78 @@ impl Server {
             const PLACEHOLDER: &str = "__doria_completion";
             let mut source = document.text.clone();
             source.insert_str(offset, PLACEHOLDER);
-            let analysis = AnalysisSnapshot::analyze(uri, &source);
+            let analysis = AnalysisSnapshot::analyze(&uri, &source);
             if let Some(completions) = analysis.member_completions_at_offset(offset) {
                 return semantic_completion_items(completions);
             }
         }
-        completion_items()
+        completion_items_with_analysis(&document.analysis, offset)
+    }
+
+    fn references(&self, params: Option<&Value>) -> Value {
+        let Some((uri, document, offset)) = self.uri_document_and_offset(params) else {
+            return json!([]);
+        };
+        Value::Array(
+            document
+                .analysis
+                .reference_spans_at_offset(offset)
+                .into_iter()
+                .map(|span| json!({ "uri": &uri, "range": span_to_range(&document.text, span) }))
+                .collect(),
+        )
+    }
+
+    fn rename(&self, params: Option<&Value>) -> Value {
+        let Some((uri, document, offset)) = self.uri_document_and_offset(params) else {
+            return Value::Null;
+        };
+        let Some(new_name) = params
+            .and_then(|params| params.get("newName"))
+            .and_then(Value::as_str)
+        else {
+            return Value::Null;
+        };
+        let replacement = if new_name.starts_with('$') {
+            new_name.to_string()
+        } else {
+            format!("${new_name}")
+        };
+        let edits = document
+            .analysis
+            .reference_spans_at_offset(offset)
+            .into_iter()
+            .map(|span| json!({ "range": span_to_range(&document.text, span), "newText": replacement }))
+            .collect::<Vec<_>>();
+        if edits.is_empty() {
+            Value::Null
+        } else {
+            let mut changes = serde_json::Map::new();
+            changes.insert(uri, Value::Array(edits));
+            json!({ "changes": changes })
+        }
+    }
+
+    fn uri_document_and_offset<'a>(
+        &'a self,
+        params: Option<&Value>,
+    ) -> Option<(String, &'a Document, usize)> {
+        let params = params?;
+        let uri = params
+            .get("textDocument")
+            .and_then(|text_document| text_document.get("uri"))
+            .and_then(Value::as_str)?;
+        let line = params
+            .get("position")
+            .and_then(|position| position.get("line"))
+            .and_then(Value::as_u64)? as u32;
+        let character = params
+            .get("position")
+            .and_then(|position| position.get("character"))
+            .and_then(Value::as_u64)? as u32;
+        let document = self.documents.get(uri)?;
+        let offset = position_to_byte_offset(&document.text, line, character);
+        Some((uri.to_string(), document, offset))
     }
 
     fn code_actions(&self, params: Option<&Value>) -> Value {
@@ -512,6 +563,8 @@ fn initialize_result() -> Value {
                 "triggerCharacters": ["$", ">", ":"]
             },
             "hoverProvider": true,
+            "referencesProvider": true,
+            "renameProvider": true,
             "codeActionProvider": true
         },
         "serverInfo": {
@@ -639,6 +692,10 @@ fn completion_items() -> Value {
         "List",
         "Dictionary",
         "Set",
+        "SortedDictionary",
+        "SortedSet",
+        "PriorityQueue",
+        "Deque",
         "Bytes",
         "SharedReference",
         "WeakReference",
@@ -829,6 +886,26 @@ fn semantic_completion_items(completions: Vec<SemanticCompletion>) -> Value {
         "isIncomplete": false,
         "items": items,
     })
+}
+
+fn completion_items_with_analysis(analysis: &AnalysisSnapshot, offset: usize) -> Value {
+    let mut completions = completion_items();
+    let Some(items) = completions.get_mut("items").and_then(Value::as_array_mut) else {
+        return completions;
+    };
+    items.extend(
+        analysis
+            .local_completions_at_offset(offset)
+            .into_iter()
+            .map(|completion| {
+                json!({
+                    "label": completion.label,
+                    "kind": 6,
+                    "detail": completion.detail,
+                })
+            }),
+    );
+    completions
 }
 
 fn scalar_runtime_type_description(name: &str) -> Option<&'static str> {
@@ -1111,6 +1188,10 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "List" => Some("`List<T>` is the growable, insertion-ordered sequence: `add`, `insertAt`, `removeAt`, `pop`, `contains`, `first`/`last`, and the `count`/`isEmpty` properties (decision 0100). An owned move type."),
             "Dictionary" => Some("`Dictionary<K, V>` is the insertion-ordered map: `get` (`?V`), `set`, `remove` (`?V`), `has`, the `keys`/`values` projections, and `count`/`isEmpty` (decision 0100). Keys require `Hashable`. An owned move type."),
             "Set" => Some("`Set<T>` is the insertion-ordered unique-element collection: `Set::from`, `add`, `remove`, `contains`, `union`/`intersect`/`difference`, and `count`/`isEmpty` (decision 0100). Elements require `Hashable`. An owned move type."),
+            "SortedDictionary" => Some("`SortedDictionary<K, V>` is a key-ordered map with the `Dictionary` member surface. Keys and the `keys`/`values` projections use ascending `Comparable<K>` order. An owned move type."),
+            "SortedSet" => Some("`SortedSet<T>` is an ascending-order unique-element collection with the `Set` member surface. Elements require `Comparable<T>`. An owned move type."),
+            "PriorityQueue" => Some("`PriorityQueue<T>` is a min-priority queue: `push`, `pop`, `peek`, `count`, and `isEmpty`. It deliberately has no `foreach` order. Elements require `Comparable<T>`. An owned move type."),
+            "Deque" => Some("`Deque<T>` is a double-ended queue: `pushFront`/`pushBack`, `popFront`/`popBack`, `peekFront`/`peekBack`, `count`, and `isEmpty`. Iteration runs front to back. An owned move type."),
             "String" => Some("`String` is the companion for canonical string operations. Text indices and lengths use Unicode extended grapheme clusters unless the API explicitly says bytes."),
             name @ ("SharedReference" | "WeakReference" | "WritableSharedReference"
             | "WritableWeakReference" | "ReadonlySharedReferenceAccess"
@@ -1889,6 +1970,10 @@ function main(): void
             "List",
             "Dictionary",
             "Set",
+            "SortedDictionary",
+            "SortedSet",
+            "PriorityQueue",
+            "Deque",
             "Bytes",
             "SharedReference",
             "WeakReference",
@@ -2224,5 +2309,60 @@ function main(): void
         );
         assert_eq!(diagnostics[1]["range"]["start"]["line"], 1);
         assert_eq!(notification["params"]["version"], 7);
+    }
+
+    #[test]
+    fn grouped_local_completion_references_and_rename_use_utf16_ranges() {
+        let uri = "file:///grouped.doria";
+        let text = r#"function main(): void
+{
+    echo "😀";
+    let $left, $right = 10;
+    echo "{$left}:{$right}";
+}
+"#;
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document::new(uri, text.to_string(), Some(1)),
+        );
+
+        let completion_offset = text.rfind("echo").unwrap();
+        let completion_position = byte_offset_to_position(text, completion_offset);
+        let completion = server.completion(Some(&json!({
+            "textDocument": { "uri": uri },
+            "position": {
+                "line": completion_position.line,
+                "character": completion_position.character,
+            }
+        })));
+        let items = completion["items"].as_array().unwrap();
+        assert!(items.iter().any(|item| item["label"] == "$left"));
+        assert!(items.iter().any(|item| item["label"] == "$right"));
+
+        let right_offset = text.find("$right").unwrap();
+        let right_position = byte_offset_to_position(text, right_offset);
+        let params = json!({
+            "textDocument": { "uri": uri },
+            "position": {
+                "line": right_position.line,
+                "character": right_position.character,
+            }
+        });
+        let references = server.references(Some(&params));
+        assert_eq!(references.as_array().unwrap().len(), 2);
+        assert!(references.as_array().unwrap().iter().all(|location| {
+            let line = location["range"]["start"]["line"].as_u64().unwrap() as u32;
+            let character = location["range"]["start"]["character"].as_u64().unwrap() as u32;
+            let offset = position_to_byte_offset(text, line, character);
+            text[offset..].starts_with("$right")
+        }));
+
+        let mut rename_params = params;
+        rename_params["newName"] = json!("renamed");
+        let rename = server.rename(Some(&rename_params));
+        let edits = rename["changes"][uri].as_array().unwrap();
+        assert_eq!(edits.len(), 2);
+        assert!(edits.iter().all(|edit| edit["newText"] == "$renamed"));
     }
 }

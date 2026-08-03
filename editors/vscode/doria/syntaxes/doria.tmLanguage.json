@@ -694,7 +694,7 @@
     "types": {
       "patterns": [
         {
-          "begin": "\\b(List|Dictionary|Set|SharedReference|WeakReference|WritableSharedReference|WritableWeakReference|ReadonlySharedReferenceAccess|WritableSharedReferenceAccess|Sendable|Shareable|Ptr|MutPtr|Bytes)\\s*(<)",
+          "begin": "\\b(List|Dictionary|Set|SortedDictionary|SortedSet|PriorityQueue|Deque|SharedReference|WeakReference|WritableSharedReference|WritableWeakReference|ReadonlySharedReferenceAccess|WritableSharedReferenceAccess|Sendable|Shareable|Ptr|MutPtr|Bytes)\\s*(<)",
           "beginCaptures": {
             "1": {
               "name": "support.type.collection.doria"
@@ -758,7 +758,7 @@
         },
         {
           "name": "support.type.collection.doria",
-          "match": "\\b(?:List|Dictionary|Set|SharedReference|WeakReference|WritableSharedReference|WritableWeakReference|ReadonlySharedReferenceAccess|WritableSharedReferenceAccess|Sendable|Shareable|Ptr|MutPtr|Bytes)\\b"
+          "match": "\\b(?:List|Dictionary|Set|SortedDictionary|SortedSet|PriorityQueue|Deque|SharedReference|WeakReference|WritableSharedReference|WritableWeakReference|ReadonlySharedReferenceAccess|WritableSharedReferenceAccess|Sendable|Shareable|Ptr|MutPtr|Bytes)\\b"
         },
         {
           "match": "\\b([A-Z][A-Za-z0-9_]*)\\b\\s*(?=\\$)",
