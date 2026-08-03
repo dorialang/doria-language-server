@@ -187,6 +187,10 @@ $plannedTypes = [
     'List',
     'Dictionary',
     'Set',
+    'SortedDictionary',
+    'SortedSet',
+    'PriorityQueue',
+    'Deque',
 ];
 
 $rejectedTypes = [
@@ -215,6 +219,10 @@ $lspSupportedTypes = [
     'List',
     'Dictionary',
     'Set',
+    'SortedDictionary',
+    'SortedSet',
+    'PriorityQueue',
+    'Deque',
     'Bytes',
     'SharedReference',
     'WeakReference',

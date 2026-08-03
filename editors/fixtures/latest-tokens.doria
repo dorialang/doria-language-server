@@ -50,6 +50,10 @@ class Parser
     List<Token> $tokens;
     Dictionary<string, int> $counts;
     Set<string> $labels;
+    SortedDictionary<int, Token> $orderedTokens;
+    SortedSet<int> $orderedPositions;
+    PriorityQueue<int> $pendingPositions;
+    Deque<Token> $tokenWindow;
 
     function current(): Token
     {

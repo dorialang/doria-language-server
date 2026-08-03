@@ -734,7 +734,10 @@ fn collection_method(
             "bool".to_string(),
             "Reports whether this list contains an equal value.",
         ),
-        (ResolvedType::Dictionary(key, value), "set") => (
+        (
+            ResolvedType::Dictionary(key, value) | ResolvedType::SortedDictionary(key, value),
+            "set",
+        ) => (
             format!(
                 "{} $key, {} $value",
                 display_resolved_type(key),
@@ -743,32 +746,38 @@ fn collection_method(
             "void".to_string(),
             "Stores a value for the key in this writable dictionary.",
         ),
-        (ResolvedType::Dictionary(key, value), "get") => (
+        (
+            ResolvedType::Dictionary(key, value) | ResolvedType::SortedDictionary(key, value),
+            "get",
+        ) => (
             format!("{} $key", display_resolved_type(key)),
             format!("?{}", display_resolved_type(value)),
             "Returns the value for the key, or `null` when the key is absent.",
         ),
-        (ResolvedType::Dictionary(key, _), "has") => (
+        (ResolvedType::Dictionary(key, _) | ResolvedType::SortedDictionary(key, _), "has") => (
             format!("{} $key", display_resolved_type(key)),
             "bool".to_string(),
             "Reports whether this dictionary contains the key.",
         ),
-        (ResolvedType::Dictionary(key, value), "remove") => (
+        (
+            ResolvedType::Dictionary(key, value) | ResolvedType::SortedDictionary(key, value),
+            "remove",
+        ) => (
             format!("{} $key", display_resolved_type(key)),
             format!("?{}", display_resolved_type(value)),
             "Removes and returns the value for the key, or `null` when the key is absent.",
         ),
-        (ResolvedType::Set(value), "add") => (
+        (ResolvedType::Set(value) | ResolvedType::SortedSet(value), "add") => (
             format!("{} $value", display_resolved_type(value)),
             "bool".to_string(),
             "Adds a value and reports whether the set changed.",
         ),
-        (ResolvedType::Set(value), "remove") => (
+        (ResolvedType::Set(value) | ResolvedType::SortedSet(value), "remove") => (
             format!("{} $value", display_resolved_type(value)),
             "bool".to_string(),
             "Removes a value and reports whether the set changed.",
         ),
-        (ResolvedType::Set(value), "contains") => (
+        (ResolvedType::Set(value) | ResolvedType::SortedSet(value), "contains") => (
             format!("{} $value", display_resolved_type(value)),
             "bool".to_string(),
             "Reports whether this set contains the value.",
@@ -782,6 +791,36 @@ fn collection_method(
                 "difference" => "Returns a set containing values absent from the other set.",
                 _ => unreachable!(),
             },
+        ),
+        (ResolvedType::SortedSet(value), method @ ("union" | "intersect" | "difference")) => (
+            format!("SortedSet<{}> $other", display_resolved_type(value)),
+            format!("SortedSet<{}>", display_resolved_type(value)),
+            match method {
+                "union" => "Returns a sorted set containing values from either set.",
+                "intersect" => "Returns a sorted set containing values present in both sets.",
+                "difference" => "Returns a sorted set containing values absent from the other set.",
+                _ => unreachable!(),
+            },
+        ),
+        (ResolvedType::PriorityQueue(value), "push") => (
+            format!("{} $value", display_resolved_type(value)),
+            "void".to_string(),
+            "Adds a value to this writable min-priority queue.",
+        ),
+        (ResolvedType::PriorityQueue(value), "pop") => (
+            String::new(),
+            format!("?{}", display_resolved_type(value)),
+            "Removes and returns the minimum value, or `null` when the queue is empty.",
+        ),
+        (ResolvedType::Deque(value), "pushFront" | "pushBack") => (
+            format!("{} $value", display_resolved_type(value)),
+            "void".to_string(),
+            "Adds a value at the selected end of this writable deque.",
+        ),
+        (ResolvedType::Deque(value), "popFront" | "popBack") => (
+            String::new(),
+            format!("?{}", display_resolved_type(value)),
+            "Removes and returns the value at the selected end, or `null` when the deque is empty.",
         ),
         (ResolvedType::Bytes, "toArray") => (
             String::new(),
@@ -835,7 +874,19 @@ fn display_resolved_type(ty: &ResolvedType) -> String {
             display_resolved_type(key),
             display_resolved_type(value)
         ),
+        ResolvedType::SortedDictionary(key, value) => format!(
+            "SortedDictionary<{}, {}>",
+            display_resolved_type(key),
+            display_resolved_type(value)
+        ),
         ResolvedType::Set(element) => format!("Set<{}>", display_resolved_type(element)),
+        ResolvedType::SortedSet(element) => {
+            format!("SortedSet<{}>", display_resolved_type(element))
+        }
+        ResolvedType::PriorityQueue(element) => {
+            format!("PriorityQueue<{}>", display_resolved_type(element))
+        }
+        ResolvedType::Deque(element) => format!("Deque<{}>", display_resolved_type(element)),
         ResolvedType::SharedHandle(kind, payload) => {
             format!("{}<{}>", kind.source_name(), display_resolved_type(payload))
         }
@@ -1369,6 +1420,14 @@ function main(): void
 
     writable Dictionary<string, int> $scores = ["Ada" => 3];
     let $score = $scores->get("Ada");
+    writable SortedDictionary<string, int> $sortedScores = SortedDictionary::from(["Ada" => 3]);
+    let $sortedScore = $sortedScores->get("Ada");
+    writable SortedSet<int> $numbers = SortedSet::from([1, 2]);
+    let $combined = $numbers->union(SortedSet::from([3]));
+    writable PriorityQueue<int> $work = PriorityQueue::from([2, 1]);
+    let $next = $work->pop();
+    writable Deque<string> $line = Deque::from(["middle"]);
+    $line->pushFront("first");
 }
 "#;
         let snapshot = AnalysisSnapshot::analyze("test.doria", source);
@@ -1400,5 +1459,33 @@ function main(): void
         assert!(dictionary
             .markdown
             .contains("function Dictionary<string, int>::get(string $key): ?int"));
+
+        let sorted_dictionary = snapshot
+            .hover_at_offset(source.find("$sortedScores->get").unwrap() + "$sortedScores->".len())
+            .expect("sorted dictionary get should provide semantic hover");
+        assert!(sorted_dictionary
+            .markdown
+            .contains("function SortedDictionary<string, int>::get(string $key): ?int"));
+
+        let sorted_set = snapshot
+            .hover_at_offset(source.find("$numbers->union").unwrap() + "$numbers->".len())
+            .expect("sorted set union should provide semantic hover");
+        assert!(sorted_set
+            .markdown
+            .contains("function SortedSet<int>::union(SortedSet<int> $other): SortedSet<int>"));
+
+        let priority_queue = snapshot
+            .hover_at_offset(source.find("$work->pop").unwrap() + "$work->".len())
+            .expect("priority queue pop should provide semantic hover");
+        assert!(priority_queue
+            .markdown
+            .contains("function PriorityQueue<int>::pop(): ?int"));
+
+        let deque = snapshot
+            .hover_at_offset(source.find("$line->pushFront").unwrap() + "$line->".len())
+            .expect("deque pushFront should provide semantic hover");
+        assert!(deque
+            .markdown
+            .contains("function Deque<string>::pushFront(string $value): void"));
     }
 }

@@ -59,6 +59,17 @@ class DoriaLexerTest : TestCase() {
         assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
     }
 
+    fun testCompleteCollectionFamilyUsesCollectionTypeHighlighting() {
+        val tokens = lex(
+            "SortedDictionary<int, string> SortedSet<int> PriorityQueue<int> Deque<string>",
+        )
+
+        for (name in listOf("SortedDictionary", "SortedSet", "PriorityQueue", "Deque")) {
+            assertEquals(DoriaTokenTypes.COLLECTION_TYPE, tokens.first { it.text == name }.type)
+        }
+        assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
+    }
+
     private fun lex(source: String): List<Token> {
         val lexer = DoriaLexer()
         lexer.start(source)
