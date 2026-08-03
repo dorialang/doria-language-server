@@ -267,7 +267,8 @@ impl Server {
             "textDocument/didClose" => self.did_close(message.get("params"), writer)?,
             "textDocument/completion" => {
                 if let Some(id) = id {
-                    send_response(writer, id, completion_items())?;
+                    let completions = self.completions(message.get("params"));
+                    send_response(writer, id, completions)?;
                 }
             }
             "textDocument/hover" => {
@@ -280,6 +281,16 @@ impl Server {
                 if let Some(id) = id {
                     let actions = self.code_actions(message.get("params"));
                     send_response(writer, id, actions)?;
+                }
+            }
+            "textDocument/references" => {
+                if let Some(id) = id {
+                    send_response(writer, id, self.references(message.get("params")))?;
+                }
+            }
+            "textDocument/rename" => {
+                if let Some(id) = id {
+                    send_response(writer, id, self.rename(message.get("params")))?;
                 }
             }
             _ => {
@@ -434,6 +445,84 @@ impl Server {
         hover_at_offset_with_analysis(&document.text, offset, &document.analysis)
     }
 
+    fn completions(&self, params: Option<&Value>) -> Value {
+        let Some((document, offset)) = self.document_and_offset(params) else {
+            return completion_items();
+        };
+        completion_items_with_analysis(&document.analysis, offset)
+    }
+
+    fn references(&self, params: Option<&Value>) -> Value {
+        let Some((uri, document, offset)) = self.uri_document_and_offset(params) else {
+            return json!([]);
+        };
+        Value::Array(
+            document
+                .analysis
+                .reference_spans_at_offset(offset)
+                .into_iter()
+                .map(|span| json!({ "uri": &uri, "range": span_to_range(&document.text, span) }))
+                .collect(),
+        )
+    }
+
+    fn rename(&self, params: Option<&Value>) -> Value {
+        let Some((uri, document, offset)) = self.uri_document_and_offset(params) else {
+            return Value::Null;
+        };
+        let Some(new_name) = params
+            .and_then(|params| params.get("newName"))
+            .and_then(Value::as_str)
+        else {
+            return Value::Null;
+        };
+        let replacement = if new_name.starts_with('$') {
+            new_name.to_string()
+        } else {
+            format!("${new_name}")
+        };
+        let edits = document
+            .analysis
+            .reference_spans_at_offset(offset)
+            .into_iter()
+            .map(|span| json!({ "range": span_to_range(&document.text, span), "newText": replacement }))
+            .collect::<Vec<_>>();
+        if edits.is_empty() {
+            Value::Null
+        } else {
+            let mut changes = serde_json::Map::new();
+            changes.insert(uri, Value::Array(edits));
+            json!({ "changes": changes })
+        }
+    }
+
+    fn document_and_offset(&self, params: Option<&Value>) -> Option<(&Document, usize)> {
+        let (_, document, offset) = self.uri_document_and_offset(params)?;
+        Some((document, offset))
+    }
+
+    fn uri_document_and_offset<'a>(
+        &'a self,
+        params: Option<&Value>,
+    ) -> Option<(String, &'a Document, usize)> {
+        let params = params?;
+        let uri = params
+            .get("textDocument")
+            .and_then(|text_document| text_document.get("uri"))
+            .and_then(Value::as_str)?;
+        let line = params
+            .get("position")
+            .and_then(|position| position.get("line"))
+            .and_then(Value::as_u64)? as u32;
+        let character = params
+            .get("position")
+            .and_then(|position| position.get("character"))
+            .and_then(Value::as_u64)? as u32;
+        let document = self.documents.get(uri)?;
+        let offset = position_to_byte_offset(&document.text, line, character);
+        Some((uri.to_string(), document, offset))
+    }
+
     fn code_actions(&self, params: Option<&Value>) -> Value {
         let Some(uri) = params
             .and_then(|params| params.get("textDocument"))
@@ -464,6 +553,8 @@ fn initialize_result() -> Value {
                 "triggerCharacters": ["$", ">", ":"]
             },
             "hoverProvider": true,
+            "referencesProvider": true,
+            "renameProvider": true,
             "codeActionProvider": true
         },
         "serverInfo": {
@@ -767,6 +858,26 @@ fn completion_items() -> Value {
         "isIncomplete": false,
         "items": items,
     })
+}
+
+fn completion_items_with_analysis(analysis: &AnalysisSnapshot, offset: usize) -> Value {
+    let mut completions = completion_items();
+    let Some(items) = completions.get_mut("items").and_then(Value::as_array_mut) else {
+        return completions;
+    };
+    items.extend(
+        analysis
+            .local_completions_at_offset(offset)
+            .into_iter()
+            .map(|completion| {
+                json!({
+                    "label": completion.label,
+                    "kind": 6,
+                    "detail": completion.detail,
+                })
+            }),
+    );
+    completions
 }
 
 fn scalar_runtime_type_description(name: &str) -> Option<&'static str> {
@@ -2131,5 +2242,60 @@ function main(): void
         );
         assert_eq!(diagnostics[1]["range"]["start"]["line"], 1);
         assert_eq!(notification["params"]["version"], 7);
+    }
+
+    #[test]
+    fn grouped_local_completion_references_and_rename_use_utf16_ranges() {
+        let uri = "file:///grouped.doria";
+        let text = r#"function main(): void
+{
+    echo "😀";
+    let $left, $right = 10;
+    echo "{$left}:{$right}";
+}
+"#;
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document::new(uri, text.to_string(), Some(1)),
+        );
+
+        let completion_offset = text.rfind("echo").unwrap();
+        let completion_position = byte_offset_to_position(text, completion_offset);
+        let completion = server.completions(Some(&json!({
+            "textDocument": { "uri": uri },
+            "position": {
+                "line": completion_position.line,
+                "character": completion_position.character,
+            }
+        })));
+        let items = completion["items"].as_array().unwrap();
+        assert!(items.iter().any(|item| item["label"] == "$left"));
+        assert!(items.iter().any(|item| item["label"] == "$right"));
+
+        let right_offset = text.find("$right").unwrap();
+        let right_position = byte_offset_to_position(text, right_offset);
+        let params = json!({
+            "textDocument": { "uri": uri },
+            "position": {
+                "line": right_position.line,
+                "character": right_position.character,
+            }
+        });
+        let references = server.references(Some(&params));
+        assert_eq!(references.as_array().unwrap().len(), 2);
+        assert!(references.as_array().unwrap().iter().all(|location| {
+            let line = location["range"]["start"]["line"].as_u64().unwrap() as u32;
+            let character = location["range"]["start"]["character"].as_u64().unwrap() as u32;
+            let offset = position_to_byte_offset(text, line, character);
+            text[offset..].starts_with("$right")
+        }));
+
+        let mut rename_params = params;
+        rename_params["newName"] = json!("renamed");
+        let rename = server.rename(Some(&rename_params));
+        let edits = rename["changes"][uri].as_array().unwrap();
+        assert_eq!(edits.len(), 2);
+        assert!(edits.iter().all(|edit| edit["newText"] == "$renamed"));
     }
 }

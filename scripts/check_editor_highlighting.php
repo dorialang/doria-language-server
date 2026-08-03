@@ -37,6 +37,13 @@ $lspServer = $root . '/server/src/lib.rs';
 $fixture = $root . '/editors/fixtures/latest-tokens.doria';
 $rejectedFixture = $root . '/editors/fixtures/rejected-syntax.doria';
 
+$groupedLocalForms = [
+    'let $left, $right = 0;',
+    'let writable $red, $green, $blue = 0;',
+    'int $minimum, $maximum = 0;',
+    'writable int $x, $y = 0;',
+];
+
 $acceptedKeywords = [
     'class',
     'interface',
@@ -1328,7 +1335,7 @@ function check_editor_fixture_diagnostics_are_skipped(): void
 
 function check_fixture(): void
 {
-    global $fixture, $rejectedFixture, $strictComparison, $rejectedKeywords;
+    global $fixture, $rejectedFixture, $strictComparison, $rejectedKeywords, $groupedLocalForms;
 
     $fixtureText = read_text($fixture);
     $requiredSnippets = [
@@ -1407,6 +1414,12 @@ function check_fixture(): void
     ];
     foreach ($requiredSnippets as $snippet) {
         require_check(str_contains($fixtureText, $snippet), 'shared editor fixture is missing ' . $snippet);
+    }
+    foreach ($groupedLocalForms as $snippet) {
+        require_check(
+            str_contains($fixtureText, $snippet),
+            'shared editor fixture is missing grouped local form ' . $snippet,
+        );
     }
     require_check(
         !str_contains($fixtureText, 'str_starts_with('),

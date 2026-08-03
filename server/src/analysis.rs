@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use doriac::ast::{
     Block, ClassDecl, ClassMember, ElseBranch, Expr, ForIncrement, ForInitializer, FunctionDecl,
-    Item, MemberAccess, Program, StaticQualifier, Stmt,
+    Item, MemberAccess, Program, StaticQualifier, Stmt, VarDecl,
 };
 use doriac::diagnostics::Diagnostic;
 use doriac::lexer::{Token, TokenKind};
@@ -23,18 +23,34 @@ pub(crate) struct AnalysisSnapshot {
     diagnostics: Vec<Diagnostic>,
     symbols: Vec<Symbol>,
     occurrences: Vec<Occurrence>,
+    local_visibilities: Vec<LocalVisibility>,
 }
 
 #[derive(Debug, Clone)]
 struct Symbol {
     signature: String,
     documentation: Option<String>,
+    local_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct Occurrence {
     span: Span,
     symbol: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LocalVisibility {
+    symbol: usize,
+    start: usize,
+    end: usize,
+    depth: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocalCompletion {
+    pub(crate) label: String,
+    pub(crate) detail: String,
 }
 
 impl AnalysisSnapshot {
@@ -86,6 +102,57 @@ impl AnalysisSnapshot {
             markdown,
         })
     }
+
+    pub(crate) fn local_completions_at_offset(&self, offset: usize) -> Vec<LocalCompletion> {
+        let mut visible = self
+            .local_visibilities
+            .iter()
+            .filter(|visibility| visibility.start <= offset && offset <= visibility.end)
+            .collect::<Vec<_>>();
+        visible.sort_by_key(|visibility| (visibility.depth, visibility.start));
+
+        let mut by_name = HashMap::new();
+        for visibility in visible {
+            let Some(symbol) = self.symbols.get(visibility.symbol) else {
+                continue;
+            };
+            let Some(name) = &symbol.local_name else {
+                continue;
+            };
+            by_name.insert(
+                name.clone(),
+                LocalCompletion {
+                    label: format!("${name}"),
+                    detail: symbol.signature.clone(),
+                },
+            );
+        }
+        let mut completions = by_name.into_values().collect::<Vec<_>>();
+        completions.sort_by(|left, right| left.label.cmp(&right.label));
+        completions
+    }
+
+    pub(crate) fn reference_spans_at_offset(&self, offset: usize) -> Vec<Span> {
+        let Some(symbol) = self.symbol_at_offset(offset) else {
+            return Vec::new();
+        };
+        let mut spans = self
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.symbol == symbol)
+            .map(|occurrence| occurrence.span)
+            .collect::<Vec<_>>();
+        spans.sort_by_key(|span| (span.start, span.end));
+        spans
+    }
+
+    fn symbol_at_offset(&self, offset: usize) -> Option<usize> {
+        self.occurrences
+            .iter()
+            .filter(|occurrence| span_contains(occurrence.span, offset))
+            .min_by_key(|occurrence| occurrence.span.end.saturating_sub(occurrence.span.start))
+            .map(|occurrence| occurrence.symbol)
+    }
 }
 
 struct SnapshotBuilder<'a> {
@@ -99,6 +166,9 @@ struct SnapshotBuilder<'a> {
     class_parents: HashMap<String, String>,
     methods: HashMap<(String, String), usize>,
     functions: HashMap<String, usize>,
+    local_scopes: Vec<HashMap<String, usize>>,
+    local_scope_ends: Vec<usize>,
+    local_visibilities: Vec<LocalVisibility>,
 }
 
 impl<'a> SnapshotBuilder<'a> {
@@ -119,6 +189,9 @@ impl<'a> SnapshotBuilder<'a> {
             class_parents: HashMap::new(),
             methods: HashMap::new(),
             functions: HashMap::new(),
+            local_scopes: Vec::new(),
+            local_scope_ends: Vec::new(),
+            local_visibilities: Vec::new(),
         }
     }
 
@@ -129,6 +202,7 @@ impl<'a> SnapshotBuilder<'a> {
             diagnostics: self.diagnostics,
             symbols: self.symbols,
             occurrences: self.occurrences,
+            local_visibilities: self.local_visibilities,
         }
     }
 
@@ -203,6 +277,7 @@ impl<'a> SnapshotBuilder<'a> {
         self.symbols.push(Symbol {
             signature,
             documentation,
+            local_name: None,
         });
         self.occurrences.push(Occurrence {
             span: selection_span,
@@ -231,6 +306,7 @@ impl<'a> SnapshotBuilder<'a> {
     }
 
     fn collect_references(&mut self, program: &Program) {
+        self.push_local_scope(self.text.len());
         for item in &program.items {
             match item {
                 Item::Class(class) => {
@@ -273,6 +349,7 @@ impl<'a> SnapshotBuilder<'a> {
                 _ => {}
             }
         }
+        self.pop_local_scope();
     }
 
     fn visit_block(
@@ -281,9 +358,11 @@ impl<'a> SnapshotBuilder<'a> {
         current_class: Option<&str>,
         parent_class: Option<&str>,
     ) {
+        self.push_local_scope(block.span.end);
         for statement in &block.statements {
             self.visit_stmt(statement, current_class, parent_class);
         }
+        self.pop_local_scope();
     }
 
     fn visit_stmt(
@@ -294,7 +373,7 @@ impl<'a> SnapshotBuilder<'a> {
     ) {
         match statement {
             Stmt::VarDecl(declaration) => {
-                self.visit_expr(&declaration.initializer, current_class, parent_class)
+                self.visit_local_declaration(declaration, current_class, parent_class)
             }
             Stmt::Assignment(assignment) => {
                 self.visit_expr(&assignment.target, current_class, parent_class);
@@ -316,9 +395,10 @@ impl<'a> SnapshotBuilder<'a> {
                 self.visit_block(&while_statement.body, current_class, parent_class);
             }
             Stmt::For(for_statement) => {
+                self.push_local_scope(for_statement.span.end);
                 if let Some(initializer) = &for_statement.initializer {
                     if let ForInitializer::VarDecl(declaration) = initializer {
-                        self.visit_expr(&declaration.initializer, current_class, parent_class);
+                        self.visit_local_declaration(declaration, current_class, parent_class);
                     }
                     if let ForInitializer::Assignment(assignment) = initializer {
                         self.visit_expr(&assignment.target, current_class, parent_class);
@@ -338,6 +418,7 @@ impl<'a> SnapshotBuilder<'a> {
                     }
                 }
                 self.visit_block(&for_statement.body, current_class, parent_class);
+                self.pop_local_scope();
             }
             Stmt::Foreach(foreach) => {
                 self.visit_expr(&foreach.iterable, current_class, parent_class);
@@ -350,6 +431,74 @@ impl<'a> SnapshotBuilder<'a> {
             Stmt::Expr { expr, .. } => self.visit_expr(expr, current_class, parent_class),
             _ => {}
         }
+    }
+
+    fn visit_local_declaration(
+        &mut self,
+        declaration: &VarDecl,
+        current_class: Option<&str>,
+        parent_class: Option<&str>,
+    ) {
+        self.visit_expr(&declaration.initializer, current_class, parent_class);
+        let ty = declaration
+            .ty
+            .as_ref()
+            .map(ToString::to_string)
+            .or_else(|| {
+                self.semantic_info
+                    .and_then(|info| info.expression_type(declaration.initializer.span()))
+                    .map(display_resolved_type)
+            })
+            .unwrap_or_else(|| "Unknown".to_string());
+        let prefix = if declaration.writable {
+            "writable "
+        } else {
+            ""
+        };
+        let visibility_end = self
+            .local_scope_ends
+            .last()
+            .copied()
+            .unwrap_or(self.text.len());
+        let depth = self.local_scopes.len();
+        for binding in &declaration.bindings {
+            let symbol = self.symbols.len();
+            self.symbols.push(Symbol {
+                signature: format!("{prefix}{ty} ${}", binding.name),
+                documentation: None,
+                local_name: Some(binding.name.clone()),
+            });
+            self.occurrences.push(Occurrence {
+                span: binding.span,
+                symbol,
+            });
+            self.local_visibilities.push(LocalVisibility {
+                symbol,
+                start: declaration.span.end,
+                end: visibility_end,
+                depth,
+            });
+            if let Some(scope) = self.local_scopes.last_mut() {
+                scope.insert(binding.name.clone(), symbol);
+            }
+        }
+    }
+
+    fn push_local_scope(&mut self, end: usize) {
+        self.local_scopes.push(HashMap::new());
+        self.local_scope_ends.push(end);
+    }
+
+    fn pop_local_scope(&mut self) {
+        self.local_scopes.pop();
+        self.local_scope_ends.pop();
+    }
+
+    fn resolve_local(&self, name: &str) -> Option<usize> {
+        self.local_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).copied())
     }
 
     fn visit_else_branch(
@@ -377,6 +526,14 @@ impl<'a> SnapshotBuilder<'a> {
         parent_class: Option<&str>,
     ) {
         match expression {
+            Expr::Variable { name, span } => {
+                if let Some(symbol) = self.resolve_local(name) {
+                    self.occurrences.push(Occurrence {
+                        span: *span,
+                        symbol,
+                    });
+                }
+            }
             Expr::MethodCall {
                 object,
                 method,
@@ -1487,5 +1644,79 @@ function main(): void
         assert!(deque
             .markdown
             .contains("function Deque<string>::pushFront(string $value): void"));
+    }
+
+    #[test]
+    fn grouped_locals_have_independent_symbols_hovers_completions_and_references() {
+        let source = r#"function main(): void
+{
+    let writable $left, $right = 10;
+    int $minimum, $maximum = 5;
+    $left = 20;
+    echo "{$left}:{$right}:{$minimum}:{$maximum}";
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("test.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+
+        for name in ["$left", "$right"] {
+            let declaration = source.find(name).expect("grouped binding");
+            let hover = snapshot
+                .hover_at_offset(declaration)
+                .expect("each grouped binding should have a hover");
+            assert!(hover.markdown.contains(&format!("writable int {name}")));
+            assert_eq!(&source[hover.span.start..hover.span.end], name);
+        }
+        for name in ["$minimum", "$maximum"] {
+            let declaration = source.find(name).expect("explicit grouped binding");
+            let hover = snapshot
+                .hover_at_offset(declaration)
+                .expect("each explicit grouped binding should have a hover");
+            assert!(hover.markdown.contains(&format!("int {name}")));
+        }
+
+        let completion_offset = source.find("echo").expect("completion point");
+        let completions = snapshot.local_completions_at_offset(completion_offset);
+        assert!(completions.iter().any(|item| item.label == "$left"));
+        assert!(completions.iter().any(|item| item.label == "$right"));
+        assert!(completions.iter().any(|item| item.label == "$minimum"));
+        assert!(completions.iter().any(|item| item.label == "$maximum"));
+
+        let left = snapshot.reference_spans_at_offset(source.find("$left").unwrap());
+        let right = snapshot.reference_spans_at_offset(source.find("$right").unwrap());
+        assert_eq!(left.len(), 3, "declaration, assignment, and interpolation");
+        assert_eq!(right.len(), 2, "declaration and interpolation");
+        assert!(left
+            .iter()
+            .all(|span| &source[span.start..span.end] == "$left"));
+        assert!(right
+            .iter()
+            .all(|span| &source[span.start..span.end] == "$right"));
+    }
+
+    #[test]
+    fn grouped_local_scope_and_shadowing_keep_symbols_distinct() {
+        let source = r#"function main(): void
+{
+    let $value, $peer = 1;
+    {
+        let $value, $inner = 2;
+        echo "{$value}:{$inner}";
+    }
+    echo "{$value}:{$peer}";
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("test.doria", source);
+        assert!(snapshot.diagnostics().is_empty());
+        let inner_declaration = source.match_indices("$value").nth(1).unwrap().0;
+        let inner = snapshot.reference_spans_at_offset(inner_declaration);
+        assert_eq!(inner.len(), 2);
+        let outer = snapshot.reference_spans_at_offset(source.find("$value").unwrap());
+        assert_eq!(outer.len(), 2);
+        assert!(inner.iter().all(|span| !outer.contains(span)));
     }
 }

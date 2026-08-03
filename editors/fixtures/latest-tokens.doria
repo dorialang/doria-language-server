@@ -120,6 +120,10 @@ function main(List<string> $args): void
 
     let $name = "Doria";
     let writable $count = 0;
+    let $left, $right = 0;
+    let writable $red, $green, $blue = 0;
+    int $minimum, $maximum = 0;
+    writable int $x, $y = 0;
     ?User $maybeUser = null;
 
     int8 $tiny = 1;
