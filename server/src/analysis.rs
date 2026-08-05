@@ -1137,6 +1137,21 @@ fn collection_method(
             "bool".to_string(),
             "Reports whether this list contains an equal value.",
         ),
+        (ResolvedType::TypedArray(value), "contains") => (
+            format!("{} $value", display_resolved_type(value)),
+            "bool".to_string(),
+            "Reports whether this array contains an equal value.",
+        ),
+        (ResolvedType::PriorityQueue(value), "contains") => (
+            format!("{} $value", display_resolved_type(value)),
+            "bool".to_string(),
+            "Reports whether this queue contains an equal value.",
+        ),
+        (ResolvedType::Deque(value), "contains") => (
+            format!("{} $value", display_resolved_type(value)),
+            "bool".to_string(),
+            "Reports whether this deque contains an equal value.",
+        ),
         (
             ResolvedType::Dictionary(key, value) | ResolvedType::SortedDictionary(key, value),
             "set",
@@ -1157,7 +1172,10 @@ fn collection_method(
             format!("?{}", display_resolved_type(value)),
             "Returns the value for the key, or `null` when the key is absent.",
         ),
-        (ResolvedType::Dictionary(key, _) | ResolvedType::SortedDictionary(key, _), "has") => (
+        (
+            ResolvedType::Dictionary(key, _) | ResolvedType::SortedDictionary(key, _),
+            "containsKey",
+        ) => (
             format!("{} $key", display_resolved_type(key)),
             "bool".to_string(),
             "Reports whether this dictionary contains the key.",
