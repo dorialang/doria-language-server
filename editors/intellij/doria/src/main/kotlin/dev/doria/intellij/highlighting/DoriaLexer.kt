@@ -490,6 +490,7 @@ class DoriaLexer : LexerBase() {
                 isCallName() -> callableTokenType()
                 isConstantName(text) -> DoriaTokenTypes.CLASS_CONSTANT
                 isStaticPropertyName(text) -> DoriaTokenTypes.STATIC_PROPERTY
+                previousAccessor() == "->" -> DoriaTokenTypes.PROPERTY
                 text.first().isUpperCase() -> DoriaTokenTypes.TYPE_NAME
                 else -> DoriaTokenTypes.IDENTIFIER
             }
@@ -992,6 +993,10 @@ class DoriaLexer : LexerBase() {
             "List",
             "Dictionary",
             "Set",
+            "SortedDictionary",
+            "SortedSet",
+            "PriorityQueue",
+            "Deque",
             "SharedReference",
             "WeakReference",
             "WritableSharedReference",

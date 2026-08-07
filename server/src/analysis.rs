@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use doriac::ast::{
     Block, ClassDecl, ClassMember, ElseBranch, Expr, ForIncrement, ForInitializer, FunctionDecl,
-    Item, MemberAccess, Program, StaticQualifier, Stmt,
+    Item, MemberAccess, Program, StaticQualifier, Stmt, VarDecl,
 };
 use doriac::diagnostics::Diagnostic;
 use doriac::lexer::{Token, TokenKind};
@@ -23,18 +23,60 @@ pub(crate) struct AnalysisSnapshot {
     diagnostics: Vec<Diagnostic>,
     symbols: Vec<Symbol>,
     occurrences: Vec<Occurrence>,
+    member_receivers: Vec<MemberReceiver>,
+    class_members: HashMap<String, Vec<ClassMemberCompletion>>,
+    class_parents: HashMap<String, String>,
+    local_visibilities: Vec<LocalVisibility>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SemanticCompletion {
+    pub(crate) label: String,
+    pub(crate) kind: u32,
+    pub(crate) detail: String,
+    pub(crate) documentation: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct Symbol {
     signature: String,
     documentation: Option<String>,
+    local_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct Occurrence {
     span: Span,
     symbol: usize,
+}
+
+#[derive(Debug, Clone)]
+struct MemberReceiver {
+    span: Span,
+    receiver: ResolvedType,
+    current_class: Option<String>,
+    writable_payload_access: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ClassMemberCompletion {
+    completion: SemanticCompletion,
+    writable: bool,
+    internal: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LocalVisibility {
+    symbol: usize,
+    start: usize,
+    end: usize,
+    depth: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocalCompletion {
+    pub(crate) label: String,
+    pub(crate) detail: String,
 }
 
 impl AnalysisSnapshot {
@@ -86,6 +128,156 @@ impl AnalysisSnapshot {
             markdown,
         })
     }
+
+    pub(crate) fn member_completions_at_offset(
+        &self,
+        offset: usize,
+    ) -> Option<Vec<SemanticCompletion>> {
+        let context = self
+            .member_receivers
+            .iter()
+            .filter(|context| context.span.start <= offset && offset <= context.span.end)
+            .min_by_key(|context| context.span.end.saturating_sub(context.span.start))?;
+        Some(self.member_completions(context))
+    }
+
+    fn member_completions(&self, context: &MemberReceiver) -> Vec<SemanticCompletion> {
+        use SharedHandleKind::*;
+
+        let receiver = non_nullable_type(&context.receiver);
+        if let ResolvedType::Class(class) = receiver {
+            return self.class_member_completions(
+                &class.name,
+                context.writable_payload_access,
+                context,
+            );
+        }
+        let ResolvedType::SharedHandle(kind, payload) = receiver else {
+            return Vec::new();
+        };
+        let mut completions = match kind {
+            SharedReference => vec![
+                shared_method_completion(&context.receiver, "share"),
+                shared_method_completion(&context.receiver, "createWeakReference"),
+                SemanticCompletion {
+                    label: "referencedValue".to_string(),
+                    kind: 10,
+                    detail: format!("{} $referencedValue", display_resolved_type(payload)),
+                    documentation: Some("Readonly, allocation-free projection to the payload for resolving wrapper/member name collisions. It does not change either ownership count.".to_string()),
+                },
+            ],
+            WeakReference => vec![shared_method_completion(&context.receiver, "acquire")],
+            WritableSharedReference => vec![
+                shared_method_completion(&context.receiver, "share"),
+                shared_method_completion(&context.receiver, "createWeakReference"),
+                shared_method_completion(&context.receiver, "acquireReadonlyAccess"),
+                shared_method_completion(&context.receiver, "acquireWritableAccess"),
+            ],
+            WritableWeakReference => {
+                vec![shared_method_completion(&context.receiver, "acquire")]
+            }
+            ReadonlySharedReferenceAccess | WritableSharedReferenceAccess => Vec::new(),
+        };
+
+        let forwards_payload = matches!(
+            kind,
+            SharedReference | ReadonlySharedReferenceAccess | WritableSharedReferenceAccess
+        );
+        if !forwards_payload {
+            return completions;
+        }
+        let writable = *kind == WritableSharedReferenceAccess;
+        let ResolvedType::Class(class) = payload.as_ref() else {
+            return completions;
+        };
+        completions.extend(self.class_member_completions(&class.name, writable, context));
+        let mut labels = HashSet::new();
+        completions.retain(|completion| labels.insert(completion.label.clone()));
+        completions
+    }
+
+    fn class_member_completions(
+        &self,
+        class_name: &str,
+        writable: bool,
+        context: &MemberReceiver,
+    ) -> Vec<SemanticCompletion> {
+        let mut completions = Vec::new();
+        let mut current = Some(class_name);
+        let mut visited = HashSet::new();
+        while let Some(class_name) = current {
+            if !visited.insert(class_name) {
+                break;
+            }
+            if let Some(members) = self.class_members.get(class_name) {
+                completions.extend(
+                    members
+                        .iter()
+                        .filter(|member| {
+                            (writable || !member.writable)
+                                && (!member.internal
+                                    || context.current_class.as_deref() == Some(class_name))
+                        })
+                        .map(|member| member.completion.clone()),
+                );
+            }
+            current = self.class_parents.get(class_name).map(String::as_str);
+        }
+        let mut labels = HashSet::new();
+        completions.retain(|completion| labels.insert(completion.label.clone()));
+        completions
+    }
+
+    pub(crate) fn local_completions_at_offset(&self, offset: usize) -> Vec<LocalCompletion> {
+        let mut visible = self
+            .local_visibilities
+            .iter()
+            .filter(|visibility| visibility.start <= offset && offset <= visibility.end)
+            .collect::<Vec<_>>();
+        visible.sort_by_key(|visibility| (visibility.depth, visibility.start));
+
+        let mut by_name = HashMap::new();
+        for visibility in visible {
+            let Some(symbol) = self.symbols.get(visibility.symbol) else {
+                continue;
+            };
+            let Some(name) = &symbol.local_name else {
+                continue;
+            };
+            by_name.insert(
+                name.clone(),
+                LocalCompletion {
+                    label: format!("${name}"),
+                    detail: symbol.signature.clone(),
+                },
+            );
+        }
+        let mut completions = by_name.into_values().collect::<Vec<_>>();
+        completions.sort_by(|left, right| left.label.cmp(&right.label));
+        completions
+    }
+
+    pub(crate) fn reference_spans_at_offset(&self, offset: usize) -> Vec<Span> {
+        let Some(symbol) = self.symbol_at_offset(offset) else {
+            return Vec::new();
+        };
+        let mut spans = self
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.symbol == symbol)
+            .map(|occurrence| occurrence.span)
+            .collect::<Vec<_>>();
+        spans.sort_by_key(|span| (span.start, span.end));
+        spans
+    }
+
+    fn symbol_at_offset(&self, offset: usize) -> Option<usize> {
+        self.occurrences
+            .iter()
+            .filter(|occurrence| span_contains(occurrence.span, offset))
+            .min_by_key(|occurrence| occurrence.span.end.saturating_sub(occurrence.span.start))
+            .map(|occurrence| occurrence.symbol)
+    }
 }
 
 struct SnapshotBuilder<'a> {
@@ -97,8 +289,13 @@ struct SnapshotBuilder<'a> {
     occurrences: Vec<Occurrence>,
     classes: HashMap<String, usize>,
     class_parents: HashMap<String, String>,
+    class_members: HashMap<String, Vec<ClassMemberCompletion>>,
     methods: HashMap<(String, String), usize>,
     functions: HashMap<String, usize>,
+    member_receivers: Vec<MemberReceiver>,
+    local_scopes: Vec<HashMap<String, usize>>,
+    local_scope_ends: Vec<usize>,
+    local_visibilities: Vec<LocalVisibility>,
 }
 
 impl<'a> SnapshotBuilder<'a> {
@@ -117,8 +314,13 @@ impl<'a> SnapshotBuilder<'a> {
             occurrences: Vec::new(),
             classes: HashMap::new(),
             class_parents: HashMap::new(),
+            class_members: HashMap::new(),
             methods: HashMap::new(),
             functions: HashMap::new(),
+            member_receivers: Vec::new(),
+            local_scopes: Vec::new(),
+            local_scope_ends: Vec::new(),
+            local_visibilities: Vec::new(),
         }
     }
 
@@ -129,6 +331,10 @@ impl<'a> SnapshotBuilder<'a> {
             diagnostics: self.diagnostics,
             symbols: self.symbols,
             occurrences: self.occurrences,
+            member_receivers: self.member_receivers,
+            class_members: self.class_members,
+            class_parents: self.class_parents,
+            local_visibilities: self.local_visibilities,
         }
     }
 
@@ -175,8 +381,41 @@ impl<'a> SnapshotBuilder<'a> {
         }
 
         for member in &class.members {
-            if let ClassMember::Method(method) = member {
-                self.collect_method(&class.name, method);
+            match member {
+                ClassMember::Method(method) => {
+                    self.collect_method(&class.name, method);
+                    self.class_members
+                        .entry(class.name.clone())
+                        .or_default()
+                        .push(ClassMemberCompletion {
+                            completion: SemanticCompletion {
+                                label: method.name.clone(),
+                                kind: 2,
+                                detail: function_signature(method, Some(&class.name)),
+                                documentation: phpdoc_before(self.text, method.span.start),
+                            },
+                            writable: method.writable_this,
+                            internal: matches!(method.access, MemberAccess::Internal),
+                        });
+                }
+                ClassMember::Property(property) => {
+                    self.class_members
+                        .entry(class.name.clone())
+                        .or_default()
+                        .push(ClassMemberCompletion {
+                            completion: SemanticCompletion {
+                                label: property.name.clone(),
+                                kind: 10,
+                                detail: format!("{} ${}", property.ty, property.name),
+                                documentation: phpdoc_before(self.text, property.span.start),
+                            },
+                            // Property completion represents a read. Mutability matters only
+                            // when the property is used as an assignment place.
+                            writable: false,
+                            internal: matches!(property.access, MemberAccess::Internal),
+                        });
+                }
+                ClassMember::Constant(_) => {}
             }
         }
     }
@@ -203,6 +442,7 @@ impl<'a> SnapshotBuilder<'a> {
         self.symbols.push(Symbol {
             signature,
             documentation,
+            local_name: None,
         });
         self.occurrences.push(Occurrence {
             span: selection_span,
@@ -231,6 +471,7 @@ impl<'a> SnapshotBuilder<'a> {
     }
 
     fn collect_references(&mut self, program: &Program) {
+        self.push_local_scope(self.text.len());
         for item in &program.items {
             match item {
                 Item::Class(class) => {
@@ -273,6 +514,7 @@ impl<'a> SnapshotBuilder<'a> {
                 _ => {}
             }
         }
+        self.pop_local_scope();
     }
 
     fn visit_block(
@@ -281,9 +523,11 @@ impl<'a> SnapshotBuilder<'a> {
         current_class: Option<&str>,
         parent_class: Option<&str>,
     ) {
+        self.push_local_scope(block.span.end);
         for statement in &block.statements {
             self.visit_stmt(statement, current_class, parent_class);
         }
+        self.pop_local_scope();
     }
 
     fn visit_stmt(
@@ -294,7 +538,7 @@ impl<'a> SnapshotBuilder<'a> {
     ) {
         match statement {
             Stmt::VarDecl(declaration) => {
-                self.visit_expr(&declaration.initializer, current_class, parent_class)
+                self.visit_local_declaration(declaration, current_class, parent_class)
             }
             Stmt::Assignment(assignment) => {
                 self.visit_expr(&assignment.target, current_class, parent_class);
@@ -316,9 +560,10 @@ impl<'a> SnapshotBuilder<'a> {
                 self.visit_block(&while_statement.body, current_class, parent_class);
             }
             Stmt::For(for_statement) => {
+                self.push_local_scope(for_statement.span.end);
                 if let Some(initializer) = &for_statement.initializer {
                     if let ForInitializer::VarDecl(declaration) = initializer {
-                        self.visit_expr(&declaration.initializer, current_class, parent_class);
+                        self.visit_local_declaration(declaration, current_class, parent_class);
                     }
                     if let ForInitializer::Assignment(assignment) = initializer {
                         self.visit_expr(&assignment.target, current_class, parent_class);
@@ -338,6 +583,7 @@ impl<'a> SnapshotBuilder<'a> {
                     }
                 }
                 self.visit_block(&for_statement.body, current_class, parent_class);
+                self.pop_local_scope();
             }
             Stmt::Foreach(foreach) => {
                 self.visit_expr(&foreach.iterable, current_class, parent_class);
@@ -350,6 +596,74 @@ impl<'a> SnapshotBuilder<'a> {
             Stmt::Expr { expr, .. } => self.visit_expr(expr, current_class, parent_class),
             _ => {}
         }
+    }
+
+    fn visit_local_declaration(
+        &mut self,
+        declaration: &VarDecl,
+        current_class: Option<&str>,
+        parent_class: Option<&str>,
+    ) {
+        self.visit_expr(&declaration.initializer, current_class, parent_class);
+        let ty = declaration
+            .ty
+            .as_ref()
+            .map(ToString::to_string)
+            .or_else(|| {
+                self.semantic_info
+                    .and_then(|info| info.expression_type(declaration.initializer.span()))
+                    .map(display_resolved_type)
+            })
+            .unwrap_or_else(|| "Unknown".to_string());
+        let prefix = if declaration.writable {
+            "writable "
+        } else {
+            ""
+        };
+        let visibility_end = self
+            .local_scope_ends
+            .last()
+            .copied()
+            .unwrap_or(self.text.len());
+        let depth = self.local_scopes.len();
+        for binding in &declaration.bindings {
+            let symbol = self.symbols.len();
+            self.symbols.push(Symbol {
+                signature: format!("{prefix}{ty} ${}", binding.name),
+                documentation: None,
+                local_name: Some(binding.name.clone()),
+            });
+            self.occurrences.push(Occurrence {
+                span: binding.span,
+                symbol,
+            });
+            self.local_visibilities.push(LocalVisibility {
+                symbol,
+                start: declaration.span.end,
+                end: visibility_end,
+                depth,
+            });
+            if let Some(scope) = self.local_scopes.last_mut() {
+                scope.insert(binding.name.clone(), symbol);
+            }
+        }
+    }
+
+    fn push_local_scope(&mut self, end: usize) {
+        self.local_scopes.push(HashMap::new());
+        self.local_scope_ends.push(end);
+    }
+
+    fn pop_local_scope(&mut self) {
+        self.local_scopes.pop();
+        self.local_scope_ends.pop();
+    }
+
+    fn resolve_local(&self, name: &str) -> Option<usize> {
+        self.local_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).copied())
     }
 
     fn visit_else_branch(
@@ -377,6 +691,14 @@ impl<'a> SnapshotBuilder<'a> {
         parent_class: Option<&str>,
     ) {
         match expression {
+            Expr::Variable { name, span } => {
+                if let Some(symbol) = self.resolve_local(name) {
+                    self.occurrences.push(Occurrence {
+                        span: *span,
+                        symbol,
+                    });
+                }
+            }
             Expr::MethodCall {
                 object,
                 method,
@@ -390,6 +712,7 @@ impl<'a> SnapshotBuilder<'a> {
                 }
                 let method_span =
                     self.member_name_span(Span::new(object.span().end, span.end), method);
+                self.record_member_receiver(method_span, object, current_class);
                 let builtin_hover = self.semantic_info.and_then(|info| {
                     let receiver = info.expression_type(object.span())?;
                     compiler_known_method_hover(
@@ -522,15 +845,42 @@ impl<'a> SnapshotBuilder<'a> {
                 ..
             } => {
                 self.visit_expr(object, current_class, parent_class);
+                let property_span =
+                    self.member_name_span(Span::new(object.span().end, span.end), property);
+                self.record_member_receiver(property_span, object, current_class);
+                let receiver = self
+                    .semantic_info
+                    .and_then(|info| info.expression_type(object.span()));
+                if matches!(
+                    receiver.map(non_nullable_type),
+                    Some(ResolvedType::SharedHandle(
+                        SharedHandleKind::SharedReference,
+                        _
+                    ))
+                ) && property == "referencedValue"
+                {
+                    let Some(ResolvedType::SharedHandle(_, payload)) =
+                        receiver.map(non_nullable_type)
+                    else {
+                        unreachable!("shared-reference receiver checked above");
+                    };
+                    if let Some(property_span) = property_span {
+                        self.add_symbol(
+                            property_span,
+                            format!("{} $referencedValue", display_resolved_type(payload)),
+                            Some("Readonly, allocation-free projection to the payload for resolving wrapper/member name collisions. It does not change either ownership count.".to_string()),
+                        );
+                    }
+                    return;
+                }
                 let is_string = self
                     .semantic_info
                     .and_then(|info| info.expression_type(object.span()))
                     .is_some_and(|ty| matches!(non_nullable_type(ty), ResolvedType::String));
                 if is_string {
-                    if let (Some(member), Some(property_span)) = (
-                        string_property(property),
-                        self.member_name_span(Span::new(object.span().end, span.end), property),
-                    ) {
+                    if let (Some(member), Some(property_span)) =
+                        (string_property(property), property_span)
+                    {
                         let return_type = self
                             .semantic_info
                             .and_then(|info| info.expression_type(*span))
@@ -615,11 +965,64 @@ impl<'a> SnapshotBuilder<'a> {
     fn member_name_span(&self, search_span: Span, name: &str) -> Option<Span> {
         find_identifier_span(self.tokens, search_span, name)
     }
+
+    fn record_member_receiver(
+        &mut self,
+        member_span: Option<Span>,
+        object: &Expr,
+        current_class: Option<&str>,
+    ) {
+        let Some(span) = member_span else {
+            return;
+        };
+        let Some(receiver) = self
+            .semantic_info
+            .and_then(|info| info.expression_type(object.span()))
+            .cloned()
+        else {
+            return;
+        };
+        self.member_receivers.push(MemberReceiver {
+            span,
+            receiver,
+            current_class: current_class.map(ToOwned::to_owned),
+            writable_payload_access: !is_readonly_shared_projection(object, self.semantic_info),
+        });
+    }
+}
+
+fn is_readonly_shared_projection(expression: &Expr, semantic_info: Option<&SemanticInfo>) -> bool {
+    let Expr::PropertyAccess {
+        object, property, ..
+    } = expression
+    else {
+        return false;
+    };
+    property == "referencedValue"
+        && semantic_info
+            .and_then(|info| info.expression_type(object.span()))
+            .is_some_and(|receiver| {
+                matches!(
+                    non_nullable_type(receiver),
+                    ResolvedType::SharedHandle(SharedHandleKind::SharedReference, _)
+                )
+            })
 }
 
 struct CompilerKnownMethodHover {
     signature: String,
     documentation: &'static str,
+}
+
+fn shared_method_completion(receiver: &ResolvedType, method: &str) -> SemanticCompletion {
+    let (parameters, return_type, documentation) = shared_ownership_method(receiver, method)
+        .unwrap_or_else(|| panic!("missing shared-ownership method metadata for `{method}`"));
+    SemanticCompletion {
+        label: method.to_string(),
+        kind: 2,
+        detail: format!("function {method}({parameters}): {return_type}"),
+        documentation: Some(documentation.to_string()),
+    }
 }
 
 fn compiler_known_method_hover(
@@ -734,7 +1137,25 @@ fn collection_method(
             "bool".to_string(),
             "Reports whether this list contains an equal value.",
         ),
-        (ResolvedType::Dictionary(key, value), "set") => (
+        (ResolvedType::TypedArray(value), "contains") => (
+            format!("{} $value", display_resolved_type(value)),
+            "bool".to_string(),
+            "Reports whether this array contains an equal value.",
+        ),
+        (ResolvedType::PriorityQueue(value), "contains") => (
+            format!("{} $value", display_resolved_type(value)),
+            "bool".to_string(),
+            "Reports whether this queue contains an equal value.",
+        ),
+        (ResolvedType::Deque(value), "contains") => (
+            format!("{} $value", display_resolved_type(value)),
+            "bool".to_string(),
+            "Reports whether this deque contains an equal value.",
+        ),
+        (
+            ResolvedType::Dictionary(key, value) | ResolvedType::SortedDictionary(key, value),
+            "set",
+        ) => (
             format!(
                 "{} $key, {} $value",
                 display_resolved_type(key),
@@ -743,32 +1164,41 @@ fn collection_method(
             "void".to_string(),
             "Stores a value for the key in this writable dictionary.",
         ),
-        (ResolvedType::Dictionary(key, value), "get") => (
+        (
+            ResolvedType::Dictionary(key, value) | ResolvedType::SortedDictionary(key, value),
+            "get",
+        ) => (
             format!("{} $key", display_resolved_type(key)),
             format!("?{}", display_resolved_type(value)),
             "Returns the value for the key, or `null` when the key is absent.",
         ),
-        (ResolvedType::Dictionary(key, _), "has") => (
+        (
+            ResolvedType::Dictionary(key, _) | ResolvedType::SortedDictionary(key, _),
+            "containsKey",
+        ) => (
             format!("{} $key", display_resolved_type(key)),
             "bool".to_string(),
             "Reports whether this dictionary contains the key.",
         ),
-        (ResolvedType::Dictionary(key, value), "remove") => (
+        (
+            ResolvedType::Dictionary(key, value) | ResolvedType::SortedDictionary(key, value),
+            "remove",
+        ) => (
             format!("{} $key", display_resolved_type(key)),
             format!("?{}", display_resolved_type(value)),
             "Removes and returns the value for the key, or `null` when the key is absent.",
         ),
-        (ResolvedType::Set(value), "add") => (
+        (ResolvedType::Set(value) | ResolvedType::SortedSet(value), "add") => (
             format!("{} $value", display_resolved_type(value)),
             "bool".to_string(),
             "Adds a value and reports whether the set changed.",
         ),
-        (ResolvedType::Set(value), "remove") => (
+        (ResolvedType::Set(value) | ResolvedType::SortedSet(value), "remove") => (
             format!("{} $value", display_resolved_type(value)),
             "bool".to_string(),
             "Removes a value and reports whether the set changed.",
         ),
-        (ResolvedType::Set(value), "contains") => (
+        (ResolvedType::Set(value) | ResolvedType::SortedSet(value), "contains") => (
             format!("{} $value", display_resolved_type(value)),
             "bool".to_string(),
             "Reports whether this set contains the value.",
@@ -782,6 +1212,36 @@ fn collection_method(
                 "difference" => "Returns a set containing values absent from the other set.",
                 _ => unreachable!(),
             },
+        ),
+        (ResolvedType::SortedSet(value), method @ ("union" | "intersect" | "difference")) => (
+            format!("SortedSet<{}> $other", display_resolved_type(value)),
+            format!("SortedSet<{}>", display_resolved_type(value)),
+            match method {
+                "union" => "Returns a sorted set containing values from either set.",
+                "intersect" => "Returns a sorted set containing values present in both sets.",
+                "difference" => "Returns a sorted set containing values absent from the other set.",
+                _ => unreachable!(),
+            },
+        ),
+        (ResolvedType::PriorityQueue(value), "push") => (
+            format!("{} $value", display_resolved_type(value)),
+            "void".to_string(),
+            "Adds a value to this writable min-priority queue.",
+        ),
+        (ResolvedType::PriorityQueue(value), "pop") => (
+            String::new(),
+            format!("?{}", display_resolved_type(value)),
+            "Removes and returns the minimum value, or `null` when the queue is empty.",
+        ),
+        (ResolvedType::Deque(value), "pushFront" | "pushBack") => (
+            format!("{} $value", display_resolved_type(value)),
+            "void".to_string(),
+            "Adds a value at the selected end of this writable deque.",
+        ),
+        (ResolvedType::Deque(value), "popFront" | "popBack") => (
+            String::new(),
+            format!("?{}", display_resolved_type(value)),
+            "Removes and returns the value at the selected end, or `null` when the deque is empty.",
         ),
         (ResolvedType::Bytes, "toArray") => (
             String::new(),
@@ -835,7 +1295,19 @@ fn display_resolved_type(ty: &ResolvedType) -> String {
             display_resolved_type(key),
             display_resolved_type(value)
         ),
+        ResolvedType::SortedDictionary(key, value) => format!(
+            "SortedDictionary<{}, {}>",
+            display_resolved_type(key),
+            display_resolved_type(value)
+        ),
         ResolvedType::Set(element) => format!("Set<{}>", display_resolved_type(element)),
+        ResolvedType::SortedSet(element) => {
+            format!("SortedSet<{}>", display_resolved_type(element))
+        }
+        ResolvedType::PriorityQueue(element) => {
+            format!("PriorityQueue<{}>", display_resolved_type(element))
+        }
+        ResolvedType::Deque(element) => format!("Deque<{}>", display_resolved_type(element)),
         ResolvedType::SharedHandle(kind, payload) => {
             format!("{}<{}>", kind.source_name(), display_resolved_type(payload))
         }
@@ -1369,6 +1841,14 @@ function main(): void
 
     writable Dictionary<string, int> $scores = ["Ada" => 3];
     let $score = $scores->get("Ada");
+    writable SortedDictionary<string, int> $sortedScores = SortedDictionary::from(["Ada" => 3]);
+    let $sortedScore = $sortedScores->get("Ada");
+    writable SortedSet<int> $numbers = SortedSet::from([1, 2]);
+    let $combined = $numbers->union(SortedSet::from([3]));
+    writable PriorityQueue<int> $work = PriorityQueue::from([2, 1]);
+    let $next = $work->pop();
+    writable Deque<string> $line = Deque::from(["middle"]);
+    $line->pushFront("first");
 }
 "#;
         let snapshot = AnalysisSnapshot::analyze("test.doria", source);
@@ -1400,5 +1880,210 @@ function main(): void
         assert!(dictionary
             .markdown
             .contains("function Dictionary<string, int>::get(string $key): ?int"));
+
+        let sorted_dictionary = snapshot
+            .hover_at_offset(source.find("$sortedScores->get").unwrap() + "$sortedScores->".len())
+            .expect("sorted dictionary get should provide semantic hover");
+        assert!(sorted_dictionary
+            .markdown
+            .contains("function SortedDictionary<string, int>::get(string $key): ?int"));
+
+        let sorted_set = snapshot
+            .hover_at_offset(source.find("$numbers->union").unwrap() + "$numbers->".len())
+            .expect("sorted set union should provide semantic hover");
+        assert!(sorted_set
+            .markdown
+            .contains("function SortedSet<int>::union(SortedSet<int> $other): SortedSet<int>"));
+
+        let priority_queue = snapshot
+            .hover_at_offset(source.find("$work->pop").unwrap() + "$work->".len())
+            .expect("priority queue pop should provide semantic hover");
+        assert!(priority_queue
+            .markdown
+            .contains("function PriorityQueue<int>::pop(): ?int"));
+
+        let deque = snapshot
+            .hover_at_offset(source.find("$line->pushFront").unwrap() + "$line->".len())
+            .expect("deque pushFront should provide semantic hover");
+        assert!(deque
+            .markdown
+            .contains("function Deque<string>::pushFront(string $value): void"));
+    }
+
+    #[test]
+    fn grouped_locals_have_independent_symbols_hovers_completions_and_references() {
+        let source = r#"function main(): void
+{
+    let writable $left, $right = 10;
+    int $minimum, $maximum = 5;
+    $left = 20;
+    echo "{$left}:{$right}:{$minimum}:{$maximum}";
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("test.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+
+        for name in ["$left", "$right"] {
+            let declaration = source.find(name).expect("grouped binding");
+            let hover = snapshot
+                .hover_at_offset(declaration)
+                .expect("each grouped binding should have a hover");
+            assert!(hover.markdown.contains(&format!("writable int {name}")));
+            assert_eq!(&source[hover.span.start..hover.span.end], name);
+        }
+        for name in ["$minimum", "$maximum"] {
+            let declaration = source.find(name).expect("explicit grouped binding");
+            let hover = snapshot
+                .hover_at_offset(declaration)
+                .expect("each explicit grouped binding should have a hover");
+            assert!(hover.markdown.contains(&format!("int {name}")));
+        }
+
+        let completion_offset = source.find("echo").expect("completion point");
+        let completions = snapshot.local_completions_at_offset(completion_offset);
+        assert!(completions.iter().any(|item| item.label == "$left"));
+        assert!(completions.iter().any(|item| item.label == "$right"));
+        assert!(completions.iter().any(|item| item.label == "$minimum"));
+        assert!(completions.iter().any(|item| item.label == "$maximum"));
+
+        let left = snapshot.reference_spans_at_offset(source.find("$left").unwrap());
+        let right = snapshot.reference_spans_at_offset(source.find("$right").unwrap());
+        assert_eq!(left.len(), 3, "declaration, assignment, and interpolation");
+        assert_eq!(right.len(), 2, "declaration and interpolation");
+        assert!(left
+            .iter()
+            .all(|span| &source[span.start..span.end] == "$left"));
+        assert!(right
+            .iter()
+            .all(|span| &source[span.start..span.end] == "$right"));
+    }
+
+    #[test]
+    fn grouped_local_scope_and_shadowing_keep_symbols_distinct() {
+        let source = r#"function main(): void
+{
+    let $value, $peer = 1;
+    {
+        let $value, $inner = 2;
+        echo "{$value}:{$inner}";
+    }
+    echo "{$value}:{$peer}";
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("test.doria", source);
+        assert!(snapshot.diagnostics().is_empty());
+        let inner_declaration = source.match_indices("$value").nth(1).unwrap().0;
+        let inner = snapshot.reference_spans_at_offset(inner_declaration);
+        assert_eq!(inner.len(), 2);
+        let outer = snapshot.reference_spans_at_offset(source.find("$value").unwrap());
+        assert_eq!(outer.len(), 2);
+        assert!(inner.iter().all(|span| !outer.contains(span)));
+    }
+
+    #[test]
+    fn shared_member_completion_respects_wrapper_family_and_payload_access() {
+        let source = r#"class Counter
+{
+    writable int $value = 0;
+    string $name = "counter";
+
+    function inspect(): int { return $this->value; }
+    writable function increment(): void { $this->value++; }
+    function share(): void {}
+}
+
+function main(): void
+{
+    let $readonly = shared new Counter();
+    $readonly->share();
+
+    let $owner = new WritableSharedReference(new Counter());
+    $owner->acquireReadonlyAccess();
+    let $read = $owner->acquireReadonlyAccess();
+    $read->inspect();
+    let writable $write = $owner->acquireWritableAccess();
+    $write->increment();
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("test.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+
+        let labels_at = |needle: &str| {
+            let offset = source.find(needle).expect("completion needle") + needle.len() - 1;
+            snapshot
+                .member_completions_at_offset(offset)
+                .expect("member completion context")
+                .into_iter()
+                .map(|completion| completion.label)
+                .collect::<Vec<_>>()
+        };
+
+        let readonly = labels_at("$readonly->share");
+        assert!(readonly.contains(&"share".to_string()));
+        assert!(readonly.contains(&"createWeakReference".to_string()));
+        assert!(readonly.contains(&"referencedValue".to_string()));
+        assert!(readonly.contains(&"inspect".to_string()));
+        assert!(!readonly.contains(&"increment".to_string()));
+        assert_eq!(readonly.iter().filter(|label| *label == "share").count(), 1);
+
+        let owner = labels_at("$owner->acquireReadonlyAccess");
+        assert!(owner.contains(&"acquireWritableAccess".to_string()));
+        assert!(!owner.contains(&"inspect".to_string()));
+        assert!(!owner.contains(&"referencedValue".to_string()));
+
+        let read = labels_at("$read->inspect");
+        assert!(read.contains(&"inspect".to_string()));
+        assert!(!read.contains(&"increment".to_string()));
+        assert!(read.contains(&"share".to_string()));
+        assert!(!read.contains(&"referencedValue".to_string()));
+
+        let write = labels_at("$write->increment");
+        assert!(write.contains(&"inspect".to_string()));
+        assert!(write.contains(&"increment".to_string()));
+        assert!(write.contains(&"share".to_string()));
+        assert!(!write.contains(&"referencedValue".to_string()));
+    }
+
+    #[test]
+    fn referenced_value_hover_uses_the_concrete_payload_type() {
+        let source = r#"class Counter
+{
+    string $referencedValue = "payload";
+}
+
+function main(): void
+{
+    let $counter = shared new Counter();
+    echo $counter->referencedValue->referencedValue;
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("test.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+        let offset = source.find("referencedValue").expect("payload declaration");
+        let wrapper_offset = source[offset + 1..]
+            .find("referencedValue")
+            .expect("wrapper projection")
+            + offset
+            + 1;
+        let hover = snapshot
+            .hover_at_offset(wrapper_offset)
+            .expect("referencedValue hover");
+        assert!(hover.markdown.contains("Counter $referencedValue"));
+        assert!(hover.markdown.contains("allocation-free"));
+        assert!(hover
+            .markdown
+            .contains("does not change either ownership count"));
     }
 }

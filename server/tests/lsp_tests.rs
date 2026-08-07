@@ -58,6 +58,87 @@ $count = 1;
 }
 
 #[test]
+fn grouped_local_declarations_use_compiler_diagnostics_without_false_positives() {
+    let accepted = diagnostics_for_document(
+        "file:///grouped.doria",
+        r#"function main(): void
+{
+    let $left, $right = 1;
+    let writable $red, $blue = 2;
+    int $minimum, $maximum = 3;
+    writable string $first, $second = "value";
+    echo "{$left}:{$right}:{$red}:{$blue}:{$minimum}:{$maximum}:{$first}:{$second}";
+}
+"#,
+    );
+    assert!(accepted.is_empty(), "{accepted:#?}");
+
+    let duplicate = diagnostics_for_document(
+        "file:///duplicate.doria",
+        "function main(): void { let $value, $value = 1; }",
+    );
+    assert!(duplicate
+        .iter()
+        .any(|diagnostic| diagnostic["code"] == "E0103"));
+
+    let owned = diagnostics_for_document(
+        "file:///owned.doria",
+        "class Token {} function main(): void { let $left, $right = new Token(); }",
+    );
+    assert!(owned.iter().any(|diagnostic| diagnostic["code"] == "E0551"));
+}
+
+#[test]
+fn accepts_zero_argument_read_line_without_false_diagnostics() {
+    let diagnostics = diagnostics_for_document(
+        "file:///input.doria",
+        "function main(): void { let $line = read_line(); }",
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn accepts_prompted_read_line_without_false_diagnostics() {
+    let diagnostics = diagnostics_for_document(
+        "file:///input.doria",
+        "function main(): void { let $line = read_line(\"Name: \"); }",
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn publishes_the_compiler_diagnostic_for_a_non_string_prompt() {
+    let diagnostics = diagnostics_for_document(
+        "file:///input.doria",
+        "function main(): void { let $line = read_line(1); }",
+    );
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0453")
+        .expect("the compiler prompt-type diagnostic should be published");
+    assert!(diagnostic["message"]
+        .as_str()
+        .expect("diagnostic message")
+        .contains("expects `string`"));
+}
+
+#[test]
+fn preserves_php_readline_migration_guidance() {
+    let diagnostics = diagnostics_for_document(
+        "file:///input.doria",
+        "function main(): void { let $line = readline(); }",
+    );
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0461")
+        .expect("the PHP spelling diagnostic should be published");
+    assert!(diagnostic["message"]
+        .as_str()
+        .expect("diagnostic message")
+        .contains("read_line"));
+}
+
+#[test]
 fn exposes_literal_brace_fix_data_at_original_source_span() {
     let text = "echo \"literal {word}\";";
     let diagnostics = diagnostics_for_document("file:///brace.doria", text);
@@ -394,6 +475,33 @@ let $bad = $counter->share();
             "{uri} should report {expected_code}: {diagnostics:#?}"
         );
     }
+}
+
+#[test]
+fn shared_operation_diagnostics_preserve_utf16_ranges_after_emoji() {
+    let source = r#"class Counter {}
+function main(): void
+{
+    echo "😀";
+    let $counter = new WritableSharedReference(new Counter());
+    let $moved = $counter;
+    let $bad = $counter->share();
+}
+"#;
+    let diagnostics = diagnostics_for_document("file:///utf16-shared.doria", source);
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0470")
+        .expect("use-after-move diagnostic");
+    let moved_use = source
+        .rfind("$counter->share")
+        .expect("moved shared operation");
+    let expected = byte_offset_to_position(source, moved_use);
+    assert_eq!(diagnostic["range"]["start"]["line"], expected.line);
+    assert_eq!(
+        diagnostic["range"]["start"]["character"],
+        expected.character
+    );
 }
 
 #[test]

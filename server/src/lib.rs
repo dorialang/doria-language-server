@@ -14,7 +14,7 @@ use doriac::source::Span;
 mod analysis;
 mod string_surface;
 
-use analysis::AnalysisSnapshot;
+use analysis::{AnalysisSnapshot, SemanticCompletion};
 use string_surface::{STRING_COMPANION_METHODS, STRING_PROPERTIES};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +24,9 @@ pub struct LspPosition {
 }
 
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const READ_LINE_SIGNATURE: &str = "read_line(string $prompt = \"\"): ?string";
+const READ_LINE_DOCUMENTATION: &str = "`read_line(string $prompt = \"\"): ?string` writes the prompt exactly with no added newline, flushes stdout before reading one UTF-8 line, returns `null` only at EOF, and returns `\"\"` for a blank line.";
 
 pub fn toolchain_version() -> &'static str {
     doriac::TOOLCHAIN_VERSION
@@ -264,7 +267,7 @@ impl Server {
             "textDocument/didClose" => self.did_close(message.get("params"), writer)?,
             "textDocument/completion" => {
                 if let Some(id) = id {
-                    send_response(writer, id, completion_items())?;
+                    send_response(writer, id, self.completion(message.get("params")))?;
                 }
             }
             "textDocument/hover" => {
@@ -277,6 +280,16 @@ impl Server {
                 if let Some(id) = id {
                     let actions = self.code_actions(message.get("params"));
                     send_response(writer, id, actions)?;
+                }
+            }
+            "textDocument/references" => {
+                if let Some(id) = id {
+                    send_response(writer, id, self.references(message.get("params")))?;
+                }
+            }
+            "textDocument/rename" => {
+                if let Some(id) = id {
+                    send_response(writer, id, self.rename(message.get("params")))?;
                 }
             }
             _ => {
@@ -431,6 +444,95 @@ impl Server {
         hover_at_offset_with_analysis(&document.text, offset, &document.analysis)
     }
 
+    fn completion(&self, params: Option<&Value>) -> Value {
+        let Some((uri, document, offset)) = self.uri_document_and_offset(params) else {
+            return completion_items();
+        };
+        if let Some(completions) = document.analysis.member_completions_at_offset(offset) {
+            return semantic_completion_items(completions);
+        }
+
+        // An accessor with no member name is incomplete source, so preserve the
+        // compiler as the semantic authority by analyzing a temporary property
+        // token at the cursor instead of guessing from nearby text.
+        if document.text[..offset].ends_with("->") {
+            const PLACEHOLDER: &str = "__doria_completion";
+            let mut source = document.text.clone();
+            source.insert_str(offset, PLACEHOLDER);
+            let analysis = AnalysisSnapshot::analyze(&uri, &source);
+            if let Some(completions) = analysis.member_completions_at_offset(offset) {
+                return semantic_completion_items(completions);
+            }
+        }
+        completion_items_with_analysis(&document.analysis, offset)
+    }
+
+    fn references(&self, params: Option<&Value>) -> Value {
+        let Some((uri, document, offset)) = self.uri_document_and_offset(params) else {
+            return json!([]);
+        };
+        Value::Array(
+            document
+                .analysis
+                .reference_spans_at_offset(offset)
+                .into_iter()
+                .map(|span| json!({ "uri": &uri, "range": span_to_range(&document.text, span) }))
+                .collect(),
+        )
+    }
+
+    fn rename(&self, params: Option<&Value>) -> Value {
+        let Some((uri, document, offset)) = self.uri_document_and_offset(params) else {
+            return Value::Null;
+        };
+        let Some(new_name) = params
+            .and_then(|params| params.get("newName"))
+            .and_then(Value::as_str)
+        else {
+            return Value::Null;
+        };
+        let replacement = if new_name.starts_with('$') {
+            new_name.to_string()
+        } else {
+            format!("${new_name}")
+        };
+        let edits = document
+            .analysis
+            .reference_spans_at_offset(offset)
+            .into_iter()
+            .map(|span| json!({ "range": span_to_range(&document.text, span), "newText": replacement }))
+            .collect::<Vec<_>>();
+        if edits.is_empty() {
+            Value::Null
+        } else {
+            let mut changes = serde_json::Map::new();
+            changes.insert(uri, Value::Array(edits));
+            json!({ "changes": changes })
+        }
+    }
+
+    fn uri_document_and_offset<'a>(
+        &'a self,
+        params: Option<&Value>,
+    ) -> Option<(String, &'a Document, usize)> {
+        let params = params?;
+        let uri = params
+            .get("textDocument")
+            .and_then(|text_document| text_document.get("uri"))
+            .and_then(Value::as_str)?;
+        let line = params
+            .get("position")
+            .and_then(|position| position.get("line"))
+            .and_then(Value::as_u64)? as u32;
+        let character = params
+            .get("position")
+            .and_then(|position| position.get("character"))
+            .and_then(Value::as_u64)? as u32;
+        let document = self.documents.get(uri)?;
+        let offset = position_to_byte_offset(&document.text, line, character);
+        Some((uri.to_string(), document, offset))
+    }
+
     fn code_actions(&self, params: Option<&Value>) -> Value {
         let Some(uri) = params
             .and_then(|params| params.get("textDocument"))
@@ -461,6 +563,8 @@ fn initialize_result() -> Value {
                 "triggerCharacters": ["$", ">", ":"]
             },
             "hoverProvider": true,
+            "referencesProvider": true,
+            "renameProvider": true,
             "codeActionProvider": true
         },
         "serverInfo": {
@@ -588,6 +692,10 @@ fn completion_items() -> Value {
         "List",
         "Dictionary",
         "Set",
+        "SortedDictionary",
+        "SortedSet",
+        "PriorityQueue",
+        "Deque",
         "Bytes",
         "SharedReference",
         "WeakReference",
@@ -670,11 +778,7 @@ fn completion_items() -> Value {
     }));
     items.extend(
         [
-            (
-                "read_line",
-                "read_line(): ?string",
-                "Reads one UTF-8 line, strips LF or CRLF, and returns null only at EOF.",
-            ),
+            ("read_line", READ_LINE_SIGNATURE, READ_LINE_DOCUMENTATION),
             (
                 "sprintf",
                 "sprintf(string $format, ...): string",
@@ -766,6 +870,44 @@ fn completion_items() -> Value {
     })
 }
 
+fn semantic_completion_items(completions: Vec<SemanticCompletion>) -> Value {
+    let items = completions
+        .into_iter()
+        .map(|completion| {
+            json!({
+                "label": completion.label,
+                "kind": completion.kind,
+                "detail": completion.detail,
+                "documentation": completion.documentation,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "isIncomplete": false,
+        "items": items,
+    })
+}
+
+fn completion_items_with_analysis(analysis: &AnalysisSnapshot, offset: usize) -> Value {
+    let mut completions = completion_items();
+    let Some(items) = completions.get_mut("items").and_then(Value::as_array_mut) else {
+        return completions;
+    };
+    items.extend(
+        analysis
+            .local_completions_at_offset(offset)
+            .into_iter()
+            .map(|completion| {
+                json!({
+                    "label": completion.label,
+                    "kind": 6,
+                    "detail": completion.detail,
+                })
+            }),
+    );
+    completions
+}
+
 fn scalar_runtime_type_description(name: &str) -> Option<&'static str> {
     match name {
         "float" => Some("Implemented canonical IEEE 754 binary64 scalar type; exact alias of `float64`."),
@@ -778,12 +920,12 @@ fn scalar_runtime_type_description(name: &str) -> Option<&'static str> {
 
 fn shared_ownership_type_description(name: &str) -> Option<&'static str> {
     match name {
-        "SharedReference" => Some("`SharedReference<T>` is an owning readonly shared reference to a class payload. Construct it with `shared new T(...)`; `share()` adds an owner, `createWeakReference()` creates a weak handle, and member access forwards readonly to `T`."),
-        "WeakReference" => Some("`WeakReference<T>` is a non-owning reference created from `SharedReference<T>`. `acquire()` returns `?SharedReference<T>` and yields `null` after the final strong owner releases the payload."),
-        "WritableSharedReference" => Some("`WritableSharedReference<T>` owns a payload through the writable shared family. `share()` adds an owner, `createWeakReference()` creates a writable weak handle, and controlled payload access comes only from `acquireReadonlyAccess()` or `acquireWritableAccess()`. It never converts to or from `SharedReference<T>`."),
-        "WritableWeakReference" => Some("`WritableWeakReference<T>` is the non-owning writable-family handle. `acquire()` returns `?WritableSharedReference<T>` and never crosses into the readonly family."),
-        "ReadonlySharedReferenceAccess" => Some("`ReadonlySharedReferenceAccess<T>` is an owned move value that keeps a writable shared payload alive and forwards readonly properties, methods, indexing, and iteration. Destroying it releases readonly access before its strong ownership claim."),
-        "WritableSharedReferenceAccess" => Some("`WritableSharedReferenceAccess<T>` is an owned move value that exclusively forwards writable payload operations. The binding must be `writable` to mutate through it; destruction releases writable access before its strong ownership claim."),
+        "SharedReference" => Some("`SharedReference<T>` is a non-thread-safe owning move value for a readonly shared class payload. Construct it with `shared new T(...)`; ownership is duplicated only by explicit `share()`. It never converts to the writable family, and readonly shared collection, scalar, string, and `mixed` payload execution remain unsupported."),
+        "WeakReference" => Some("`WeakReference<T>` is a non-thread-safe non-owning move value created from `SharedReference<T>`. `acquire()` returns `?SharedReference<T>` while the class payload is alive and `null` after final strong release; it never crosses ownership families."),
+        "WritableSharedReference" => Some("`WritableSharedReference<T>` is a non-thread-safe owning move value in the writable shared family. Ownership is duplicated only by explicit `share()`; payload access requires a lifetime-owning object obtained with `acquireReadonlyAccess()` or `acquireWritableAccess()`. It never converts to `SharedReference<T>`. Class, generic class, typed-array, List, Dictionary, Set, and Bytes payloads execute; scalar, string, and `mixed` composition remain deferred."),
+        "WritableWeakReference" => Some("`WritableWeakReference<T>` is the non-thread-safe non-owning move value for the writable family. `acquire()` returns `?WritableSharedReference<T>` while the payload is alive and never crosses into the readonly family."),
+        "ReadonlySharedReferenceAccess" => Some("`ReadonlySharedReferenceAccess<T>` is a non-thread-safe owned move value that keeps a writable-family payload alive for its full lifetime and forwards readonly properties, methods, indexing, and iteration. It cannot be shared, weakened, copied, or converted between families."),
+        "WritableSharedReferenceAccess" => Some("`WritableSharedReferenceAccess<T>` is a non-thread-safe owned move value that keeps exclusive writable payload access for its full lifetime. Its binding must be `writable` to mutate through it; it cannot be shared, weakened, copied, or converted between families."),
         _ => None,
     }
 }
@@ -1046,6 +1188,10 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "List" => Some("`List<T>` is the growable, insertion-ordered sequence: `add`, `insertAt`, `removeAt`, `pop`, `contains`, `first`/`last`, and the `count`/`isEmpty` properties (decision 0100). An owned move type."),
             "Dictionary" => Some("`Dictionary<K, V>` is the insertion-ordered map: `get` (`?V`), `set`, `remove` (`?V`), `has`, the `keys`/`values` projections, and `count`/`isEmpty` (decision 0100). Keys require `Hashable`. An owned move type."),
             "Set" => Some("`Set<T>` is the insertion-ordered unique-element collection: `Set::from`, `add`, `remove`, `contains`, `union`/`intersect`/`difference`, and `count`/`isEmpty` (decision 0100). Elements require `Hashable`. An owned move type."),
+            "SortedDictionary" => Some("`SortedDictionary<K, V>` is a key-ordered map with the `Dictionary` member surface. Keys and the `keys`/`values` projections use ascending `Comparable<K>` order. An owned move type."),
+            "SortedSet" => Some("`SortedSet<T>` is an ascending-order unique-element collection with the `Set` member surface. Elements require `Comparable<T>`. An owned move type."),
+            "PriorityQueue" => Some("`PriorityQueue<T>` is a min-priority queue: `push`, `pop`, `peek`, `count`, and `isEmpty`. It deliberately has no `foreach` order. Elements require `Comparable<T>`. An owned move type."),
+            "Deque" => Some("`Deque<T>` is a double-ended queue: `pushFront`/`pushBack`, `popFront`/`popBack`, `peekFront`/`peekBack`, `count`, and `isEmpty`. Iteration runs front to back. An owned move type."),
             "String" => Some("`String` is the companion for canonical string operations. Text indices and lengths use Unicode extended grapheme clusters unless the API explicitly says bytes."),
             name @ ("SharedReference" | "WeakReference" | "WritableSharedReference"
             | "WritableWeakReference" | "ReadonlySharedReferenceAccess"
@@ -1057,7 +1203,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "panic" => Some(
                 "Built-in fatal runtime function: `panic(\"message\");`. Panics are not catchable and exit with status 101.",
             ),
-            "read_line" => Some("`read_line(): ?string` reads one UTF-8 line, strips LF or CRLF, preserves empty and unterminated final lines, and returns `null` only at EOF."),
+            "read_line" => Some(READ_LINE_DOCUMENTATION),
             "sprintf" => Some("`sprintf(string $format, ...): string` uses a compile-time-checked literal format string."),
             "printf" => Some("`printf(string $format, ...): void` uses the same checked formatter as `sprintf`, adds no newline, and returns void."),
             "read_file" => Some("`read_file(string $path): string` reads complete UTF-8 text and panics on failure."),
@@ -1742,6 +1888,45 @@ function main(): void
     }
 
     #[test]
+    fn incomplete_member_completion_uses_the_resolved_shared_receiver() {
+        let uri = "file:///completion.doria";
+        let source = r#"class Counter
+{
+    function inspect(): int { return 1; }
+    writable function increment(): void {}
+}
+
+function main(): void
+{
+    let $counter = shared new Counter();
+    $counter->;
+}
+"#;
+        let offset = source.find("->;").expect("completion accessor") + 2;
+        let position = byte_offset_to_position(source, offset);
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document::new(uri, source.to_string(), Some(1)),
+        );
+        let response = server.completion(Some(&json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": position.line, "character": position.character },
+        })));
+        let labels = response["items"]
+            .as_array()
+            .expect("completion items")
+            .iter()
+            .filter_map(|item| item["label"].as_str())
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&"share"));
+        assert!(labels.contains(&"createWeakReference"));
+        assert!(labels.contains(&"referencedValue"));
+        assert!(labels.contains(&"inspect"));
+        assert!(!labels.contains(&"increment"));
+    }
+
+    #[test]
     fn completions_do_not_offer_unrelated_future_types() {
         let labels = completion_labels();
         for unsupported in [
@@ -1785,6 +1970,10 @@ function main(): void
             "List",
             "Dictionary",
             "Set",
+            "SortedDictionary",
+            "SortedSet",
+            "PriorityQueue",
+            "Deque",
             "Bytes",
             "SharedReference",
             "WeakReference",
@@ -1940,7 +2129,7 @@ function main(): void
     #[test]
     fn completions_and_hover_expose_stage17_builtins() {
         for (name, signature, required_hover) in [
-            ("read_line", "read_line(): ?string", "only at EOF"),
+            ("read_line", READ_LINE_SIGNATURE, "only at EOF"),
             (
                 "sprintf",
                 "sprintf(string $format, ...): string",
@@ -1969,6 +2158,30 @@ function main(): void
             assert!(hover.contains(required_hover), "{name}: {hover}");
         }
         assert!(!completion_labels().contains(&"print".to_string()));
+    }
+
+    #[test]
+    fn read_line_hover_shows_the_prompt_parameter() {
+        let hover = hover_description(&TokenKind::Identifier("read_line".to_string()))
+            .expect("read_line should have hover text");
+        assert!(hover.contains("string $prompt"));
+    }
+
+    #[test]
+    fn read_line_hover_shows_the_empty_string_default() {
+        let hover = hover_description(&TokenKind::Identifier("read_line".to_string()))
+            .expect("read_line should have hover text");
+        assert!(hover.contains("$prompt = \"\""));
+    }
+
+    #[test]
+    fn completions_do_not_offer_camel_case_read_line() {
+        assert!(!completion_labels().contains(&"readLine".to_string()));
+    }
+
+    #[test]
+    fn completions_do_not_offer_the_php_readline_spelling() {
+        assert!(!completion_labels().contains(&"readline".to_string()));
     }
 
     #[test]
@@ -2096,5 +2309,60 @@ function main(): void
         );
         assert_eq!(diagnostics[1]["range"]["start"]["line"], 1);
         assert_eq!(notification["params"]["version"], 7);
+    }
+
+    #[test]
+    fn grouped_local_completion_references_and_rename_use_utf16_ranges() {
+        let uri = "file:///grouped.doria";
+        let text = r#"function main(): void
+{
+    echo "😀";
+    let $left, $right = 10;
+    echo "{$left}:{$right}";
+}
+"#;
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document::new(uri, text.to_string(), Some(1)),
+        );
+
+        let completion_offset = text.rfind("echo").unwrap();
+        let completion_position = byte_offset_to_position(text, completion_offset);
+        let completion = server.completion(Some(&json!({
+            "textDocument": { "uri": uri },
+            "position": {
+                "line": completion_position.line,
+                "character": completion_position.character,
+            }
+        })));
+        let items = completion["items"].as_array().unwrap();
+        assert!(items.iter().any(|item| item["label"] == "$left"));
+        assert!(items.iter().any(|item| item["label"] == "$right"));
+
+        let right_offset = text.find("$right").unwrap();
+        let right_position = byte_offset_to_position(text, right_offset);
+        let params = json!({
+            "textDocument": { "uri": uri },
+            "position": {
+                "line": right_position.line,
+                "character": right_position.character,
+            }
+        });
+        let references = server.references(Some(&params));
+        assert_eq!(references.as_array().unwrap().len(), 2);
+        assert!(references.as_array().unwrap().iter().all(|location| {
+            let line = location["range"]["start"]["line"].as_u64().unwrap() as u32;
+            let character = location["range"]["start"]["character"].as_u64().unwrap() as u32;
+            let offset = position_to_byte_offset(text, line, character);
+            text[offset..].starts_with("$right")
+        }));
+
+        let mut rename_params = params;
+        rename_params["newName"] = json!("renamed");
+        let rename = server.rename(Some(&rename_params));
+        let edits = rename["changes"][uri].as_array().unwrap();
+        assert_eq!(edits.len(), 2);
+        assert!(edits.iter().all(|edit| edit["newText"] == "$renamed"));
     }
 }
