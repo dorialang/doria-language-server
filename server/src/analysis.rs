@@ -92,7 +92,7 @@ impl AnalysisSnapshot {
             }
         };
 
-        let analysis = doriac::semantics::analyze_program_for_ide(&program);
+        let analysis = doriac::semantics::analyze_program_for_ide_with_source(&program, Some(text));
 
         SnapshotBuilder::new(text, &tokens, Some(&analysis.info), analysis.diagnostics)
             .build(&program)
@@ -705,6 +705,7 @@ impl<'a> SnapshotBuilder<'a> {
                 args,
                 span,
                 null_safe,
+                ..
             } => {
                 self.visit_expr(object, current_class, parent_class);
                 for argument in args {

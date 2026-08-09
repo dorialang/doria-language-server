@@ -195,6 +195,101 @@ fn exposes_writable_constructor_removal_as_a_preferred_code_action() {
 }
 
 #[test]
+fn exposes_collection_diagnostic_fixes_as_utf16_safe_code_actions() {
+    let cases = [
+        (
+            "has",
+            r#"function main(): void { echo "😀"; Dictionary<string, int> $values = []; echo $values->has("alpha"); }"#,
+            "containsKey",
+        ),
+        (
+            "isEmpty",
+            r#"function main(): void { echo "😀"; List<int> $values = []; echo $values->isEmpty(); }"#,
+            "",
+        ),
+        (
+            "List::from",
+            r#"function main(): void { echo "😀"; List<int> $values = List::from([1, 2]); }"#,
+            "[1, 2]",
+        ),
+        (
+            "Dictionary::from",
+            r#"function main(): void { echo "😀"; Dictionary<string, int> $values = Dictionary::from(["alpha" => 1]); }"#,
+            "[\"alpha\" => 1]",
+        ),
+    ];
+
+    for (label, text, replacement) in cases {
+        let uri = format!("file:///collection-{label}.doria");
+        let actions = code_actions_for_document(&uri, text);
+        assert_eq!(actions.len(), 1, "{label}: {actions:#?}");
+        assert_eq!(actions[0]["kind"], "quickfix");
+        assert_eq!(actions[0]["isPreferred"], true);
+
+        let edits = actions[0]["edit"]["changes"][&uri]
+            .as_array()
+            .expect("quick fix edits");
+        assert!(edits.iter().any(|edit| edit["newText"] == replacement));
+
+        let first_edit = &edits[0];
+        let byte_start = match label {
+            "has" => text.find("has").unwrap(),
+            "isEmpty" => text.find("isEmpty").unwrap() + "isEmpty".len(),
+            "List::from" => text.find("List::from").unwrap(),
+            "Dictionary::from" => text.rfind("Dictionary::from").unwrap(),
+            _ => unreachable!(),
+        };
+        let expected = byte_offset_to_position(text, byte_start);
+        assert_eq!(first_edit["range"]["start"]["line"], expected.line);
+        assert_eq!(
+            first_edit["range"]["start"]["character"], expected.character,
+            "{label} must convert compiler byte offsets to UTF-16"
+        );
+    }
+}
+
+#[test]
+fn projects_decision_0113_pending_collection_members_without_lsp_rewording() {
+    let cases = [
+        (
+            "function main(): void { List<int> $v = [1]; echo $v->indexOf(1); }",
+            "indexOf",
+            "Slice 3",
+        ),
+        (
+            "function main(): void { Dictionary<string, int> $v = []; echo $v->containsValue(1); }",
+            "containsValue",
+            "Slice 3",
+        ),
+        (
+            "function main(): void { Set<int> $v = Set::from([1]); echo $v->first; }",
+            "first",
+            "Slice 3",
+        ),
+        (
+            "function main(): void { writable List<int> $v = []; $v->clear(); }",
+            "clear",
+            "Slice 4",
+        ),
+    ];
+
+    for (source, member, slice) in cases {
+        let diagnostics = diagnostics_for_document("file:///pending-collection.doria", source);
+        let pending = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic["code"] == "E0559")
+            .unwrap_or_else(|| panic!("missing pending diagnostic for {member}: {diagnostics:#?}"));
+        let message = pending["message"].as_str().expect("diagnostic message");
+        assert!(message.contains(slice));
+        assert!(message.contains("Accepted Collection Member Is Not Executable Yet"));
+        let expected = byte_offset_to_position(source, source.find(member).unwrap());
+        assert_eq!(pending["range"]["start"]["line"], expected.line);
+        assert_eq!(pending["range"]["start"]["character"], expected.character);
+        assert!(code_actions_for_document("file:///pending-collection.doria", source).is_empty());
+    }
+}
+
+#[test]
 fn exposes_static_identity_fixes_without_rewriting_the_member() {
     let uri = "file:///statics.doria";
     let sigil_text =
