@@ -899,6 +899,21 @@ impl<'a> SnapshotBuilder<'a> {
                             Some(member.documentation.to_string()),
                         );
                     }
+                    return;
+                }
+                if let (Some(receiver), Some(property_span)) = (receiver, property_span) {
+                    if let Some(documentation) = collection_property(receiver, property) {
+                        let return_type = self
+                            .semantic_info
+                            .and_then(|info| info.expression_type(*span))
+                            .map(display_resolved_type)
+                            .unwrap_or_else(|| "unknown".to_string());
+                        self.add_symbol(
+                            property_span,
+                            format!("{return_type} ${property}"),
+                            Some(documentation.to_string()),
+                        );
+                    }
                 }
             }
             Expr::StaticMember { .. } => {}
@@ -1138,6 +1153,16 @@ fn collection_method(
             "bool".to_string(),
             "Reports whether this list contains an equal value.",
         ),
+        (ResolvedType::List(value), "indexOf") => (
+            format!("{} $value", display_resolved_type(value)),
+            "?int".to_string(),
+            "Returns the first index containing an equal value, or `null` when absent.",
+        ),
+        (ResolvedType::List(value), "remove") => (
+            format!("{} $value", display_resolved_type(value)),
+            "bool".to_string(),
+            "Removes the first equal value and reports whether the list changed.",
+        ),
         (ResolvedType::TypedArray(value), "contains") => (
             format!("{} $value", display_resolved_type(value)),
             "bool".to_string(),
@@ -1180,6 +1205,14 @@ fn collection_method(
             format!("{} $key", display_resolved_type(key)),
             "bool".to_string(),
             "Reports whether this dictionary contains the key.",
+        ),
+        (
+            ResolvedType::Dictionary(_, value) | ResolvedType::SortedDictionary(_, value),
+            "containsValue",
+        ) => (
+            format!("{} $value", display_resolved_type(value)),
+            "bool".to_string(),
+            "Reports whether this dictionary contains an equal value.",
         ),
         (
             ResolvedType::Dictionary(key, value) | ResolvedType::SortedDictionary(key, value),
@@ -1252,6 +1285,57 @@ fn collection_method(
         _ => return None,
     };
     Some((parameters, return_type, documentation))
+}
+
+fn collection_property(receiver: &ResolvedType, property: &str) -> Option<&'static str> {
+    let collection = match non_nullable_type(receiver) {
+        ResolvedType::SharedHandle(kind, payload) if kind.is_access() => payload.as_ref(),
+        receiver => receiver,
+    };
+    match (collection, property) {
+        (
+            ResolvedType::List(_)
+            | ResolvedType::Dictionary(_, _)
+            | ResolvedType::Set(_)
+            | ResolvedType::SortedDictionary(_, _)
+            | ResolvedType::SortedSet(_)
+            | ResolvedType::PriorityQueue(_)
+            | ResolvedType::Deque(_),
+            "count",
+        ) => Some("The number of values currently stored in this collection."),
+        (
+            ResolvedType::List(_)
+            | ResolvedType::Dictionary(_, _)
+            | ResolvedType::Set(_)
+            | ResolvedType::SortedDictionary(_, _)
+            | ResolvedType::SortedSet(_)
+            | ResolvedType::PriorityQueue(_)
+            | ResolvedType::Deque(_),
+            "isEmpty",
+        ) => Some("Reports whether this collection contains no values."),
+        (ResolvedType::List(_) | ResolvedType::Set(_) | ResolvedType::SortedSet(_), "first") => {
+            Some("The first value in collection iteration order, or `null` when empty.")
+        }
+        (ResolvedType::List(_) | ResolvedType::Set(_) | ResolvedType::SortedSet(_), "last") => {
+            Some("The last value in collection iteration order, or `null` when empty.")
+        }
+        (ResolvedType::Dictionary(_, _) | ResolvedType::SortedDictionary(_, _), "keys") => {
+            Some("A readonly projection of this dictionary's keys.")
+        }
+        (ResolvedType::Dictionary(_, _) | ResolvedType::SortedDictionary(_, _), "values") => {
+            Some("A readonly projection of this dictionary's values.")
+        }
+        (ResolvedType::PriorityQueue(_), "peek") => {
+            Some("The minimum value without removing it, or `null` when empty.")
+        }
+        (ResolvedType::Deque(_), "peekFront") => {
+            Some("The front value without removing it, or `null` when empty.")
+        }
+        (ResolvedType::Deque(_), "peekBack") => {
+            Some("The back value without removing it, or `null` when empty.")
+        }
+        _ => None,
+    }
 }
 
 fn non_nullable_type(ty: &ResolvedType) -> &ResolvedType {
@@ -1842,10 +1926,15 @@ function main(): void
 
     writable Dictionary<string, int> $scores = ["Ada" => 3];
     let $score = $scores->get("Ada");
+    let $containsScore = $scores->containsValue(3);
     writable SortedDictionary<string, int> $sortedScores = SortedDictionary::from(["Ada" => 3]);
     let $sortedScore = $sortedScores->get("Ada");
     writable SortedSet<int> $numbers = SortedSet::from([1, 2]);
     let $combined = $numbers->union(SortedSet::from([3]));
+    let $first = $numbers->first;
+    writable List<string> $colors = ["red", "blue"];
+    let $blue = $colors->indexOf("blue");
+    let $removed = $colors->remove("red");
     writable PriorityQueue<int> $work = PriorityQueue::from([2, 1]);
     let $next = $work->pop();
     writable Deque<string> $line = Deque::from(["middle"]);
@@ -1882,6 +1971,13 @@ function main(): void
             .markdown
             .contains("function Dictionary<string, int>::get(string $key): ?int"));
 
+        let contains_value = snapshot
+            .hover_at_offset(source.find("$scores->containsValue").unwrap() + "$scores->".len())
+            .expect("dictionary containsValue should provide semantic hover");
+        assert!(contains_value
+            .markdown
+            .contains("function Dictionary<string, int>::containsValue(int $value): bool"));
+
         let sorted_dictionary = snapshot
             .hover_at_offset(source.find("$sortedScores->get").unwrap() + "$sortedScores->".len())
             .expect("sorted dictionary get should provide semantic hover");
@@ -1895,6 +1991,25 @@ function main(): void
         assert!(sorted_set
             .markdown
             .contains("function SortedSet<int>::union(SortedSet<int> $other): SortedSet<int>"));
+
+        let first = snapshot
+            .hover_at_offset(source.find("$numbers->first").unwrap() + "$numbers->".len())
+            .expect("sorted set first should provide semantic hover");
+        assert!(first.markdown.contains("?int $first"));
+
+        let index_of = snapshot
+            .hover_at_offset(source.find("$colors->indexOf").unwrap() + "$colors->".len())
+            .expect("list indexOf should provide semantic hover");
+        assert!(index_of
+            .markdown
+            .contains("function List<string>::indexOf(string $value): ?int"));
+
+        let list_remove = snapshot
+            .hover_at_offset(source.find("$colors->remove").unwrap() + "$colors->".len())
+            .expect("list remove should provide semantic hover");
+        assert!(list_remove
+            .markdown
+            .contains("function List<string>::remove(string $value): bool"));
 
         let priority_queue = snapshot
             .hover_at_offset(source.find("$work->pop").unwrap() + "$work->".len())

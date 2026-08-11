@@ -249,44 +249,32 @@ fn exposes_collection_diagnostic_fixes_as_utf16_safe_code_actions() {
 }
 
 #[test]
-fn projects_decision_0113_pending_collection_members_without_lsp_rewording() {
+fn accepts_decision_0113_slice_3_collection_members() {
     let cases = [
-        (
-            "function main(): void { List<int> $v = [1]; echo $v->indexOf(1); }",
-            "indexOf",
-            "Slice 3",
-        ),
-        (
-            "function main(): void { Dictionary<string, int> $v = []; echo $v->containsValue(1); }",
-            "containsValue",
-            "Slice 3",
-        ),
-        (
-            "function main(): void { Set<int> $v = Set::from([1]); echo $v->first; }",
-            "first",
-            "Slice 3",
-        ),
-        (
-            "function main(): void { writable List<int> $v = []; $v->clear(); }",
-            "clear",
-            "Slice 4",
-        ),
+        "function main(): void { List<int> $v = [1]; echo $v->indexOf(1) ?? -1; }",
+        "function main(): void { writable List<int> $v = [1]; echo $v->remove(1); }",
+        "function main(): void { Dictionary<string, int> $v = []; echo $v->containsValue(1); }",
+        "function main(): void { Set<int> $v = Set::from([1]); echo $v->first ?? -1; }",
     ];
 
-    for (source, member, slice) in cases {
-        let diagnostics = diagnostics_for_document("file:///pending-collection.doria", source);
-        let pending = diagnostics
-            .iter()
-            .find(|diagnostic| diagnostic["code"] == "E0559")
-            .unwrap_or_else(|| panic!("missing pending diagnostic for {member}: {diagnostics:#?}"));
-        let message = pending["message"].as_str().expect("diagnostic message");
-        assert!(message.contains(slice));
-        assert!(message.contains("Accepted Collection Member Is Not Executable Yet"));
-        let expected = byte_offset_to_position(source, source.find(member).unwrap());
-        assert_eq!(pending["range"]["start"]["line"], expected.line);
-        assert_eq!(pending["range"]["start"]["character"], expected.character);
-        assert!(code_actions_for_document("file:///pending-collection.doria", source).is_empty());
+    for source in cases {
+        let diagnostics = diagnostics_for_document("file:///slice-3-collection.doria", source);
+        assert!(diagnostics.is_empty(), "{source}: {diagnostics:#?}");
     }
+}
+
+#[test]
+fn projects_the_remaining_decision_0113_slice_4_diagnostic() {
+    let source = "function main(): void { writable List<int> $v = []; $v->clear(); }";
+    let diagnostics = diagnostics_for_document("file:///pending-collection.doria", source);
+    let pending = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0559")
+        .unwrap_or_else(|| panic!("missing pending clear diagnostic: {diagnostics:#?}"));
+    let message = pending["message"].as_str().expect("diagnostic message");
+    assert!(message.contains("Slice 4"));
+    assert!(message.contains("Accepted Collection Member Is Not Executable Yet"));
+    assert!(code_actions_for_document("file:///pending-collection.doria", source).is_empty());
 }
 
 #[test]
