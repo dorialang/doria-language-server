@@ -1377,12 +1377,12 @@ fn collection_method(
         (ResolvedType::List(value), "indexOf") => (
             format!("{} $value", display_resolved_type(value)),
             "?int".to_string(),
-            "Returns the first index containing an equal value, or `null` when absent.",
+            "Returns the first equal position, or `null` when the value is absent.",
         ),
         (ResolvedType::List(value), "remove") => (
             format!("{} $value", display_resolved_type(value)),
             "bool".to_string(),
-            "Removes the first equal value and reports whether the list changed.",
+            "Removes the first equal value from this writable list and reports whether it changed.",
         ),
         (ResolvedType::TypedArray(value), "contains") => (
             format!("{} $value", display_resolved_type(value)),
@@ -1497,6 +1497,20 @@ fn collection_method(
             String::new(),
             format!("?{}", display_resolved_type(value)),
             "Removes and returns the value at the selected end, or `null` when the deque is empty.",
+        ),
+        (
+            ResolvedType::List(_)
+            | ResolvedType::Dictionary(_, _)
+            | ResolvedType::Set(_)
+            | ResolvedType::SortedDictionary(_, _)
+            | ResolvedType::SortedSet(_)
+            | ResolvedType::PriorityQueue(_)
+            | ResolvedType::Deque(_),
+            "clear",
+        ) => (
+            String::new(),
+            "void".to_string(),
+            "Empties this writable collection in place while preserving the collection for reuse.",
         ),
         (ResolvedType::Bytes, "toArray") => (
             String::new(),
@@ -2382,6 +2396,100 @@ function main(): void
         assert!(deque
             .markdown
             .contains("function Deque<string>::pushFront(string $value): void"));
+    }
+
+    #[test]
+    fn decision_0113_hovers_cover_slice_three_and_in_place_clear() {
+        let source = r#"function main(): void
+{
+    echo "😀";
+    writable List<int> $list = [1];
+    let $position = $list->indexOf(1);
+    $list->remove(1);
+    $list->clear();
+    writable Dictionary<string, int> $dictionary = ["one" => 1];
+    echo $dictionary->containsValue(1);
+    $dictionary->clear();
+    writable Set<int> $set = Set::from([1]);
+    let $first = $set->first;
+    let $last = $set->last;
+    $set->clear();
+    writable SortedDictionary<int, int> $sortedDictionary = SortedDictionary::from([1 => 1]);
+    $sortedDictionary->clear();
+    writable SortedSet<int> $sortedSet = SortedSet::from([1]);
+    let $sortedFirst = $sortedSet->first;
+    let $sortedLast = $sortedSet->last;
+    $sortedSet->clear();
+    writable PriorityQueue<int> $queue = PriorityQueue::from([1]);
+    $queue->clear();
+    writable Deque<int> $deque = Deque::from([1]);
+    $deque->clear();
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("decision-0113.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+
+        for (needle, expected) in [
+            (
+                "$list->indexOf",
+                "function List<int>::indexOf(int $value): ?int",
+            ),
+            (
+                "$list->remove",
+                "function List<int>::remove(int $value): bool",
+            ),
+            ("$list->clear", "function List<int>::clear(): void"),
+            (
+                "$dictionary->containsValue",
+                "function Dictionary<string, int>::containsValue(int $value): bool",
+            ),
+            (
+                "$dictionary->clear",
+                "function Dictionary<string, int>::clear(): void",
+            ),
+            ("$set->clear", "function Set<int>::clear(): void"),
+            (
+                "$sortedDictionary->clear",
+                "function SortedDictionary<int, int>::clear(): void",
+            ),
+            (
+                "$sortedSet->clear",
+                "function SortedSet<int>::clear(): void",
+            ),
+            (
+                "$queue->clear",
+                "function PriorityQueue<int>::clear(): void",
+            ),
+            ("$deque->clear", "function Deque<int>::clear(): void"),
+        ] {
+            let offset = source.find(needle).unwrap() + needle.find("->").unwrap() + 2;
+            let hover = snapshot
+                .hover_at_offset(offset)
+                .unwrap_or_else(|| panic!("missing hover for {needle}"));
+            assert!(hover.markdown.contains(expected), "{}", hover.markdown);
+            assert!(
+                hover.markdown.contains("writable") || !needle.ends_with("clear"),
+                "clear hover must explain writable mutation: {}",
+                hover.markdown
+            );
+        }
+
+        for (needle, expected) in [
+            ("$set->first", "?int $first"),
+            ("$set->last", "?int $last"),
+            ("$sortedSet->first", "?int $first"),
+            ("$sortedSet->last", "?int $last"),
+        ] {
+            let offset = source.find(needle).unwrap() + needle.find("->").unwrap() + 2;
+            let hover = snapshot
+                .hover_at_offset(offset)
+                .unwrap_or_else(|| panic!("missing hover for {needle}"));
+            assert!(hover.markdown.contains(expected), "{}", hover.markdown);
+        }
     }
 
     #[test]
