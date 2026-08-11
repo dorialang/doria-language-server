@@ -29,10 +29,12 @@ $intellijFormatter = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/
 $intellijParser = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/psi/DoriaParserDefinition.kt';
 $intellijFormatterTest = $root . '/editors/intellij/doria/src/test/kotlin/dev/doria/intellij/codestyle/DoriaFormattingModelBuilderTest.kt';
 $intellijLspFiles = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/lsp/DoriaLspFiles.kt';
+$intellijLspResolver = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/lsp/DoriaLspServerPathResolver.kt';
 $intellijPluginXml = $root . '/editors/intellij/doria/src/main/resources/META-INF/plugin.xml';
 $intellijPluginIcon = $root . '/editors/intellij/doria/src/main/resources/META-INF/pluginIcon.svg';
 $intellijCreateClassAction = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/actions/DoriaCreateClassAction.kt';
 $doriaLogo = $root . '/res/images/doria-app-icon-warm.svg';
+$releaseWorkflow = $root . '/.github/workflows/release.yml';
 $lspServer = $root . '/server/src/lib.rs';
 $fixture = $root . '/editors/fixtures/latest-tokens.doria';
 $rejectedFixture = $root . '/editors/fixtures/rejected-syntax.doria';
@@ -471,6 +473,47 @@ function check_vscode_language_server_packaging(): void
             && str_contains($debugSupport, 'findBatonProjectRoot')
             && str_contains($launcherResolver, 'executableName: "baton"'),
         'VS Code must resolve Baton projects and register the Doria launch adapter'
+    );
+}
+
+function check_intellij_language_server_packaging(): void
+{
+    global $intellijBuildGradle, $intellijLspResolver, $releaseWorkflow, $buildScript;
+
+    $gradle = read_text($intellijBuildGradle);
+    $resolver = read_text($intellijLspResolver);
+    $release = read_text($releaseWorkflow);
+    $builder = read_text($buildScript);
+
+    foreach ([
+        'linux-x86_64',
+        'linux-aarch64',
+        'macos-x86_64',
+        'macos-aarch64',
+        'windows-x86_64',
+        'windows-aarch64',
+    ] as $platform) {
+        require_check(
+            str_contains($gradle, $platform) && str_contains($release, $platform),
+            "IntelliJ packaging is missing the {$platform} language server"
+        );
+    }
+    require_check(
+        str_contains($resolver, 'resolve("bin").resolve(platform).resolve(executable)')
+            && strpos($resolver, 'bundledCandidate(') < strpos($resolver, 'cargoBinCandidates('),
+        'IntelliJ must resolve its bundled compiler-matched server before Cargo and PATH fallbacks'
+    );
+    require_check(
+        str_contains($gradle, "into 'bin'")
+            && str_contains($gradle, 'requireUniversalDoriaLspBundle')
+            && str_contains($release, 'needs: server-binaries'),
+        'IntelliJ release packaging must fail unless all native language servers are bundled'
+    );
+    require_check(
+        str_contains($builder, 'build_intellij($root, $compilerPath)')
+            && str_contains($builder, 'intellij_platform_key()')
+            && str_contains($builder, '-PdoriaLspBundleDir='),
+        'The developer IntelliJ build must bundle the compiler-matched host server'
     );
 }
 
@@ -1508,6 +1551,7 @@ function main(): int
 {
     check_vscode_package();
     check_vscode_language_server_packaging();
+    check_intellij_language_server_packaging();
     check_vscode_language_configuration();
     check_vscode_grammar();
     check_intellij_lexer();

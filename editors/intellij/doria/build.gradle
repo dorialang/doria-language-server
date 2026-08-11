@@ -34,6 +34,63 @@ java {
     targetCompatibility = JavaVersion.VERSION_21
 }
 
+def repositoryRoot = file('../../..')
+def configuredBundle = providers.gradleProperty('doriaLspBundleDir')
+def requireUniversalBundle = providers.gradleProperty('requireUniversalDoriaLspBundle')
+    .map { it.toBoolean() }
+    .orElse(false)
+def generatedBundle = layout.buildDirectory.dir('generated/doria-lsp-bundle')
+
+def hostOperatingSystem = {
+    def name = System.getProperty('os.name').toLowerCase(Locale.ROOT)
+    if (name.contains('win')) return 'windows'
+    if (name.contains('mac') || name.contains('darwin')) return 'macos'
+    if (name.contains('linux')) return 'linux'
+    throw new GradleException("Unsupported IntelliJ plugin host operating system: ${name}")
+}
+def hostArchitecture = {
+    def name = System.getProperty('os.arch').toLowerCase(Locale.ROOT)
+    if (name == 'amd64' || name == 'x86_64') return 'x86_64'
+    if (name == 'aarch64' || name == 'arm64') return 'aarch64'
+    throw new GradleException("Unsupported IntelliJ plugin host architecture: ${name}")
+}
+def hostPlatform = "${hostOperatingSystem()}-${hostArchitecture()}"
+def hostExecutable = hostOperatingSystem() == 'windows' ? 'doria-lsp.exe' : 'doria-lsp'
+
+def buildHostDoriaLsp = tasks.register('buildHostDoriaLsp', Exec) {
+    onlyIf { !configuredBundle.isPresent() }
+    workingDir repositoryRoot
+    commandLine 'cargo', 'build', '--release', '--locked', '--bin', 'doria-lsp'
+}
+
+def prepareDoriaLspBundle = tasks.register('prepareDoriaLspBundle', Sync) {
+    dependsOn buildHostDoriaLsp
+    into generatedBundle
+    if (configuredBundle.isPresent()) {
+        from(configuredBundle)
+    } else {
+        from(new File(repositoryRoot, "target/release/${hostExecutable}")) {
+            into hostPlatform
+        }
+    }
+    doLast {
+        def platforms = requireUniversalBundle.get()
+            ? [
+                'linux-x86_64', 'linux-aarch64',
+                'macos-x86_64', 'macos-aarch64',
+                'windows-x86_64', 'windows-aarch64',
+            ]
+            : [hostPlatform]
+        platforms.each { platform ->
+            def executable = platform.startsWith('windows-') ? 'doria-lsp.exe' : 'doria-lsp'
+            def binary = generatedBundle.get().file("${platform}/${executable}").asFile
+            if (!binary.isFile()) {
+                throw new GradleException("Missing bundled Doria language server: ${binary}")
+            }
+        }
+    }
+}
+
 tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile).configureEach {
     compilerOptions {
         jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21
@@ -46,5 +103,12 @@ def cleanPluginDistributions = tasks.register('cleanPluginDistributions', Delete
 
 tasks.named('buildPlugin') {
     dependsOn cleanPluginDistributions
+    dependsOn prepareDoriaLspBundle
     archiveFileName = "doria-intellij-plugin-${project.version}.zip"
+    from(generatedBundle) {
+        into 'bin'
+        filePermissions {
+            unix('rwxr-xr-x')
+        }
+    }
 }

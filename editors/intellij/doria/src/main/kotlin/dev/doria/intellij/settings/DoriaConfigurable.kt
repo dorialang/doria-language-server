@@ -40,7 +40,7 @@ class DoriaConfigurable : SearchableConfigurable {
         constraints.fill = GridBagConstraints.NONE
         constraints.weightx = 0.0
         panel.add(
-            JBLabel("Leave empty to use DORIA_LSP_PATH, Cargo's installed doria-lsp, or PATH."),
+            JBLabel("Leave empty to use the version-matched language server bundled with the plugin."),
             constraints,
         )
 

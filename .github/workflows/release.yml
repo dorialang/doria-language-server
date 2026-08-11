@@ -142,6 +142,7 @@ jobs:
           if-no-files-found: error
 
   editor-packages:
+    needs: server-binaries
     runs-on: ubuntu-24.04
 
     steps:
@@ -156,9 +157,39 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      - name: Download native language-server archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: doria-lsp-*
+          path: server-artifacts
+
+      - name: Assemble universal IntelliJ language-server bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="$GITHUB_WORKSPACE/target/intellij-lsp-bundle"
+          mkdir -p "$bundle"
+          for platform in linux-x86_64 linux-aarch64 macos-x86_64 macos-aarch64; do
+            mkdir -p "$bundle/$platform"
+            tar -xzf "server-artifacts/doria-lsp-$platform/doria-lsp-$platform.tar.gz" \
+              --strip-components=1 -C "$bundle/$platform" \
+              "doria-lsp-$platform/doria-lsp"
+            chmod 0755 "$bundle/$platform/doria-lsp"
+          done
+          for platform in windows-x86_64 windows-aarch64; do
+            mkdir -p "$bundle/$platform"
+            unzip -j \
+              "server-artifacts/doria-lsp-$platform/doria-lsp-$platform.zip" \
+              "doria-lsp-$platform/doria-lsp.exe" \
+              -d "$bundle/$platform"
+          done
+
       - name: Package IntelliJ plugin
         working-directory: editors/intellij/doria
-        run: ./gradlew test buildPlugin --no-daemon
+        run: >-
+          ./gradlew test buildPlugin --no-daemon
+          -PdoriaLspBundleDir="$GITHUB_WORKSPACE/target/intellij-lsp-bundle"
+          -PrequireUniversalDoriaLspBundle=true
 
       - name: Upload IntelliJ plugin
         uses: actions/upload-artifact@v7

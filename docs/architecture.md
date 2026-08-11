@@ -49,6 +49,13 @@ selection, builds, and toolchain selection. Direct `doriac run` is reserved for
 an explicit standalone-file profile. Client-specific fallback behavior must
 remain presentation-only.
 
+Released editor packages bundle the `doria-lsp` built from the same repository
+revision. VS Code packages one native server per platform-specific VSIX; the
+JetBrains plugin packages all supported native servers and selects by host OS and
+architecture. Users never select a compiler: the compiler is an implementation
+dependency embedded in the bundled server. Explicit paths and environment
+overrides exist only for language-server and compiler development.
+
 ### Syntax highlighters
 
 The TextMate grammar and IntelliJ lexer are deliberately local and fast. They classify tokens using syntactic context for visual presentation, including arbitrary function and method calls. They are not a substitute for semantic tokens or compiler diagnostics.
