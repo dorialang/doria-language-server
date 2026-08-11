@@ -451,6 +451,9 @@ impl Server {
         if let Some(completions) = document.analysis.member_completions_at_offset(offset) {
             return semantic_completion_items(completions);
         }
+        if let Some(completions) = document.analysis.static_completions_at_offset(offset) {
+            return semantic_completion_items(completions);
+        }
 
         // An accessor with no member name is incomplete source, so preserve the
         // compiler as the semantic authority by analyzing a temporary property
@@ -461,6 +464,15 @@ impl Server {
             source.insert_str(offset, PLACEHOLDER);
             let analysis = AnalysisSnapshot::analyze(&uri, &source);
             if let Some(completions) = analysis.member_completions_at_offset(offset) {
+                return semantic_completion_items(completions);
+            }
+        }
+        if document.text[..offset].ends_with("::") {
+            const PLACEHOLDER: &str = "__doria_completion";
+            let mut source = document.text.clone();
+            source.insert_str(offset, PLACEHOLDER);
+            let analysis = AnalysisSnapshot::analyze(&uri, &source);
+            if let Some(completions) = analysis.static_completions_at_offset(offset) {
                 return semantic_completion_items(completions);
             }
         }
@@ -645,9 +657,6 @@ fn completion_items() -> Value {
     ];
     let planned_keywords = [
         "interface",
-        "enum",
-        "case",
-        "match",
         "async",
         "await",
         "unsafe",
@@ -663,7 +672,6 @@ fn completion_items() -> Value {
         "finally",
         "when",
         "given",
-        "default",
         "do",
         "fn",
         "get",
@@ -1157,6 +1165,12 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "Declares accepted trait syntax. Trait composition semantics land in Stage 35.",
         ),
         TokenKind::Const => Some("Declares a compile-time-evaluated constant."),
+        TokenKind::Enum => Some("Declares a nominal Doria enum type."),
+        TokenKind::Case => Some("Declares a case inside an enum."),
+        TokenKind::Match => Some(
+            "Begins an expression-position `match`. Its grammar is accepted; semantic execution lands in Stage 28.",
+        ),
+        TokenKind::Default => Some("Declares the fallback arm of a `match` expression."),
         TokenKind::Not => Some("Boolean NOT operator; exact synonym for `!`."),
         TokenKind::And => Some("Boolean AND operator; exact synonym for `&&`."),
         TokenKind::Or => Some("Boolean OR operator; exact synonym for `||`."),
@@ -1438,6 +1452,8 @@ fn send_message<W: Write>(writer: &mut W, message: &Value) -> Result<(), String>
 }
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use doriac::diagnostics::{FixEdit, LabelRole};
 
@@ -1486,9 +1502,6 @@ mod tests {
     #[test]
     fn completions_mark_accepted_planned_keywords() {
         for keyword in [
-            "enum",
-            "case",
-            "match",
             "async",
             "await",
             "unsafe",
@@ -1504,7 +1517,6 @@ mod tests {
             "finally",
             "when",
             "given",
-            "default",
             "do",
             "fn",
             "get",
@@ -1519,6 +1531,19 @@ mod tests {
                 item["documentation"],
                 "Accepted planned Doria syntax; compiler support lands in a later stage."
             );
+        }
+    }
+
+    #[test]
+    fn enum_and_match_keywords_are_active_compiler_syntax() {
+        for (keyword, kind) in [
+            ("enum", TokenKind::Enum),
+            ("case", TokenKind::Case),
+            ("match", TokenKind::Match),
+            ("default", TokenKind::Default),
+        ] {
+            assert_eq!(completion_item(keyword)["detail"], "Doria keyword");
+            assert!(hover_description(&kind).is_some());
         }
     }
 
@@ -1567,7 +1592,7 @@ mod tests {
     }
 
     #[test]
-    fn planned_keyword_usage_still_reports_compiler_diagnostics() {
+    fn invalid_empty_enum_reports_the_specific_compiler_diagnostic() {
         let diagnostics = diagnostics_for_document(
             "test.doria",
             r#"enum Option
@@ -1576,10 +1601,8 @@ mod tests {
 "#,
         );
 
-        assert!(
-            !diagnostics.is_empty(),
-            "planned syntax should remain rejected by compiler diagnostics until implemented"
-        );
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+        assert_eq!(diagnostics[0]["code"], "E0562");
     }
 
     #[test]
@@ -1924,6 +1947,32 @@ function main(): void
         assert!(labels.contains(&"referencedValue"));
         assert!(labels.contains(&"inspect"));
         assert!(!labels.contains(&"increment"));
+    }
+
+    #[test]
+    fn incomplete_static_completion_uses_compiler_enum_metadata() {
+        let uri = "file:///enum-completion.doria";
+        let source = r#"enum Status { case Draft; case Published; }
+function main(): void { Status::; }
+"#;
+        let offset = source.find("::;").expect("static accessor") + 2;
+        let position = byte_offset_to_position(source, offset);
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document::new(uri, source.to_string(), Some(1)),
+        );
+        let response = server.completion(Some(&json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": position.line, "character": position.character },
+        })));
+        let items = response["items"].as_array().expect("completion items");
+        let labels = items
+            .iter()
+            .filter_map(|item| item["label"].as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(labels, HashSet::from(["Draft", "Published"]));
+        assert!(items.iter().all(|item| item["kind"] == 20));
     }
 
     #[test]

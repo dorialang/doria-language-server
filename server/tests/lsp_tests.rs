@@ -264,17 +264,74 @@ fn accepts_decision_0113_slice_3_collection_members() {
 }
 
 #[test]
-fn projects_the_remaining_decision_0113_slice_4_diagnostic() {
+fn stage27_enum_diagnostics_and_pending_boundaries_come_from_the_compiler() {
+    let accepted = diagnostics_for_document(
+        "file:///enums.doria",
+        r#"enum Status { case Draft; }
+enum Priority: int { case High = 2; }
+enum Transport: string { case Rail = "rail"; }
+function main(): void
+{
+    Status $status = Status::Draft;
+    Priority $priority = Priority::High;
+    Transport $transport = Transport::Rail;
+    echo "{$status == Status::Draft}:{$priority->value}:{$transport->value}";
+}
+"#,
+    );
+    assert!(accepted.is_empty(), "{accepted:#?}");
+
+    let payload = diagnostics_for_document(
+        "file:///payload-enum.doria",
+        "enum Shape { case Circle(float $radius); } Shape $shape = Shape::Circle(2.5);",
+    );
+    assert_eq!(payload.len(), 1, "{payload:#?}");
+    assert_eq!(payload[0]["code"], "E0573");
+
+    let matching = diagnostics_for_document(
+        "file:///match.doria",
+        "enum Status { case Draft; } let $label = match (Status::Draft) { Status::Draft => 1, default => 0, };",
+    );
+    assert_eq!(matching.len(), 1, "{matching:#?}");
+    assert_eq!(matching[0]["code"], "E0576");
+}
+
+#[test]
+fn enum_case_fixes_remain_machine_applicable_and_utf16_safe() {
+    let uri = "file:///enum-fixes.doria";
+    let source = r#"enum Status { case Draft; }
+function main(): void { echo "😀"; Status $status = Status::Draft(); }
+"#;
+    let diagnostics = diagnostics_for_document(uri, source);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+    assert_eq!(diagnostics[0]["code"], "E0575");
+
+    let actions = code_actions_for_document(uri, source);
+    assert_eq!(actions.len(), 1, "{actions:#?}");
+    let edit = &actions[0]["edit"]["changes"][uri][0];
+    assert_eq!(edit["newText"], "");
+    let parentheses = source.rfind("()").expect("unit-case parentheses");
+    let expected = byte_offset_to_position(source, parentheses);
+    assert_eq!(edit["range"]["start"]["line"], expected.line);
+    assert_eq!(edit["range"]["start"]["character"], expected.character);
+
+    let suggestion_uri = "file:///enum-suggestion.doria";
+    let suggestion_source = "enum Status { case Draft; } Status $status = Status::Draf;";
+    let suggestion = code_actions_for_document(suggestion_uri, suggestion_source);
+    assert_eq!(suggestion.len(), 1, "{suggestion:#?}");
+    assert_eq!(
+        suggestion[0]["edit"]["changes"][suggestion_uri][0]["newText"],
+        "Draft"
+    );
+}
+
+#[test]
+fn accepts_completed_decision_0113_clear_without_false_diagnostics() {
     let source = "function main(): void { writable List<int> $v = []; $v->clear(); }";
-    let diagnostics = diagnostics_for_document("file:///pending-collection.doria", source);
-    let pending = diagnostics
-        .iter()
-        .find(|diagnostic| diagnostic["code"] == "E0559")
-        .unwrap_or_else(|| panic!("missing pending clear diagnostic: {diagnostics:#?}"));
-    let message = pending["message"].as_str().expect("diagnostic message");
-    assert!(message.contains("Slice 4"));
-    assert!(message.contains("Accepted Collection Member Is Not Executable Yet"));
-    assert!(code_actions_for_document("file:///pending-collection.doria", source).is_empty());
+    let uri = "file:///completed-collection.doria";
+    let diagnostics = diagnostics_for_document(uri, source);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    assert!(code_actions_for_document(uri, source).is_empty());
 }
 
 #[test]

@@ -1,12 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
 use doriac::ast::{
-    Block, ClassDecl, ClassMember, ElseBranch, Expr, ForIncrement, ForInitializer, FunctionDecl,
-    Item, MemberAccess, Program, StaticQualifier, Stmt, VarDecl,
+    Block, ClassDecl, ClassMember, ElseBranch, EnumDecl, Expr, ForIncrement, ForInitializer,
+    FunctionDecl, Item, MatchPattern, MemberAccess, Program, StaticQualifier, Stmt, VarDecl,
 };
 use doriac::diagnostics::Diagnostic;
+use doriac::enums::{EnumBackingType, EnumBackingValue};
 use doriac::lexer::{Token, TokenKind};
-use doriac::semantics::{CallableTarget, SemanticInfo};
+use doriac::semantics::{CallableTarget, EnumSemanticInfo, SemanticInfo};
 use doriac::source::Span;
 use doriac::types::{ResolvedType, SharedHandleKind};
 
@@ -24,8 +25,11 @@ pub(crate) struct AnalysisSnapshot {
     symbols: Vec<Symbol>,
     occurrences: Vec<Occurrence>,
     member_receivers: Vec<MemberReceiver>,
+    static_receivers: Vec<StaticReceiver>,
     class_members: HashMap<String, Vec<ClassMemberCompletion>>,
     class_parents: HashMap<String, String>,
+    enum_case_completions: HashMap<String, Vec<SemanticCompletion>>,
+    enum_member_completions: HashMap<String, Vec<SemanticCompletion>>,
     local_visibilities: Vec<LocalVisibility>,
 }
 
@@ -56,6 +60,12 @@ struct MemberReceiver {
     receiver: ResolvedType,
     current_class: Option<String>,
     writable_payload_access: bool,
+}
+
+#[derive(Debug, Clone)]
+struct StaticReceiver {
+    span: Span,
+    enum_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +155,13 @@ impl AnalysisSnapshot {
         use SharedHandleKind::*;
 
         let receiver = non_nullable_type(&context.receiver);
+        if let ResolvedType::Enum(enum_type) = receiver {
+            return self
+                .enum_member_completions
+                .get(&enum_type.name)
+                .cloned()
+                .unwrap_or_default();
+        }
         if let ResolvedType::Class(class) = receiver {
             return self.class_member_completions(
                 &class.name,
@@ -194,6 +211,23 @@ impl AnalysisSnapshot {
         let mut labels = HashSet::new();
         completions.retain(|completion| labels.insert(completion.label.clone()));
         completions
+    }
+
+    pub(crate) fn static_completions_at_offset(
+        &self,
+        offset: usize,
+    ) -> Option<Vec<SemanticCompletion>> {
+        let context = self
+            .static_receivers
+            .iter()
+            .filter(|context| context.span.start <= offset && offset <= context.span.end)
+            .min_by_key(|context| context.span.end.saturating_sub(context.span.start))?;
+        Some(
+            self.enum_case_completions
+                .get(&context.enum_name)
+                .cloned()
+                .unwrap_or_default(),
+        )
     }
 
     fn class_member_completions(
@@ -288,11 +322,16 @@ struct SnapshotBuilder<'a> {
     symbols: Vec<Symbol>,
     occurrences: Vec<Occurrence>,
     classes: HashMap<String, usize>,
+    enums: HashMap<String, usize>,
+    enum_cases: HashMap<(String, String), usize>,
     class_parents: HashMap<String, String>,
     class_members: HashMap<String, Vec<ClassMemberCompletion>>,
+    enum_case_completions: HashMap<String, Vec<SemanticCompletion>>,
+    enum_member_completions: HashMap<String, Vec<SemanticCompletion>>,
     methods: HashMap<(String, String), usize>,
     functions: HashMap<String, usize>,
     member_receivers: Vec<MemberReceiver>,
+    static_receivers: Vec<StaticReceiver>,
     local_scopes: Vec<HashMap<String, usize>>,
     local_scope_ends: Vec<usize>,
     local_visibilities: Vec<LocalVisibility>,
@@ -313,11 +352,16 @@ impl<'a> SnapshotBuilder<'a> {
             symbols: Vec::new(),
             occurrences: Vec::new(),
             classes: HashMap::new(),
+            enums: HashMap::new(),
+            enum_cases: HashMap::new(),
             class_parents: HashMap::new(),
             class_members: HashMap::new(),
+            enum_case_completions: HashMap::new(),
+            enum_member_completions: HashMap::new(),
             methods: HashMap::new(),
             functions: HashMap::new(),
             member_receivers: Vec::new(),
+            static_receivers: Vec::new(),
             local_scopes: Vec::new(),
             local_scope_ends: Vec::new(),
             local_visibilities: Vec::new(),
@@ -332,8 +376,11 @@ impl<'a> SnapshotBuilder<'a> {
             symbols: self.symbols,
             occurrences: self.occurrences,
             member_receivers: self.member_receivers,
+            static_receivers: self.static_receivers,
             class_members: self.class_members,
             class_parents: self.class_parents,
+            enum_case_completions: self.enum_case_completions,
+            enum_member_completions: self.enum_member_completions,
             local_visibilities: self.local_visibilities,
         }
     }
@@ -342,6 +389,7 @@ impl<'a> SnapshotBuilder<'a> {
         for item in &program.items {
             match item {
                 Item::Class(class) => self.collect_class(class),
+                Item::Enum(enum_decl) => self.collect_enum(enum_decl),
                 Item::Trait(trait_decl) => {
                     for member in &trait_decl.members {
                         if let ClassMember::Method(method) = member {
@@ -364,6 +412,71 @@ impl<'a> SnapshotBuilder<'a> {
                 }
                 _ => {}
             }
+        }
+    }
+
+    fn collect_enum(&mut self, declaration: &EnumDecl) {
+        let symbol = self.add_symbol(
+            declaration.name_span,
+            format!("enum {}", declaration.name),
+            None,
+        );
+        self.enums.insert(declaration.name.clone(), symbol);
+
+        let semantic = self
+            .semantic_info
+            .and_then(|info| info.enums.iter().find(|info| info.name == declaration.name))
+            .cloned();
+        let mut completions = Vec::new();
+        for case in &declaration.cases {
+            let semantic_case = semantic
+                .as_ref()
+                .and_then(|info| info.cases.iter().find(|info| info.name == case.name));
+            let signature = enum_case_signature(&declaration.name, &case.name, semantic_case);
+            let documentation = enum_case_documentation(semantic.as_ref(), semantic_case);
+            let case_symbol =
+                self.add_symbol(case.name_span, signature.clone(), documentation.clone());
+            self.enum_cases
+                .insert((declaration.name.clone(), case.name.clone()), case_symbol);
+            completions.push(SemanticCompletion {
+                label: case.name.clone(),
+                kind: 20,
+                detail: signature,
+                documentation,
+            });
+
+            if let Some(semantic_case) = semantic_case {
+                for (field, semantic_field) in case.payload.iter().zip(&semantic_case.payload) {
+                    let field_span = find_variable_span(self.tokens, field.span, &field.name)
+                        .unwrap_or(field.span);
+                    self.add_symbol(
+                        field_span,
+                        format!(
+                            "{} ${}",
+                            display_resolved_type(&semantic_field.ty),
+                            field.name
+                        ),
+                        Some("Readonly enum payload field.".to_string()),
+                    );
+                }
+            }
+        }
+        self.enum_case_completions
+            .insert(declaration.name.clone(), completions);
+
+        if let Some(backing_type) = semantic.as_ref().and_then(|info| info.backing_type) {
+            let backing = enum_backing_name(backing_type).to_string();
+            self.enum_member_completions.insert(
+                declaration.name.clone(),
+                vec![SemanticCompletion {
+                    label: "value".to_string(),
+                    kind: 10,
+                    detail: format!("{backing} $value"),
+                    documentation: Some(
+                        "Readonly backing value associated with this enum case.".to_string(),
+                    ),
+                }],
+            );
         }
     }
 
@@ -498,6 +611,13 @@ impl<'a> SnapshotBuilder<'a> {
                                 Some(&class.name),
                                 class.parent.as_deref(),
                             );
+                        }
+                    }
+                }
+                Item::Enum(enum_decl) => {
+                    for case in &enum_decl.cases {
+                        if let Some(backing_value) = &case.backing_value {
+                            self.visit_expr(backing_value, None, None);
                         }
                     }
                 }
@@ -776,12 +896,21 @@ impl<'a> SnapshotBuilder<'a> {
                 qualifier,
                 qualifier_span,
                 method,
+                member_span,
                 args,
                 span,
                 ..
             } => {
                 for argument in args {
                     self.visit_expr(&argument.value, current_class, parent_class);
+                }
+                if self.record_enum_static_reference(
+                    qualifier,
+                    *qualifier_span,
+                    method,
+                    *member_span,
+                ) {
+                    return;
                 }
                 if matches!(qualifier, StaticQualifier::Class(class) if class == "String") {
                     if let (Some(member), Some(method_span)) = (
@@ -852,6 +981,28 @@ impl<'a> SnapshotBuilder<'a> {
                 let receiver = self
                     .semantic_info
                     .and_then(|info| info.expression_type(object.span()));
+                if let (Some(ResolvedType::Enum(enum_type)), Some(property_span), "value") = (
+                    receiver.map(non_nullable_type),
+                    property_span,
+                    property.as_str(),
+                ) {
+                    if let Some(backing_type) = self.semantic_info.and_then(|info| {
+                        info.enums
+                            .iter()
+                            .find(|info| info.id == enum_type.id)
+                            .and_then(|info| info.backing_type)
+                    }) {
+                        self.add_symbol(
+                            property_span,
+                            format!("{} $value", enum_backing_name(backing_type)),
+                            Some(
+                                "Readonly backing value associated with this enum case."
+                                    .to_string(),
+                            ),
+                        );
+                    }
+                    return;
+                }
                 if matches!(
                     receiver.map(non_nullable_type),
                     Some(ResolvedType::SharedHandle(
@@ -916,7 +1067,15 @@ impl<'a> SnapshotBuilder<'a> {
                     }
                 }
             }
-            Expr::StaticMember { .. } => {}
+            Expr::StaticMember {
+                qualifier,
+                qualifier_span,
+                member,
+                member_span,
+                ..
+            } => {
+                self.record_enum_static_reference(qualifier, *qualifier_span, member, *member_span);
+            }
             Expr::IsType { expr, .. } | Expr::Grouped { expr, .. } | Expr::Unary { expr, .. } => {
                 self.visit_expr(expr, current_class, parent_class)
             }
@@ -953,6 +1112,34 @@ impl<'a> SnapshotBuilder<'a> {
                 self.visit_expr(collection, current_class, parent_class);
                 self.visit_expr(index, current_class, parent_class);
             }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                self.visit_expr(scrutinee, current_class, parent_class);
+                for arm in arms {
+                    match &arm.pattern {
+                        MatchPattern::Expression(pattern) => {
+                            self.visit_expr(pattern, current_class, parent_class)
+                        }
+                        MatchPattern::EnumCase {
+                            qualifier,
+                            qualifier_span,
+                            case,
+                            case_span,
+                            ..
+                        } => {
+                            self.record_enum_static_reference(
+                                &StaticQualifier::Class(qualifier.clone()),
+                                *qualifier_span,
+                                case,
+                                *case_span,
+                            );
+                        }
+                        MatchPattern::Default { .. } => {}
+                    }
+                    self.visit_expr(&arm.value, current_class, parent_class);
+                }
+            }
             // IDE analysis is best-effort across compiler feature branches. New
             // expression forms remain diagnostic-safe until their symbol-bearing
             // children need explicit traversal here.
@@ -976,6 +1163,40 @@ impl<'a> SnapshotBuilder<'a> {
             current = self.class_parents.get(class_name).map(String::as_str);
         }
         None
+    }
+
+    fn record_enum_static_reference(
+        &mut self,
+        qualifier: &StaticQualifier,
+        qualifier_span: Span,
+        member: &str,
+        member_span: Span,
+    ) -> bool {
+        let StaticQualifier::Class(enum_name) = qualifier else {
+            return false;
+        };
+        let Some(enum_symbol) = self.enums.get(enum_name).copied() else {
+            return false;
+        };
+        self.occurrences.push(Occurrence {
+            span: qualifier_span,
+            symbol: enum_symbol,
+        });
+        self.static_receivers.push(StaticReceiver {
+            span: member_span,
+            enum_name: enum_name.clone(),
+        });
+        if let Some(case_symbol) = self
+            .enum_cases
+            .get(&(enum_name.clone(), member.to_string()))
+            .copied()
+        {
+            self.occurrences.push(Occurrence {
+                span: member_span,
+                symbol: case_symbol,
+            });
+        }
+        true
     }
 
     fn member_name_span(&self, search_span: Span, name: &str) -> Option<Span> {
@@ -1345,6 +1566,62 @@ fn non_nullable_type(ty: &ResolvedType) -> &ResolvedType {
     }
 }
 
+fn enum_backing_name(backing: EnumBackingType) -> &'static str {
+    match backing {
+        EnumBackingType::Int => "int",
+        EnumBackingType::String => "string",
+    }
+}
+
+fn enum_case_signature(
+    enum_name: &str,
+    case_name: &str,
+    case: Option<&doriac::semantics::EnumCaseSemanticInfo>,
+) -> String {
+    let parameters = case
+        .map(|case| {
+            case.payload
+                .iter()
+                .map(|field| format!("{} ${}", display_resolved_type(&field.ty), field.name))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if parameters.is_empty() {
+        format!("{enum_name}::{case_name}: {enum_name}")
+    } else {
+        format!(
+            "{enum_name}::{case_name}({}): {enum_name}",
+            parameters.join(", ")
+        )
+    }
+}
+
+fn enum_case_documentation(
+    enum_info: Option<&EnumSemanticInfo>,
+    case: Option<&doriac::semantics::EnumCaseSemanticInfo>,
+) -> Option<String> {
+    let case = case?;
+    if !case.payload.is_empty() {
+        return Some(
+            "Payload enum case. Its syntax and signature are available now; execution lands in Stage 27 Slice 2."
+                .to_string(),
+        );
+    }
+    match (
+        &case.backing_value,
+        enum_info.and_then(|info| info.backing_type),
+    ) {
+        (Some(EnumBackingValue::Int(value)), Some(EnumBackingType::Int)) => Some(format!(
+            "Enum case with readonly `int` backing value `{value}`."
+        )),
+        (Some(EnumBackingValue::String(value)), Some(EnumBackingType::String)) => Some(format!(
+            "Enum case with readonly `string` backing value `{:?}`.",
+            value
+        )),
+        _ => Some("Unit enum case.".to_string()),
+    }
+}
+
 fn display_resolved_type(ty: &ResolvedType) -> String {
     match ty {
         ResolvedType::Void => "void".to_string(),
@@ -1357,6 +1634,7 @@ fn display_resolved_type(ty: &ResolvedType) -> String {
         ResolvedType::Mixed => "mixed".to_string(),
         ResolvedType::TypeParameter(name) => name.clone(),
         ResolvedType::Nullable(inner) => format!("?{}", display_resolved_type(inner)),
+        ResolvedType::Enum(enum_type) => enum_type.name.clone(),
         ResolvedType::Class(class) => {
             if class.arguments.is_empty() {
                 class.name.clone()
@@ -1597,6 +1875,12 @@ fn find_identifier_span(tokens: &[Token], span: Span, name: &str) -> Option<Span
         .map(|token| token.span)
 }
 
+fn find_variable_span(tokens: &[Token], span: Span, name: &str) -> Option<Span> {
+    tokens_in_span(tokens, span)
+        .find(|token| matches!(&token.kind, TokenKind::Variable(variable) if variable == name))
+        .map(|token| token.span)
+}
+
 fn identifier_is(token: &Token, name: &str) -> bool {
     matches!(&token.kind, TokenKind::Identifier(identifier) if identifier == name)
 }
@@ -1626,6 +1910,80 @@ mod tests {
                 snapshot.diagnostics()
             )
         })
+    }
+
+    #[test]
+    fn enum_hovers_and_completions_use_compiler_semantic_metadata() {
+        let source = r#"enum Status { case Draft; case Published; }
+enum Priority: int { case Low = 1; case High = 2; }
+enum Shape { case Circle(float $radius); }
+
+function main(): void
+{
+    Status $status = Status::Draft;
+    Priority $priority = Priority::High;
+    echo $priority->value;
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("test.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+
+        assert!(hover(source, "Status", 0).markdown.contains("enum Status"));
+        assert!(hover(source, "Draft", 0)
+            .markdown
+            .contains("Status::Draft: Status"));
+        assert!(hover(source, "High", 0)
+            .markdown
+            .contains("Priority::High: Priority"));
+        assert!(hover(source, "Circle", 0)
+            .markdown
+            .contains("Shape::Circle(float $radius): Shape"));
+        assert!(hover(source, "$radius", 0)
+            .markdown
+            .contains("float $radius"));
+        assert!(hover(source, "value", 0).markdown.contains("int $value"));
+
+        let draft_offset = source.rfind("Draft").expect("enum case reference");
+        let static_labels = snapshot
+            .static_completions_at_offset(draft_offset)
+            .expect("enum static completion context")
+            .into_iter()
+            .map(|completion| completion.label)
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            static_labels,
+            HashSet::from(["Draft".to_string(), "Published".to_string()])
+        );
+
+        let value_offset = source.rfind("value").expect("backed value property");
+        let members = snapshot
+            .member_completions_at_offset(value_offset)
+            .expect("backed enum member completion context");
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].label, "value");
+        assert_eq!(members[0].detail, "int $value");
+    }
+
+    #[test]
+    fn accepted_payload_and_match_syntax_keep_one_compiler_owned_pending_diagnostic() {
+        let payload = AnalysisSnapshot::analyze(
+            "payload.doria",
+            "enum Shape { case Circle(float $radius); } Shape $shape = Shape::Circle(2.5);",
+        );
+        assert_eq!(payload.diagnostics().len(), 1);
+        assert_eq!(payload.diagnostics()[0].code, "E0573");
+
+        let matching_source = "enum Status { case Draft; } let $label = match (Status::Draft) { Status::Draft => 1, default => 0, };";
+        let matching = AnalysisSnapshot::analyze("match.doria", matching_source);
+        assert_eq!(matching.diagnostics().len(), 1);
+        assert_eq!(matching.diagnostics()[0].code, "E0576");
+        assert!(hover(matching_source, "Draft", 2)
+            .markdown
+            .contains("Status::Draft: Status"));
     }
 
     #[test]

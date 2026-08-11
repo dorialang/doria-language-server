@@ -16,6 +16,12 @@ class DoriaColorSettingsPage : ColorSettingsPage {
     override fun getDemoText(): String = """
         #[Module(host: "localhost", port: 3306)]
         #[App\Routing\Route(path: "/people")]
+        enum Status
+        {
+            case Draft;
+            case Published;
+        }
+
         class Person
         {
             internal const MAX_GREETING_LENGTH = 120;
@@ -59,6 +65,7 @@ class DoriaColorSettingsPage : ColorSettingsPage {
         Person::fromName("Lucy");
         echo Person::MAX_GREETING_LENGTH;
         Person::created += 1;
+        Status ${'$'}status = Status::Draft;
     """.trimIndent()
 
     override fun getAdditionalHighlightingTagToDescriptorMap(): Map<String, TextAttributesKey> = emptyMap()
@@ -86,6 +93,8 @@ class DoriaColorSettingsPage : ColorSettingsPage {
             AttributesDescriptor("Attribute delimiter", DoriaSyntaxHighlighter.ATTRIBUTE_DELIMITER),
             AttributesDescriptor("Attribute name", DoriaSyntaxHighlighter.ATTRIBUTE_NAME),
             AttributesDescriptor("Attribute argument", DoriaSyntaxHighlighter.ATTRIBUTE_ARGUMENT),
+            AttributesDescriptor("Enum declaration", DoriaSyntaxHighlighter.ENUM_DECLARATION),
+            AttributesDescriptor("Enum case", DoriaSyntaxHighlighter.ENUM_CASE),
             AttributesDescriptor("Function declaration", DoriaSyntaxHighlighter.FUNCTION_DECLARATION),
             AttributesDescriptor("Function call", DoriaSyntaxHighlighter.FUNCTION_CALL),
             AttributesDescriptor("Method call", DoriaSyntaxHighlighter.METHOD_CALL),

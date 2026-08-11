@@ -463,6 +463,28 @@
           ]
         },
         {
+          "match": "\\b(enum)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.enum.doria"
+            },
+            "2": {
+              "name": "entity.name.type.enum.doria"
+            }
+          }
+        },
+        {
+          "match": "\\b(case)\\s+([A-Z][A-Za-z0-9_]*)\\b(?=\\s*(?:[;(=]))",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.enum.case.doria"
+            },
+            "2": {
+              "name": "constant.other.enum.case.doria"
+            }
+          }
+        },
+        {
           "match": "\\b(class)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": {
@@ -542,6 +564,17 @@
     },
     "accessors": {
       "patterns": [
+        {
+          "match": "(::)\\s*([A-Z](?=[A-Za-z0-9_]*[a-z])[A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "punctuation.accessor.static.doria"
+            },
+            "2": {
+              "name": "constant.other.enum.case.doria"
+            }
+          }
+        },
         {
           "match": "(->)\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
           "captures": {
@@ -647,7 +680,11 @@
         },
         {
           "name": "keyword.control.doria",
-          "match": "\\b(?:return|foreach|as|if|else|while|for|break|continue|when|given|finally|try|catch|extends|uses|with|default|do)\\b"
+          "match": "\\b(?:return|foreach|as|if|else|while|for|break|continue|match|when|given|finally|try|catch|extends|uses|with|default|do)\\b"
+        },
+        {
+          "name": "keyword.declaration.enum.doria",
+          "match": "\\b(?:enum|case)\\b"
         },
         {
           "name": "keyword.operator.type-test.doria",
@@ -687,7 +724,7 @@
         },
         {
           "name": "keyword.other.reserved.doria",
-          "match": "\\b(?:async|await|spawn|scope|enum|case|match|unsafe|extern|open|override|fn|get|set|insteadof)\\b"
+          "match": "\\b(?:async|await|spawn|scope|unsafe|extern|open|override|fn|get|set|insteadof)\\b"
         }
       ]
     },

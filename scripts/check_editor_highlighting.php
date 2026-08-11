@@ -112,9 +112,6 @@ $acceptedKeywords = [
 ];
 
 $plannedKeywords = [
-    'enum',
-    'case',
-    'match',
     'async',
     'await',
     'unsafe',
@@ -130,7 +127,6 @@ $plannedKeywords = [
     'finally',
     'when',
     'given',
-    'default',
     'do',
     'fn',
     'get',
@@ -603,6 +599,14 @@ function check_vscode_grammar(): void
         'VS Code must scope shared construction as a modifier and referencedValue as a property'
     );
     foreach ([
+        'keyword.declaration.enum.doria',
+        'entity.name.type.enum.doria',
+        'keyword.declaration.enum.case.doria',
+        'constant.other.enum.case.doria',
+    ] as $scope) {
+        require_check(str_contains($grammarText, $scope), "VS Code grammar is missing accepted enum scope '{$scope}'");
+    }
+    foreach ([
         'keyword.declaration.constant.doria',
         'constant.other.doria',
         'constant.other.class.doria',
@@ -618,6 +622,7 @@ function check_vscode_grammar(): void
     $staticMethodPatterns = [];
     $classConstantPatterns = [];
     $staticPropertyPatterns = [];
+    $enumCasePatterns = [];
     foreach ($staticAccessorPatterns as $pattern) {
         $capture = $pattern['captures']['2']['name'] ?? null;
         if ($capture === 'entity.name.function.static.doria') {
@@ -626,8 +631,16 @@ function check_vscode_grammar(): void
             $classConstantPatterns[] = (string) ($pattern['match'] ?? '');
         } elseif ($capture === 'variable.other.property.static.doria') {
             $staticPropertyPatterns[] = (string) ($pattern['match'] ?? '');
+        } elseif ($capture === 'constant.other.enum.case.doria') {
+            $enumCasePatterns[] = (string) ($pattern['match'] ?? '');
         }
     }
+    require_check(
+        any_match($enumCasePatterns, static fn (string $match): bool => regex_matches($match, '::Draft')) &&
+            any_match($enumCasePatterns, static fn (string $match): bool => regex_matches($match, '::Circle(')) &&
+            !any_match($enumCasePatterns, static fn (string $match): bool => regex_matches($match, '::MAX_DEPTH')),
+        'VS Code must classify unit and payload enum-case access without treating every PascalCase identifier as a case'
+    );
     require_check(
         any_match($staticMethodPatterns, static fn (string $match): bool => regex_matches($match, '::nextId(')),
         'VS Code must classify a parenthesized :: member as a static method'
@@ -1041,6 +1054,13 @@ function check_intellij_lexer(): void
             str_contains($lexerText, 'DoriaTokenTypes.ATTRIBUTE_ARGUMENT'),
         'IntelliJ lexer must emit dedicated attribute tokens'
     );
+    require_check(
+        str_contains($lexerText, 'isEnumDeclarationName() -> DoriaTokenTypes.ENUM_DECLARATION') &&
+            str_contains($lexerText, 'isEnumCaseName(text) -> DoriaTokenTypes.ENUM_CASE') &&
+            str_contains($intellijHighlightingText, 'DORIA_ENUM_DECLARATION') &&
+            str_contains($intellijHighlightingText, 'DORIA_ENUM_CASE'),
+        'IntelliJ must distinguish enum declarations and enum cases contextually'
+    );
     $lexerTestText = read_text($intellijLexerTest);
     require_check(
         str_contains($lexerTestText, 'testNestedAttributeBracketsDoNotCloseTheAttributeEarly') &&
@@ -1188,6 +1208,8 @@ function check_intellij_lexer(): void
         'DORIA_ATTRIBUTE_DELIMITER',
         'DORIA_ATTRIBUTE_NAME',
         'DORIA_ATTRIBUTE_ARGUMENT',
+        'DORIA_ENUM_DECLARATION',
+        'DORIA_ENUM_CASE',
         'DORIA_TYPE_TEST_OPERATOR',
         'DORIA_LOGICAL_OPERATOR',
         'DORIA_PROPERTY',
@@ -1405,8 +1427,14 @@ function check_fixture(): void
         'override function save',
         'throws StorageError',
         'enum Option',
+        'enum Status',
+        'enum Priority: int',
         'case Some',
+        'case Draft',
+        'case Low = 1;',
         'match ($option)',
+        'Option::Some($value)',
+        'default => -1',
         'unsafe',
         'extern',
         '#[PhpExport]',

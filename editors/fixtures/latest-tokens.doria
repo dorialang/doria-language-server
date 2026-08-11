@@ -314,16 +314,30 @@ function sharedProjection(): void
     echo $reference->referencedValue->name;
 }
 
-// Planned/future: enums and expression-position match.
+// Stage 27: unit and backed enums execute; payload syntax is accepted for Slice 2.
+enum Status
+{
+    case Draft;
+    case Published;
+}
+
+enum Priority: int
+{
+    case Low = 1;
+    case High = 2;
+}
+
 enum Option
 {
     case Some(int $value);
     case None;
 }
 
+// Stage 28 grammar preparation: syntax is accepted while semantics remain pending.
 let $score = match ($option) {
-    Some($value) => $value,
-    None => 0,
+    Option::Some($value) => $value,
+    Option::None => 0,
+    default => -1,
 };
 
 // Planned/future: checked errors.

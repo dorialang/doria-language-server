@@ -155,9 +155,9 @@ into the universal Marketplace artifact.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow, [docs/architecture.md](docs/architecture.md) for component boundaries, and [docs/releasing.md](docs/releasing.md) for CalVer release coordination.
 
-Semantic hover uses compiler-resolved symbols for same-file classes, free functions,
-instance methods, and static methods. It displays callable signatures and attached
-PHPDoc consistently in VS Code and JetBrains IDEs. See
+Semantic hover uses compiler-resolved symbols for same-file classes, enums and enum
+cases, free functions, instance methods, and static methods. It displays signatures
+and attached PHPDoc consistently in VS Code and JetBrains IDEs. See
 [docs/semantic-hover.md](docs/semantic-hover.md) for the behavior contract and
 planned workspace-wide extensions.
 
