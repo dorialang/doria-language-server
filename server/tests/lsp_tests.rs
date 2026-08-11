@@ -249,44 +249,53 @@ fn exposes_collection_diagnostic_fixes_as_utf16_safe_code_actions() {
 }
 
 #[test]
-fn projects_decision_0113_pending_collection_members_without_lsp_rewording() {
-    let cases = [
-        (
-            "function main(): void { List<int> $v = [1]; echo $v->indexOf(1); }",
-            "indexOf",
-            "Slice 3",
-        ),
-        (
-            "function main(): void { Dictionary<string, int> $v = []; echo $v->containsValue(1); }",
-            "containsValue",
-            "Slice 3",
-        ),
-        (
-            "function main(): void { Set<int> $v = Set::from([1]); echo $v->first; }",
-            "first",
-            "Slice 3",
-        ),
-        (
-            "function main(): void { writable List<int> $v = []; $v->clear(); }",
-            "clear",
-            "Slice 4",
-        ),
-    ];
+fn accepts_the_complete_decision_0113_surface_after_non_ascii_text() {
+    let source = r#"function main(): void
+{
+    echo "😀";
+    writable List<int> $list = [1];
+    let $position = $list->indexOf(1);
+    $list->remove(1);
+    $list->clear();
+    writable Dictionary<string, int> $dictionary = ["one" => 1];
+    echo $dictionary->containsValue(1);
+    $dictionary->clear();
+    writable Set<int> $set = Set::from([1]);
+    let $first = $set->first;
+    let $last = $set->last;
+    $set->clear();
+    writable SortedDictionary<int, int> $sortedDictionary = SortedDictionary::from([1 => 1]);
+    echo $sortedDictionary->containsValue(1);
+    $sortedDictionary->clear();
+    writable SortedSet<int> $sortedSet = SortedSet::from([1]);
+    let $sortedFirst = $sortedSet->first;
+    let $sortedLast = $sortedSet->last;
+    $sortedSet->clear();
+    writable PriorityQueue<int> $queue = PriorityQueue::from([1]);
+    $queue->clear();
+    writable Deque<int> $deque = Deque::from([1]);
+    $deque->clear();
+}
+"#;
+    let diagnostics = diagnostics_for_document("file:///decision-0113.doria", source);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
 
-    for (source, member, slice) in cases {
-        let diagnostics = diagnostics_for_document("file:///pending-collection.doria", source);
-        let pending = diagnostics
-            .iter()
-            .find(|diagnostic| diagnostic["code"] == "E0559")
-            .unwrap_or_else(|| panic!("missing pending diagnostic for {member}: {diagnostics:#?}"));
-        let message = pending["message"].as_str().expect("diagnostic message");
-        assert!(message.contains(slice));
-        assert!(message.contains("Accepted Collection Member Is Not Executable Yet"));
-        let expected = byte_offset_to_position(source, source.find(member).unwrap());
-        assert_eq!(pending["range"]["start"]["line"], expected.line);
-        assert_eq!(pending["range"]["start"]["character"], expected.character);
-        assert!(code_actions_for_document("file:///pending-collection.doria", source).is_empty());
-    }
+#[test]
+fn preserves_the_compiler_readonly_clear_diagnostic_after_non_ascii_text() {
+    let source =
+        "function main(): void { echo \"😀\"; List<int> $values = [1]; $values->clear(); }";
+    let diagnostics = diagnostics_for_document("file:///readonly-clear.doria", source);
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0201")
+        .unwrap_or_else(|| panic!("missing readonly clear diagnostic: {diagnostics:#?}"));
+    let expected = byte_offset_to_position(source, source.find("$values->clear").unwrap());
+    assert_eq!(diagnostic["range"]["start"]["line"], expected.line);
+    assert_eq!(
+        diagnostic["range"]["start"]["character"],
+        expected.character
+    );
 }
 
 #[test]
