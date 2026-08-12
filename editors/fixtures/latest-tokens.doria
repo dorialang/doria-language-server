@@ -314,7 +314,7 @@ function sharedProjection(): void
     echo $reference->referencedValue->name;
 }
 
-// Stage 27: unit and backed enums execute; payload syntax is accepted for Slice 2.
+// Enums: unit, backed, and payload cases.
 enum Status
 {
     case Draft;
@@ -332,6 +332,10 @@ enum Option
     case Some(int $value);
     case None;
 }
+
+Option $some = Option::Some(42);
+Option $named = Option::Some(value: 43);
+?Option $maybe = $some;
 
 // Stage 28 grammar preparation: syntax is accepted while semantics remain pending.
 let $score = match ($option) {

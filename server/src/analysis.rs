@@ -416,17 +416,17 @@ impl<'a> SnapshotBuilder<'a> {
     }
 
     fn collect_enum(&mut self, declaration: &EnumDecl) {
-        let symbol = self.add_symbol(
-            declaration.name_span,
-            format!("enum {}", declaration.name),
-            None,
-        );
-        self.enums.insert(declaration.name.clone(), symbol);
-
         let semantic = self
             .semantic_info
             .and_then(|info| info.enums.iter().find(|info| info.name == declaration.name))
             .cloned();
+        let symbol = self.add_symbol(
+            declaration.name_span,
+            format!("enum {}", declaration.name),
+            semantic.as_ref().map(enum_documentation),
+        );
+        self.enums.insert(declaration.name.clone(), symbol);
+
         let mut completions = Vec::new();
         for case in &declaration.cases {
             let semantic_case = semantic
@@ -1616,10 +1616,16 @@ fn enum_case_documentation(
 ) -> Option<String> {
     let case = case?;
     if !case.payload.is_empty() {
-        return Some(
-            "Payload enum case. Its syntax and signature are available now; execution lands in Stage 27 Slice 2."
-                .to_string(),
-        );
+        let ownership = enum_info.map_or("enum", |info| {
+            if info.capabilities.copy {
+                "Copy enum"
+            } else {
+                "Move enum"
+            }
+        });
+        return Some(format!(
+            "Constructs a {ownership} value with readonly payload fields."
+        ));
     }
     match (
         &case.backing_value,
@@ -1634,6 +1640,15 @@ fn enum_case_documentation(
         )),
         _ => Some("Unit enum case.".to_string()),
     }
+}
+
+fn enum_documentation(info: &EnumSemanticInfo) -> String {
+    let ownership = if info.capabilities.copy {
+        "Copy"
+    } else {
+        "Move"
+    };
+    format!("Nominal {ownership} enum. Each value records one declared case and that case's data.")
 }
 
 fn display_resolved_type(ty: &ResolvedType) -> String {
@@ -1931,11 +1946,14 @@ mod tests {
         let source = r#"enum Status { case Draft; case Published; }
 enum Priority: int { case Low = 1; case High = 2; }
 enum Shape { case Circle(float $radius); }
+class Document {}
+enum LoadResult { case Loaded(Document $document); }
 
 function main(): void
 {
     Status $status = Status::Draft;
     Priority $priority = Priority::High;
+    ?Shape $maybe = Shape::Circle(2.5);
     echo $priority->value;
 }
 "#;
@@ -1956,9 +1974,21 @@ function main(): void
         assert!(hover(source, "Circle", 0)
             .markdown
             .contains("Shape::Circle(float $radius): Shape"));
+        assert!(hover(source, "Circle", 0)
+            .markdown
+            .contains("Constructs a Copy enum value"));
+        assert!(hover(source, "Loaded", 0)
+            .markdown
+            .contains("Constructs a Move enum value"));
         assert!(hover(source, "$radius", 0)
             .markdown
             .contains("float $radius"));
+        assert!(hover(source, "$document", 0)
+            .markdown
+            .contains("Document $document"));
+        assert!(hover(source, "$maybe", 0)
+            .markdown
+            .contains("?Shape $maybe"));
         assert!(hover(source, "value", 0).markdown.contains("int $value"));
 
         let draft_offset = source.rfind("Draft").expect("enum case reference");
@@ -1983,13 +2013,16 @@ function main(): void
     }
 
     #[test]
-    fn accepted_payload_and_match_syntax_keep_one_compiler_owned_pending_diagnostic() {
+    fn payload_execution_is_accepted_while_match_keeps_its_compiler_owned_diagnostic() {
         let payload = AnalysisSnapshot::analyze(
             "payload.doria",
             "enum Shape { case Circle(float $radius); } Shape $shape = Shape::Circle(2.5);",
         );
-        assert_eq!(payload.diagnostics().len(), 1);
-        assert_eq!(payload.diagnostics()[0].code, "E0573");
+        assert!(
+            payload.diagnostics().is_empty(),
+            "{:?}",
+            payload.diagnostics()
+        );
 
         let matching_source = "enum Status { case Draft; } let $label = match (Status::Draft) { Status::Draft => 1, default => 0, };";
         let matching = AnalysisSnapshot::analyze("match.doria", matching_source);

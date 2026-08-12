@@ -93,13 +93,17 @@ class DoriaLexerTest : TestCase() {
 
     fun testEnumDeclarationsCasesAndMatchKeywordsUseAcceptedTokenKinds() {
         val tokens = lex(
-            "enum Status { case Draft; } " +
+            "enum Status { case Draft; case Ready(int \$code); } " +
                 "Status \$status = Status::Draft; " +
+                "Status \$ready = Status::Ready(code: 42); " +
                 "let \$label = match (\$status) { Status::Draft => 1, default => 0, };",
         )
 
         assertEquals(DoriaTokenTypes.ENUM_DECLARATION, tokens.first { it.text == "Status" }.type)
         for (token in tokens.filter { it.text == "Draft" }) {
+            assertEquals(DoriaTokenTypes.ENUM_CASE, token.type)
+        }
+        for (token in tokens.filter { it.text == "Ready" }) {
             assertEquals(DoriaTokenTypes.ENUM_CASE, token.type)
         }
         for (keyword in listOf("enum", "case", "match", "default")) {

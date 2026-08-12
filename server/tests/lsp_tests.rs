@@ -299,7 +299,7 @@ fn preserves_the_compiler_readonly_clear_diagnostic_after_non_ascii_text() {
 }
 
 #[test]
-fn stage27_enum_diagnostics_and_pending_boundaries_come_from_the_compiler() {
+fn payload_enum_execution_and_match_boundary_come_from_the_compiler() {
     let accepted = diagnostics_for_document(
         "file:///enums.doria",
         r#"enum Status { case Draft; }
@@ -320,8 +320,7 @@ function main(): void
         "file:///payload-enum.doria",
         "enum Shape { case Circle(float $radius); } Shape $shape = Shape::Circle(2.5);",
     );
-    assert_eq!(payload.len(), 1, "{payload:#?}");
-    assert_eq!(payload[0]["code"], "E0573");
+    assert!(payload.is_empty(), "{payload:#?}");
 
     let matching = diagnostics_for_document(
         "file:///match.doria",
@@ -358,6 +357,71 @@ function main(): void { echo "😀"; Status $status = Status::Draft(); }
         suggestion[0]["edit"]["changes"][suggestion_uri][0]["newText"],
         "Draft"
     );
+}
+
+#[test]
+fn payload_enum_diagnostics_keep_compiler_codes_and_utf16_ranges() {
+    let cases = [
+        (
+            "construction",
+            r#"enum Shape { case Circle(float $radius); }
+function main(): void { echo "😀"; Shape $shape = Shape::Circle("wide"); }"#,
+            "E0408",
+            "\"wide\"",
+        ),
+        (
+            "named argument",
+            r#"enum Coordinate { case Point(int $x, int $y); }
+function main(): void { echo "😀"; let $point = Coordinate::Point(z: 1, y: 2); }"#,
+            "E0516",
+            "z:",
+        ),
+        (
+            "recursive layout",
+            r#"echo "😀"; enum Node { case Next(Node $next); }"#,
+            "E0581",
+            "Node $next",
+        ),
+        (
+            "move",
+            r#"class Document {}
+enum LoadResult { case Loaded(Document $document); }
+function main(): void { echo "😀"; Document $document = new Document(); LoadResult $result = LoadResult::Loaded($document); let $again = $document; }"#,
+            "E0470",
+            "$document; }",
+        ),
+        (
+            "equality",
+            r#"enum Bucket { case Values(List<int> $values); }
+function main(): void { echo "😀"; Bucket $left = Bucket::Values([1]); Bucket $right = Bucket::Values([1]); bool $same = $left == $right; }"#,
+            "E0584",
+            "$left ==",
+        ),
+        (
+            "match",
+            r#"enum Status { case Draft; }
+function main(): void { echo "😀"; let $label = match (Status::Draft) { Status::Draft => 1, default => 0, }; }"#,
+            "E0576",
+            "match",
+        ),
+    ];
+
+    for (label, source, code, needle) in cases {
+        let diagnostics = diagnostics_for_document(&format!("file:///{label}.doria"), source);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic["code"] == code)
+            .unwrap_or_else(|| panic!("missing {code} for {label}: {diagnostics:#?}"));
+        let expected = byte_offset_to_position(source, source.find(needle).expect("range needle"));
+        assert_eq!(
+            diagnostic["range"]["start"]["line"], expected.line,
+            "{label}"
+        );
+        assert_eq!(
+            diagnostic["range"]["start"]["character"], expected.character,
+            "{label} must convert compiler byte offsets to UTF-16"
+        );
+    }
 }
 
 #[test]
