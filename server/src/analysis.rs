@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use doriac::ast::{
     Block, ClassDecl, ClassMember, ElseBranch, EnumDecl, Expr, ForIncrement, ForInitializer,
-    FunctionDecl, Item, MatchPattern, MemberAccess, Program, StaticQualifier, Stmt, VarDecl,
+    FunctionDecl, Item, MatchPattern, MemberAccess, Param, Program, StaticQualifier, Stmt, VarDecl,
 };
 use doriac::diagnostics::Diagnostic;
 use doriac::enums::{EnumBackingType, EnumBackingValue};
@@ -46,12 +46,26 @@ struct Symbol {
     signature: String,
     documentation: Option<String>,
     local_name: Option<String>,
+    kind: SymbolKind,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct Occurrence {
     span: Span,
     symbol: usize,
+    role: OccurrenceRole,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SymbolKind {
+    Plain,
+    Variable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OccurrenceRole {
+    Declaration,
+    Reference,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +87,7 @@ struct ClassMemberCompletion {
     completion: SemanticCompletion,
     writable: bool,
     internal: bool,
+    is_static: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -248,7 +263,8 @@ impl AnalysisSnapshot {
                     members
                         .iter()
                         .filter(|member| {
-                            (writable || !member.writable)
+                            !member.is_static
+                                && (writable || !member.writable)
                                 && (!member.internal
                                     || context.current_class.as_deref() == Some(class_name))
                         })
@@ -291,18 +307,38 @@ impl AnalysisSnapshot {
         completions
     }
 
-    pub(crate) fn reference_spans_at_offset(&self, offset: usize) -> Vec<Span> {
+    pub(crate) fn reference_spans_at_offset(
+        &self,
+        offset: usize,
+        include_declaration: bool,
+    ) -> Vec<Span> {
         let Some(symbol) = self.symbol_at_offset(offset) else {
             return Vec::new();
         };
         let mut spans = self
             .occurrences
             .iter()
-            .filter(|occurrence| occurrence.symbol == symbol)
+            .filter(|occurrence| {
+                occurrence.symbol == symbol
+                    && (include_declaration || occurrence.role != OccurrenceRole::Declaration)
+            })
             .map(|occurrence| occurrence.span)
             .collect::<Vec<_>>();
         spans.sort_by_key(|span| (span.start, span.end));
         spans
+    }
+
+    pub(crate) fn rename_replacement_at_offset(
+        &self,
+        offset: usize,
+        new_name: &str,
+    ) -> Option<String> {
+        let symbol = self.symbols.get(self.symbol_at_offset(offset)?)?;
+        Some(match symbol.kind {
+            SymbolKind::Plain => new_name.to_string(),
+            SymbolKind::Variable if new_name.starts_with('$') => new_name.to_string(),
+            SymbolKind::Variable => format!("${new_name}"),
+        })
     }
 
     fn symbol_at_offset(&self, offset: usize) -> Option<usize> {
@@ -403,10 +439,11 @@ impl<'a> SnapshotBuilder<'a> {
                         &function.name,
                         TokenKind::Function,
                     );
-                    let symbol = self.add_symbol(
+                    let symbol = self.add_declaration_symbol(
                         selection_span,
                         function_signature(function, None),
                         phpdoc_before(self.text, function.span.start),
+                        SymbolKind::Plain,
                     );
                     self.functions.insert(function.name.clone(), symbol);
                 }
@@ -420,10 +457,11 @@ impl<'a> SnapshotBuilder<'a> {
             .semantic_info
             .and_then(|info| info.enums.iter().find(|info| info.name == declaration.name))
             .cloned();
-        let symbol = self.add_symbol(
+        let symbol = self.add_declaration_symbol(
             declaration.name_span,
             format!("enum {}", declaration.name),
             semantic.as_ref().map(enum_documentation),
+            SymbolKind::Plain,
         );
         self.enums.insert(declaration.name.clone(), symbol);
 
@@ -434,8 +472,12 @@ impl<'a> SnapshotBuilder<'a> {
                 .and_then(|info| info.cases.iter().find(|info| info.name == case.name));
             let signature = enum_case_signature(&declaration.name, &case.name, semantic_case);
             let documentation = enum_case_documentation(semantic.as_ref(), semantic_case);
-            let case_symbol =
-                self.add_symbol(case.name_span, signature.clone(), documentation.clone());
+            let case_symbol = self.add_declaration_symbol(
+                case.name_span,
+                signature.clone(),
+                documentation.clone(),
+                SymbolKind::Plain,
+            );
             self.enum_cases
                 .insert((declaration.name.clone(), case.name.clone()), case_symbol);
             completions.push(SemanticCompletion {
@@ -449,7 +491,7 @@ impl<'a> SnapshotBuilder<'a> {
                 for (field, semantic_field) in case.payload.iter().zip(&semantic_case.payload) {
                     let field_span = find_variable_span(self.tokens, field.span, &field.name)
                         .unwrap_or(field.span);
-                    self.add_symbol(
+                    self.add_declaration_symbol(
                         field_span,
                         format!(
                             "{} ${}",
@@ -457,6 +499,7 @@ impl<'a> SnapshotBuilder<'a> {
                             field.name
                         ),
                         Some("Readonly enum payload field.".to_string()),
+                        SymbolKind::Variable,
                     );
                 }
             }
@@ -482,10 +525,11 @@ impl<'a> SnapshotBuilder<'a> {
 
     fn collect_class(&mut self, class: &ClassDecl) {
         let selection_span = self.declaration_name_span(class.span, &class.name, TokenKind::Class);
-        let symbol = self.add_symbol(
+        let symbol = self.add_declaration_symbol(
             selection_span,
             class_signature(class),
             phpdoc_before(self.text, class.span.start),
+            SymbolKind::Plain,
         );
         self.classes.insert(class.name.clone(), symbol);
         if let Some(parent) = &class.parent {
@@ -509,6 +553,7 @@ impl<'a> SnapshotBuilder<'a> {
                             },
                             writable: method.writable_this,
                             internal: matches!(method.access, MemberAccess::Internal),
+                            is_static: method.is_static,
                         });
                 }
                 ClassMember::Property(property) => {
@@ -526,6 +571,7 @@ impl<'a> SnapshotBuilder<'a> {
                             // when the property is used as an assignment place.
                             writable: false,
                             internal: matches!(property.access, MemberAccess::Internal),
+                            is_static: property.is_static,
                         });
                 }
                 ClassMember::Constant(_) => {}
@@ -536,13 +582,46 @@ impl<'a> SnapshotBuilder<'a> {
     fn collect_method(&mut self, class_name: &str, method: &FunctionDecl) {
         let selection_span =
             self.declaration_name_span(method.span, &method.name, TokenKind::Function);
-        let symbol = self.add_symbol(
+        let symbol = self.add_declaration_symbol(
             selection_span,
             function_signature(method, Some(class_name)),
             phpdoc_before(self.text, method.span.start),
+            SymbolKind::Plain,
         );
         self.methods
             .insert((class_name.to_string(), method.name.clone()), symbol);
+    }
+
+    fn add_declaration_symbol(
+        &mut self,
+        selection_span: Span,
+        signature: String,
+        documentation: Option<String>,
+        kind: SymbolKind,
+    ) -> usize {
+        self.add_symbol(
+            selection_span,
+            signature,
+            documentation,
+            kind,
+            OccurrenceRole::Declaration,
+        )
+    }
+
+    fn add_reference_symbol(
+        &mut self,
+        selection_span: Span,
+        signature: String,
+        documentation: Option<String>,
+        kind: SymbolKind,
+    ) -> usize {
+        self.add_symbol(
+            selection_span,
+            signature,
+            documentation,
+            kind,
+            OccurrenceRole::Reference,
+        )
     }
 
     fn add_symbol(
@@ -550,18 +629,30 @@ impl<'a> SnapshotBuilder<'a> {
         selection_span: Span,
         signature: String,
         documentation: Option<String>,
+        kind: SymbolKind,
+        role: OccurrenceRole,
     ) -> usize {
         let symbol = self.symbols.len();
         self.symbols.push(Symbol {
             signature,
             documentation,
             local_name: None,
+            kind,
         });
         self.occurrences.push(Occurrence {
             span: selection_span,
             symbol,
+            role,
         });
         symbol
+    }
+
+    fn record_reference(&mut self, span: Span, symbol: usize) {
+        self.occurrences.push(Occurrence {
+            span,
+            symbol,
+            role: OccurrenceRole::Reference,
+        });
     }
 
     fn declaration_name_span(
@@ -590,8 +681,8 @@ impl<'a> SnapshotBuilder<'a> {
                 Item::Class(class) => {
                     for member in &class.members {
                         if let ClassMember::Method(method) = member {
-                            self.visit_block(
-                                &method.body,
+                            self.visit_function_body(
+                                method,
                                 Some(&class.name),
                                 class.parent.as_deref(),
                             );
@@ -624,15 +715,32 @@ impl<'a> SnapshotBuilder<'a> {
                 Item::Trait(trait_decl) => {
                     for member in &trait_decl.members {
                         if let ClassMember::Method(method) = member {
-                            self.visit_block(&method.body, Some(&trait_decl.name), None);
+                            self.visit_function_body(method, Some(&trait_decl.name), None);
                         }
                     }
                 }
-                Item::Function(function) => self.visit_block(&function.body, None, None),
+                Item::Function(function) => self.visit_function_body(function, None, None),
                 Item::Constant(constant) => self.visit_expr(&constant.initializer, None, None),
                 Item::Statement(statement) => self.visit_stmt(statement, None, None),
                 _ => {}
             }
+        }
+        self.pop_local_scope();
+    }
+
+    fn visit_function_body(
+        &mut self,
+        function: &FunctionDecl,
+        current_class: Option<&str>,
+        parent_class: Option<&str>,
+    ) {
+        let block = &function.body;
+        self.push_local_scope(block.span.end);
+        for parameter in &function.params {
+            self.declare_parameter(parameter, block.span.start);
+        }
+        for statement in &block.statements {
+            self.visit_stmt(statement, current_class, parent_class);
         }
         self.pop_local_scope();
     }
@@ -740,32 +848,49 @@ impl<'a> SnapshotBuilder<'a> {
         } else {
             ""
         };
-        let visibility_end = self
-            .local_scope_ends
-            .last()
-            .copied()
-            .unwrap_or(self.text.len());
-        let depth = self.local_scopes.len();
         for binding in &declaration.bindings {
-            let symbol = self.symbols.len();
-            self.symbols.push(Symbol {
-                signature: format!("{prefix}{ty} ${}", binding.name),
-                documentation: None,
-                local_name: Some(binding.name.clone()),
-            });
-            self.occurrences.push(Occurrence {
-                span: binding.span,
-                symbol,
-            });
-            self.local_visibilities.push(LocalVisibility {
-                symbol,
-                start: declaration.span.end,
-                end: visibility_end,
-                depth,
-            });
-            if let Some(scope) = self.local_scopes.last_mut() {
-                scope.insert(binding.name.clone(), symbol);
-            }
+            self.declare_local_binding(
+                &binding.name,
+                binding.span,
+                format!("{prefix}{ty} ${}", binding.name),
+                declaration.span.end,
+            );
+        }
+    }
+
+    fn declare_parameter(&mut self, parameter: &Param, visibility_start: usize) {
+        let selection_span = find_variable_span(self.tokens, parameter.span, &parameter.name)
+            .unwrap_or(parameter.span);
+        self.declare_local_binding(
+            &parameter.name,
+            selection_span,
+            parameter_signature(parameter),
+            visibility_start,
+        );
+    }
+
+    fn declare_local_binding(
+        &mut self,
+        name: &str,
+        selection_span: Span,
+        signature: String,
+        visibility_start: usize,
+    ) {
+        let symbol =
+            self.add_declaration_symbol(selection_span, signature, None, SymbolKind::Variable);
+        self.symbols[symbol].local_name = Some(name.to_string());
+        self.local_visibilities.push(LocalVisibility {
+            symbol,
+            start: visibility_start,
+            end: self
+                .local_scope_ends
+                .last()
+                .copied()
+                .unwrap_or(self.text.len()),
+            depth: self.local_scopes.len(),
+        });
+        if let Some(scope) = self.local_scopes.last_mut() {
+            scope.insert(name.to_string(), symbol);
         }
     }
 
@@ -813,10 +938,7 @@ impl<'a> SnapshotBuilder<'a> {
         match expression {
             Expr::Variable { name, span } => {
                 if let Some(symbol) = self.resolve_local(name) {
-                    self.occurrences.push(Occurrence {
-                        span: *span,
-                        symbol,
-                    });
+                    self.record_reference(*span, symbol);
                 }
             }
             Expr::MethodCall {
@@ -844,10 +966,11 @@ impl<'a> SnapshotBuilder<'a> {
                     )
                 });
                 if let (Some(method_span), Some(hover)) = (method_span, builtin_hover) {
-                    self.add_symbol(
+                    self.add_reference_symbol(
                         method_span,
                         hover.signature,
                         Some(hover.documentation.to_string()),
+                        SymbolKind::Plain,
                     );
                     return;
                 }
@@ -864,10 +987,7 @@ impl<'a> SnapshotBuilder<'a> {
                 if let Some(class_name) = resolved_class {
                     if let Some(symbol) = self.resolve_method(class_name, method) {
                         if let Some(method_span) = method_span {
-                            self.occurrences.push(Occurrence {
-                                span: method_span,
-                                symbol,
-                            });
+                            self.record_reference(method_span, symbol);
                         }
                     }
                 }
@@ -885,10 +1005,7 @@ impl<'a> SnapshotBuilder<'a> {
                         return;
                     };
                     if let Some(name_span) = find_identifier_span(self.tokens, *span, name) {
-                        self.occurrences.push(Occurrence {
-                            span: name_span,
-                            symbol,
-                        });
+                        self.record_reference(name_span, symbol);
                     }
                 }
             }
@@ -917,10 +1034,11 @@ impl<'a> SnapshotBuilder<'a> {
                         string_companion_method(method),
                         self.member_name_span(Span::new(qualifier_span.end, span.end), method),
                     ) {
-                        self.add_symbol(
+                        self.add_reference_symbol(
                             method_span,
                             member.signature.to_string(),
                             Some(member.documentation.to_string()),
+                            SymbolKind::Plain,
                         );
                         return;
                     }
@@ -940,10 +1058,7 @@ impl<'a> SnapshotBuilder<'a> {
                         if let Some(method_span) =
                             self.member_name_span(Span::new(qualifier_span.end, span.end), method)
                         {
-                            self.occurrences.push(Occurrence {
-                                span: method_span,
-                                symbol,
-                            });
+                            self.record_reference(method_span, symbol);
                         }
                     }
                 }
@@ -961,10 +1076,7 @@ impl<'a> SnapshotBuilder<'a> {
                     if let Some(name_span) =
                         find_identifier_span(self.tokens, *span, &class_type.name)
                     {
-                        self.occurrences.push(Occurrence {
-                            span: name_span,
-                            symbol,
-                        });
+                        self.record_reference(name_span, symbol);
                     }
                 }
             }
@@ -992,13 +1104,14 @@ impl<'a> SnapshotBuilder<'a> {
                             .find(|info| info.id == enum_type.id)
                             .and_then(|info| info.backing_type)
                     }) {
-                        self.add_symbol(
+                        self.add_reference_symbol(
                             property_span,
                             format!("{} $value", enum_backing_name(backing_type)),
                             Some(
                                 "Readonly backing value associated with this enum case."
                                     .to_string(),
                             ),
+                            SymbolKind::Variable,
                         );
                     }
                     return;
@@ -1017,10 +1130,11 @@ impl<'a> SnapshotBuilder<'a> {
                         unreachable!("shared-reference receiver checked above");
                     };
                     if let Some(property_span) = property_span {
-                        self.add_symbol(
+                        self.add_reference_symbol(
                             property_span,
                             format!("{} $referencedValue", display_resolved_type(payload)),
                             Some("Readonly, allocation-free projection to the payload for resolving wrapper/member name collisions. It does not change either ownership count.".to_string()),
+                            SymbolKind::Variable,
                         );
                     }
                     return;
@@ -1044,10 +1158,11 @@ impl<'a> SnapshotBuilder<'a> {
                                     .map_or("unknown", |(ty, _)| ty)
                                     .to_string()
                             });
-                        self.add_symbol(
+                        self.add_reference_symbol(
                             property_span,
                             format!("{return_type} ${property}"),
                             Some(member.documentation.to_string()),
+                            SymbolKind::Variable,
                         );
                     }
                     return;
@@ -1059,10 +1174,11 @@ impl<'a> SnapshotBuilder<'a> {
                             .and_then(|info| info.expression_type(*span))
                             .map(display_resolved_type)
                             .unwrap_or_else(|| "unknown".to_string());
-                        self.add_symbol(
+                        self.add_reference_symbol(
                             property_span,
                             format!("{return_type} ${property}"),
                             Some(documentation.to_string()),
+                            SymbolKind::Variable,
                         );
                     }
                 }
@@ -1178,10 +1294,7 @@ impl<'a> SnapshotBuilder<'a> {
         let Some(enum_symbol) = self.enums.get(enum_name).copied() else {
             return false;
         };
-        self.occurrences.push(Occurrence {
-            span: qualifier_span,
-            symbol: enum_symbol,
-        });
+        self.record_reference(qualifier_span, enum_symbol);
         self.static_receivers.push(StaticReceiver {
             span: member_span,
             enum_name: enum_name.clone(),
@@ -1191,10 +1304,7 @@ impl<'a> SnapshotBuilder<'a> {
             .get(&(enum_name.clone(), member.to_string()))
             .copied()
         {
-            self.occurrences.push(Occurrence {
-                span: member_span,
-                symbol: case_symbol,
-            });
+            self.record_reference(member_span, case_symbol);
         }
         true
     }
@@ -1731,25 +1841,7 @@ fn function_signature(function: &FunctionDecl, container: Option<&str>) -> Strin
     let parameters = function
         .params
         .iter()
-        .map(|parameter| {
-            let mut parts = Vec::new();
-            if matches!(parameter.promoted_access, Some(MemberAccess::Internal)) {
-                parts.push("internal".to_string());
-            }
-            if parameter.take {
-                parts.push("take".to_string());
-            }
-            if parameter.writable {
-                parts.push("writable".to_string());
-            }
-            parts.push(parameter.ty.to_string());
-            parts.push(format!("${}", parameter.name));
-            let mut rendered = parts.join(" ");
-            if parameter.default.is_some() {
-                rendered.push_str(" = ...");
-            }
-            rendered
-        })
+        .map(parameter_signature)
         .collect::<Vec<_>>()
         .join(", ");
     let return_type = function
@@ -1759,6 +1851,26 @@ fn function_signature(function: &FunctionDecl, container: Option<&str>) -> Strin
         .unwrap_or_default();
 
     format!("{prefix}function {name}{type_parameters}({parameters}){return_type}")
+}
+
+fn parameter_signature(parameter: &Param) -> String {
+    let mut parts = Vec::new();
+    if matches!(parameter.promoted_access, Some(MemberAccess::Internal)) {
+        parts.push("internal".to_string());
+    }
+    if parameter.take {
+        parts.push("take".to_string());
+    }
+    if parameter.writable {
+        parts.push("writable".to_string());
+    }
+    parts.push(parameter.ty.to_string());
+    parts.push(format!("${}", parameter.name));
+    let mut rendered = parts.join(" ");
+    if parameter.default.is_some() {
+        rendered.push_str(" = ...");
+    }
+    rendered
 }
 
 fn type_parameter_signature(parameters: &[doriac::ast::TypeParamDecl]) -> String {
@@ -2565,8 +2677,8 @@ function main(): void
         assert!(completions.iter().any(|item| item.label == "$minimum"));
         assert!(completions.iter().any(|item| item.label == "$maximum"));
 
-        let left = snapshot.reference_spans_at_offset(source.find("$left").unwrap());
-        let right = snapshot.reference_spans_at_offset(source.find("$right").unwrap());
+        let left = snapshot.reference_spans_at_offset(source.find("$left").unwrap(), true);
+        let right = snapshot.reference_spans_at_offset(source.find("$right").unwrap(), true);
         assert_eq!(left.len(), 3, "declaration, assignment, and interpolation");
         assert_eq!(right.len(), 2, "declaration and interpolation");
         assert!(left
@@ -2592,11 +2704,107 @@ function main(): void
         let snapshot = AnalysisSnapshot::analyze("test.doria", source);
         assert!(snapshot.diagnostics().is_empty());
         let inner_declaration = source.match_indices("$value").nth(1).unwrap().0;
-        let inner = snapshot.reference_spans_at_offset(inner_declaration);
+        let inner = snapshot.reference_spans_at_offset(inner_declaration, true);
         assert_eq!(inner.len(), 2);
-        let outer = snapshot.reference_spans_at_offset(source.find("$value").unwrap());
+        let outer = snapshot.reference_spans_at_offset(source.find("$value").unwrap(), true);
         assert_eq!(outer.len(), 2);
         assert!(inner.iter().all(|span| !outer.contains(span)));
+    }
+
+    #[test]
+    fn function_and_method_parameters_share_the_scoped_binding_index() {
+        let source = r#"class Counter
+{
+    function add(writable int $amount): int
+    {
+        $amount += 1;
+        return $amount;
+    }
+}
+
+function greet(string $name): void
+{
+    echo $name;
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("test.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+
+        for (name, expected_references, signature) in [
+            ("$amount", 3, "writable int $amount"),
+            ("$name", 2, "string $name"),
+        ] {
+            let declaration = source.find(name).expect("parameter declaration");
+            let references = snapshot.reference_spans_at_offset(declaration, true);
+            assert_eq!(references.len(), expected_references);
+            assert_eq!(
+                snapshot.reference_spans_at_offset(declaration, false).len(),
+                expected_references - 1
+            );
+            assert!(references
+                .iter()
+                .all(|span| &source[span.start..span.end] == name));
+            assert!(snapshot
+                .hover_at_offset(declaration)
+                .expect("parameter hover")
+                .markdown
+                .contains(signature));
+            assert_eq!(
+                snapshot.rename_replacement_at_offset(declaration, "renamed"),
+                Some("$renamed".to_string())
+            );
+        }
+
+        let method_body = source.find("$amount +=").expect("method body");
+        assert!(snapshot
+            .local_completions_at_offset(method_body)
+            .iter()
+            .any(|completion| completion.label == "$amount"));
+        let function_body = source.rfind("echo $name").expect("function body");
+        assert!(snapshot
+            .local_completions_at_offset(function_body)
+            .iter()
+            .any(|completion| completion.label == "$name"));
+    }
+
+    #[test]
+    fn instance_completions_exclude_static_members() {
+        let source = r#"class Factory
+{
+    static int $instances = 0;
+    int $value = 0;
+
+    static function create(): Factory { return new Factory(); }
+    function run(): void {}
+}
+
+function main(): void
+{
+    let $factory = new Factory();
+    $factory->run();
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("test.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+        let offset = source.rfind("run").expect("instance method call");
+        let labels = snapshot
+            .member_completions_at_offset(offset)
+            .expect("instance completion context")
+            .into_iter()
+            .map(|completion| completion.label)
+            .collect::<HashSet<_>>();
+        assert!(labels.contains("run"));
+        assert!(labels.contains("value"));
+        assert!(!labels.contains("create"));
+        assert!(!labels.contains("instances"));
     }
 
     #[test]

@@ -483,10 +483,15 @@ impl Server {
         let Some((uri, document, offset)) = self.uri_document_and_offset(params) else {
             return json!([]);
         };
+        let include_declaration = params
+            .and_then(|params| params.get("context"))
+            .and_then(|context| context.get("includeDeclaration"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
         Value::Array(
             document
                 .analysis
-                .reference_spans_at_offset(offset)
+                .reference_spans_at_offset(offset, include_declaration)
                 .into_iter()
                 .map(|span| json!({ "uri": &uri, "range": span_to_range(&document.text, span) }))
                 .collect(),
@@ -503,14 +508,15 @@ impl Server {
         else {
             return Value::Null;
         };
-        let replacement = if new_name.starts_with('$') {
-            new_name.to_string()
-        } else {
-            format!("${new_name}")
+        let Some(replacement) = document
+            .analysis
+            .rename_replacement_at_offset(offset, new_name)
+        else {
+            return Value::Null;
         };
         let edits = document
             .analysis
-            .reference_spans_at_offset(offset)
+            .reference_spans_at_offset(offset, true)
             .into_iter()
             .map(|span| json!({ "range": span_to_range(&document.text, span), "newText": replacement }))
             .collect::<Vec<_>>();
@@ -2407,11 +2413,70 @@ function main(): void { Status::; }
             text[offset..].starts_with("$right")
         }));
 
+        let mut references_without_declaration = params.clone();
+        references_without_declaration["context"] = json!({ "includeDeclaration": false });
+        let references = server.references(Some(&references_without_declaration));
+        let locations = references.as_array().unwrap();
+        assert_eq!(locations.len(), 1);
+        let line = locations[0]["range"]["start"]["line"].as_u64().unwrap() as u32;
+        let character = locations[0]["range"]["start"]["character"]
+            .as_u64()
+            .unwrap() as u32;
+        assert_eq!(
+            position_to_byte_offset(text, line, character),
+            text.rfind("$right").unwrap()
+        );
+
         let mut rename_params = params;
         rename_params["newName"] = json!("renamed");
         let rename = server.rename(Some(&rename_params));
         let edits = rename["changes"][uri].as_array().unwrap();
         assert_eq!(edits.len(), 2);
         assert!(edits.iter().all(|edit| edit["newText"] == "$renamed"));
+    }
+
+    #[test]
+    fn rename_preserves_plain_symbol_spelling_for_classes_functions_and_methods() {
+        let uri = "file:///rename.doria";
+        let text = r#"class Widget
+{
+    function render(): void {}
+}
+
+function invoke(Widget $widget): void
+{
+    $widget->render();
+}
+
+function main(): void
+{
+    let $widget = new Widget();
+    invoke($widget);
+}
+"#;
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document::new(uri, text.to_string(), Some(1)),
+        );
+
+        for (offset, replacement, expected_edits) in [
+            (text.find("Widget").unwrap(), "Replacement", 2),
+            (text.find("invoke").unwrap(), "dispatch", 2),
+            (text.find("render").unwrap(), "display", 2),
+        ] {
+            let position = byte_offset_to_position(text, offset);
+            let rename = server.rename(Some(&json!({
+                "textDocument": { "uri": uri },
+                "position": {
+                    "line": position.line,
+                    "character": position.character,
+                },
+                "newName": replacement,
+            })));
+            let edits = rename["changes"][uri].as_array().unwrap();
+            assert_eq!(edits.len(), expected_edits);
+            assert!(edits.iter().all(|edit| edit["newText"] == replacement));
+        }
     }
 }
