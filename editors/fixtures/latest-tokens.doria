@@ -50,6 +50,10 @@ class Parser
     List<Token> $tokens;
     Dictionary<string, int> $counts;
     Set<string> $labels;
+    SortedDictionary<int, Token> $orderedTokens;
+    SortedSet<int> $orderedPositions;
+    PriorityQueue<int> $pendingPositions;
+    Deque<Token> $tokenWindow;
 
     function current(): Token
     {
@@ -116,6 +120,10 @@ function main(List<string> $args): void
 
     let $name = "Doria";
     let writable $count = 0;
+    let $left, $right = 0;
+    let writable $red, $green, $blue = 0;
+    int $minimum, $maximum = 0;
+    writable int $x, $y = 0;
     ?User $maybeUser = null;
 
     int8 $tiny = 1;
@@ -295,16 +303,45 @@ function share(
     echo "shared";
 }
 
-// Planned/future: enums and expression-position match.
+class SharedEditorPayload
+{
+    string $name = "editor";
+}
+
+function sharedProjection(): void
+{
+    let $reference = shared new SharedEditorPayload();
+    echo $reference->referencedValue->name;
+}
+
+// Enums: unit, backed, and payload cases.
+enum Status
+{
+    case Draft;
+    case Published;
+}
+
+enum Priority: int
+{
+    case Low = 1;
+    case High = 2;
+}
+
 enum Option
 {
     case Some(int $value);
     case None;
 }
 
+Option $some = Option::Some(42);
+Option $named = Option::Some(value: 43);
+?Option $maybe = $some;
+
+// Stage 28 grammar preparation: syntax is accepted while semantics remain pending.
 let $score = match ($option) {
-    Some($value) => $value,
-    None => 0,
+    Option::Some($value) => $value,
+    Option::None => 0,
+    default => -1,
 };
 
 // Planned/future: checked errors.

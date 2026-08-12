@@ -16,6 +16,14 @@ and static methods. Method references are resolved from compiler-produced expres
 types, including nullable receivers and `self`/`parent` static qualifiers. Hovering a
 declaration uses the same symbol record as hovering one of its references.
 
+Enum declarations use the same compiler-owned snapshot. Unit and backed cases show
+their nominal enum result type, payload cases show their declared field signature,
+payload fields show their resolved type, and the readonly `value` projection shows
+the backing type. Enum and payload-case documentation identifies whether the enum is
+a Copy or Move value without exposing private layout offsets. Static completion after
+`EnumType::` lists only cases declared by that resolved enum. The server does not infer
+cases from PascalCase spelling.
+
 If a document has semantic errors, declarations that still parse remain available.
 References are returned only when the compiler can resolve them safely. Existing
 keyword, primitive type, and compiler-intrinsic hover remains available as a lexical

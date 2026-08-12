@@ -24,13 +24,13 @@ if (
     $compilerPath !== null
     && !in_array(
         $target,
-        ['server', 'server-release', 'install-server', 'vscode', 'editors', 'all'],
+        ['server', 'server-release', 'install-server', 'vscode', 'intellij', 'editors', 'all'],
         true,
     )
 ) {
     usage_error(
         '--compiler-path is supported by the server, server-release, install-server, '
-            . 'vscode, editors, and all targets'
+            . 'vscode, intellij, editors, and all targets'
     );
 }
 
@@ -40,7 +40,7 @@ try {
         'server-release' => build_server($root, true, $compilerPath),
         'install-server' => install_server($root, $compilerPath),
         'vscode' => build_vscode($root, $compilerPath),
-        'intellij' => build_intellij($root),
+        'intellij' => build_intellij($root, $compilerPath),
         'editors' => build_editors($root, $compilerPath),
         'all' => build_all($root, $compilerPath),
         'help', '--help', '-h' => print_usage(),
@@ -241,13 +241,26 @@ function build_vscode(string $root, ?string $compilerPath = null): void
     require_artifact($vsix, 'VS Code extension');
 }
 
-function build_intellij(string $root): void
+function build_intellij(string $root, ?string $compilerPath = null): void
 {
     $editor = $root . '/editors/intellij/doria';
+    build_server($root, true, $compilerPath);
+    $server = server_artifact($root, true);
+    $bundle = $root . '/target/intellij-lsp-bundle';
+    $platform = intellij_platform_key();
+    $executable = PHP_OS_FAMILY === 'Windows' ? 'doria-lsp.exe' : 'doria-lsp';
+    remove_stale_artifacts($bundle . '/*/doria-lsp*');
+    install_executable($server, "{$bundle}/{$platform}/{$executable}");
+
     $gradle = PHP_OS_FAMILY === 'Windows' ? $editor . '/gradlew.bat' : $editor . '/gradlew';
+    $arguments = [
+        'buildPlugin',
+        '--no-daemon',
+        "-PdoriaLspBundleDir={$bundle}",
+    ];
     $command = PHP_OS_FAMILY === 'Windows'
-        ? windows_command($gradle, ['buildPlugin', '--no-daemon'])
-        : [$gradle, 'buildPlugin', '--no-daemon'];
+        ? windows_command($gradle, $arguments)
+        : [$gradle, ...$arguments];
 
     run_command($command, $editor);
 
@@ -264,7 +277,7 @@ function build_intellij(string $root): void
 function build_editors(string $root, ?string $compilerPath = null): void
 {
     build_vscode($root, $compilerPath);
-    build_intellij($root);
+    build_intellij($root, $compilerPath);
 }
 
 function build_all(string $root, ?string $compilerPath = null): void
@@ -309,6 +322,28 @@ function vscode_target(): string
     if ($platform !== 'linux' && $architecture === 'armhf') {
         throw new RuntimeException("VS Code packaging does not support {$platform}-armhf");
     }
+
+    return "{$platform}-{$architecture}";
+}
+
+function intellij_platform_key(): string
+{
+    $platform = match (PHP_OS_FAMILY) {
+        'Windows' => 'windows',
+        'Darwin' => 'macos',
+        'Linux' => 'linux',
+        default => throw new RuntimeException(
+            'IntelliJ packaging is unsupported on ' . PHP_OS_FAMILY
+        ),
+    };
+    $machine = strtolower(php_uname('m'));
+    $architecture = match ($machine) {
+        'x86_64', 'amd64' => 'x86_64',
+        'aarch64', 'arm64' => 'aarch64',
+        default => throw new RuntimeException(
+            "IntelliJ packaging is unsupported on architecture {$machine}"
+        ),
+    };
 
     return "{$platform}-{$architecture}";
 }
@@ -521,14 +556,14 @@ Targets:
   server-release  Build the optimized doria-lsp executable
   install-server  Build and install doria-lsp into Cargo's global bin directory
   vscode          Build and bundle doria-lsp, then package a platform-specific VSIX
-  intellij        Package the JetBrains plugin ZIP
+  intellij        Build doria-lsp and bundle it in the JetBrains plugin ZIP
   editors         Package both editor extensions
   all             Build the debug server and both editor extensions
   help            Show this help
 
 Options:
   --compiler-path Build or install doria-lsp against a local Doria repository or doriac crate.
-                  Supported by server, server-release, vscode, editors, and all.
+                  Supported by server, server-release, vscode, intellij, editors, and all.
                   This development mode leaves Cargo.toml and Cargo.lock unchanged.
 
 Every build target prints the absolute path of each generated artifact.

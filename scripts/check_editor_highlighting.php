@@ -29,13 +29,22 @@ $intellijFormatter = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/
 $intellijParser = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/psi/DoriaParserDefinition.kt';
 $intellijFormatterTest = $root . '/editors/intellij/doria/src/test/kotlin/dev/doria/intellij/codestyle/DoriaFormattingModelBuilderTest.kt';
 $intellijLspFiles = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/lsp/DoriaLspFiles.kt';
+$intellijLspResolver = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/lsp/DoriaLspServerPathResolver.kt';
 $intellijPluginXml = $root . '/editors/intellij/doria/src/main/resources/META-INF/plugin.xml';
 $intellijPluginIcon = $root . '/editors/intellij/doria/src/main/resources/META-INF/pluginIcon.svg';
 $intellijCreateClassAction = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/actions/DoriaCreateClassAction.kt';
 $doriaLogo = $root . '/res/images/doria-app-icon-warm.svg';
+$releaseWorkflow = $root . '/.github/workflows/release.yml';
 $lspServer = $root . '/server/src/lib.rs';
 $fixture = $root . '/editors/fixtures/latest-tokens.doria';
 $rejectedFixture = $root . '/editors/fixtures/rejected-syntax.doria';
+
+$groupedLocalForms = [
+    'let $left, $right = 0;',
+    'let writable $red, $green, $blue = 0;',
+    'int $minimum, $maximum = 0;',
+    'writable int $x, $y = 0;',
+];
 
 $acceptedKeywords = [
     'class',
@@ -103,9 +112,6 @@ $acceptedKeywords = [
 ];
 
 $plannedKeywords = [
-    'enum',
-    'case',
-    'match',
     'async',
     'await',
     'unsafe',
@@ -121,7 +127,6 @@ $plannedKeywords = [
     'finally',
     'when',
     'given',
-    'default',
     'do',
     'fn',
     'get',
@@ -187,6 +192,10 @@ $plannedTypes = [
     'List',
     'Dictionary',
     'Set',
+    'SortedDictionary',
+    'SortedSet',
+    'PriorityQueue',
+    'Deque',
 ];
 
 $rejectedTypes = [
@@ -215,6 +224,10 @@ $lspSupportedTypes = [
     'List',
     'Dictionary',
     'Set',
+    'SortedDictionary',
+    'SortedSet',
+    'PriorityQueue',
+    'Deque',
     'Bytes',
     'SharedReference',
     'WeakReference',
@@ -459,6 +472,47 @@ function check_vscode_language_server_packaging(): void
     );
 }
 
+function check_intellij_language_server_packaging(): void
+{
+    global $intellijBuildGradle, $intellijLspResolver, $releaseWorkflow, $buildScript;
+
+    $gradle = read_text($intellijBuildGradle);
+    $resolver = read_text($intellijLspResolver);
+    $release = read_text($releaseWorkflow);
+    $builder = read_text($buildScript);
+
+    foreach ([
+        'linux-x86_64',
+        'linux-aarch64',
+        'macos-x86_64',
+        'macos-aarch64',
+        'windows-x86_64',
+        'windows-aarch64',
+    ] as $platform) {
+        require_check(
+            str_contains($gradle, $platform) && str_contains($release, $platform),
+            "IntelliJ packaging is missing the {$platform} language server"
+        );
+    }
+    require_check(
+        str_contains($resolver, 'resolve("bin").resolve(platform).resolve(executable)')
+            && strpos($resolver, 'bundledCandidate(') < strpos($resolver, 'cargoBinCandidates('),
+        'IntelliJ must resolve its bundled compiler-matched server before Cargo and PATH fallbacks'
+    );
+    require_check(
+        str_contains($gradle, "into 'bin'")
+            && str_contains($gradle, 'requireUniversalDoriaLspBundle')
+            && str_contains($release, 'needs: server-binaries'),
+        'IntelliJ release packaging must fail unless all native language servers are bundled'
+    );
+    require_check(
+        str_contains($builder, 'build_intellij($root, $compilerPath)')
+            && str_contains($builder, 'intellij_platform_key()')
+            && str_contains($builder, '-PdoriaLspBundleDir='),
+        'The developer IntelliJ build must bundle the compiler-matched host server'
+    );
+}
+
 function check_vscode_language_configuration(): void
 {
     global $vscodeLanguageConfiguration;
@@ -539,6 +593,19 @@ function check_vscode_grammar(): void
         str_contains($grammarText, 'keyword.operator.type-test.doria'),
         'VS Code must scope the Stage 22 is operator as a type-test operator'
     );
+    require_check(
+        str_contains($grammarText, 'storage.modifier.mutability.doria') &&
+            str_contains($grammarText, 'variable.other.property.doria'),
+        'VS Code must scope shared construction as a modifier and referencedValue as a property'
+    );
+    foreach ([
+        'keyword.declaration.enum.doria',
+        'entity.name.type.enum.doria',
+        'keyword.declaration.enum.case.doria',
+        'constant.other.enum.case.doria',
+    ] as $scope) {
+        require_check(str_contains($grammarText, $scope), "VS Code grammar is missing accepted enum scope '{$scope}'");
+    }
     foreach ([
         'keyword.declaration.constant.doria',
         'constant.other.doria',
@@ -555,6 +622,7 @@ function check_vscode_grammar(): void
     $staticMethodPatterns = [];
     $classConstantPatterns = [];
     $staticPropertyPatterns = [];
+    $enumCasePatterns = [];
     foreach ($staticAccessorPatterns as $pattern) {
         $capture = $pattern['captures']['2']['name'] ?? null;
         if ($capture === 'entity.name.function.static.doria') {
@@ -563,8 +631,16 @@ function check_vscode_grammar(): void
             $classConstantPatterns[] = (string) ($pattern['match'] ?? '');
         } elseif ($capture === 'variable.other.property.static.doria') {
             $staticPropertyPatterns[] = (string) ($pattern['match'] ?? '');
+        } elseif ($capture === 'constant.other.enum.case.doria') {
+            $enumCasePatterns[] = (string) ($pattern['match'] ?? '');
         }
     }
+    require_check(
+        any_match($enumCasePatterns, static fn (string $match): bool => regex_matches($match, '::Draft')) &&
+            any_match($enumCasePatterns, static fn (string $match): bool => regex_matches($match, '::Circle(')) &&
+            !any_match($enumCasePatterns, static fn (string $match): bool => regex_matches($match, '::MAX_DEPTH')),
+        'VS Code must classify unit and payload enum-case access without treating every PascalCase identifier as a case'
+    );
     require_check(
         any_match($staticMethodPatterns, static fn (string $match): bool => regex_matches($match, '::nextId(')),
         'VS Code must classify a parenthesized :: member as a static method'
@@ -978,6 +1054,13 @@ function check_intellij_lexer(): void
             str_contains($lexerText, 'DoriaTokenTypes.ATTRIBUTE_ARGUMENT'),
         'IntelliJ lexer must emit dedicated attribute tokens'
     );
+    require_check(
+        str_contains($lexerText, 'isEnumDeclarationName() -> DoriaTokenTypes.ENUM_DECLARATION') &&
+            str_contains($lexerText, 'isEnumCaseName(text) -> DoriaTokenTypes.ENUM_CASE') &&
+            str_contains($intellijHighlightingText, 'DORIA_ENUM_DECLARATION') &&
+            str_contains($intellijHighlightingText, 'DORIA_ENUM_CASE'),
+        'IntelliJ must distinguish enum declarations and enum cases contextually'
+    );
     $lexerTestText = read_text($intellijLexerTest);
     require_check(
         str_contains($lexerTestText, 'testNestedAttributeBracketsDoNotCloseTheAttributeEarly') &&
@@ -1125,6 +1208,8 @@ function check_intellij_lexer(): void
         'DORIA_ATTRIBUTE_DELIMITER',
         'DORIA_ATTRIBUTE_NAME',
         'DORIA_ATTRIBUTE_ARGUMENT',
+        'DORIA_ENUM_DECLARATION',
+        'DORIA_ENUM_CASE',
         'DORIA_TYPE_TEST_OPERATOR',
         'DORIA_LOGICAL_OPERATOR',
         'DORIA_PROPERTY',
@@ -1320,7 +1405,7 @@ function check_editor_fixture_diagnostics_are_skipped(): void
 
 function check_fixture(): void
 {
-    global $fixture, $rejectedFixture, $strictComparison, $rejectedKeywords;
+    global $fixture, $rejectedFixture, $strictComparison, $rejectedKeywords, $groupedLocalForms;
 
     $fixtureText = read_text($fixture);
     $requiredSnippets = [
@@ -1342,8 +1427,14 @@ function check_fixture(): void
         'override function save',
         'throws StorageError',
         'enum Option',
+        'enum Status',
+        'enum Priority: int',
         'case Some',
+        'case Draft',
+        'case Low = 1;',
         'match ($option)',
+        'Option::Some($value)',
+        'default => -1',
         'unsafe',
         'extern',
         '#[PhpExport]',
@@ -1396,9 +1487,17 @@ function check_fixture(): void
         'let $runtimeSizedFlags = [true; $args->count];',
         '$message->tenantId',
         '$repository->findById($id)',
+        'let $reference = shared new SharedEditorPayload();',
+        '$reference->referencedValue->name',
     ];
     foreach ($requiredSnippets as $snippet) {
         require_check(str_contains($fixtureText, $snippet), 'shared editor fixture is missing ' . $snippet);
+    }
+    foreach ($groupedLocalForms as $snippet) {
+        require_check(
+            str_contains($fixtureText, $snippet),
+            'shared editor fixture is missing grouped local form ' . $snippet,
+        );
     }
     require_check(
         !str_contains($fixtureText, 'str_starts_with('),
@@ -1480,6 +1579,7 @@ function main(): int
 {
     check_vscode_package();
     check_vscode_language_server_packaging();
+    check_intellij_language_server_packaging();
     check_vscode_language_configuration();
     check_vscode_grammar();
     check_intellij_lexer();

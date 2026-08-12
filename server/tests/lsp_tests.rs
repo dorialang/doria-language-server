@@ -58,6 +58,87 @@ $count = 1;
 }
 
 #[test]
+fn grouped_local_declarations_use_compiler_diagnostics_without_false_positives() {
+    let accepted = diagnostics_for_document(
+        "file:///grouped.doria",
+        r#"function main(): void
+{
+    let $left, $right = 1;
+    let writable $red, $blue = 2;
+    int $minimum, $maximum = 3;
+    writable string $first, $second = "value";
+    echo "{$left}:{$right}:{$red}:{$blue}:{$minimum}:{$maximum}:{$first}:{$second}";
+}
+"#,
+    );
+    assert!(accepted.is_empty(), "{accepted:#?}");
+
+    let duplicate = diagnostics_for_document(
+        "file:///duplicate.doria",
+        "function main(): void { let $value, $value = 1; }",
+    );
+    assert!(duplicate
+        .iter()
+        .any(|diagnostic| diagnostic["code"] == "E0103"));
+
+    let owned = diagnostics_for_document(
+        "file:///owned.doria",
+        "class Token {} function main(): void { let $left, $right = new Token(); }",
+    );
+    assert!(owned.iter().any(|diagnostic| diagnostic["code"] == "E0551"));
+}
+
+#[test]
+fn accepts_zero_argument_read_line_without_false_diagnostics() {
+    let diagnostics = diagnostics_for_document(
+        "file:///input.doria",
+        "function main(): void { let $line = read_line(); }",
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn accepts_prompted_read_line_without_false_diagnostics() {
+    let diagnostics = diagnostics_for_document(
+        "file:///input.doria",
+        "function main(): void { let $line = read_line(\"Name: \"); }",
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn publishes_the_compiler_diagnostic_for_a_non_string_prompt() {
+    let diagnostics = diagnostics_for_document(
+        "file:///input.doria",
+        "function main(): void { let $line = read_line(1); }",
+    );
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0453")
+        .expect("the compiler prompt-type diagnostic should be published");
+    assert!(diagnostic["message"]
+        .as_str()
+        .expect("diagnostic message")
+        .contains("expects `string`"));
+}
+
+#[test]
+fn preserves_php_readline_migration_guidance() {
+    let diagnostics = diagnostics_for_document(
+        "file:///input.doria",
+        "function main(): void { let $line = readline(); }",
+    );
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0461")
+        .expect("the PHP spelling diagnostic should be published");
+    assert!(diagnostic["message"]
+        .as_str()
+        .expect("diagnostic message")
+        .contains("read_line"));
+}
+
+#[test]
 fn exposes_literal_brace_fix_data_at_original_source_span() {
     let text = "echo \"literal {word}\";";
     let diagnostics = diagnostics_for_document("file:///brace.doria", text);
@@ -111,6 +192,245 @@ fn exposes_writable_constructor_removal_as_a_preferred_code_action() {
         action["edit"]["changes"][uri][0]["range"]["start"]["character"],
         text.find("writable").expect("writable modifier")
     );
+}
+
+#[test]
+fn exposes_collection_diagnostic_fixes_as_utf16_safe_code_actions() {
+    let cases = [
+        (
+            "has",
+            r#"function main(): void { echo "😀"; Dictionary<string, int> $values = []; echo $values->has("alpha"); }"#,
+            "containsKey",
+        ),
+        (
+            "isEmpty",
+            r#"function main(): void { echo "😀"; List<int> $values = []; echo $values->isEmpty(); }"#,
+            "",
+        ),
+        (
+            "List::from",
+            r#"function main(): void { echo "😀"; List<int> $values = List::from([1, 2]); }"#,
+            "[1, 2]",
+        ),
+        (
+            "Dictionary::from",
+            r#"function main(): void { echo "😀"; Dictionary<string, int> $values = Dictionary::from(["alpha" => 1]); }"#,
+            "[\"alpha\" => 1]",
+        ),
+    ];
+
+    for (label, text, replacement) in cases {
+        let uri = format!("file:///collection-{label}.doria");
+        let actions = code_actions_for_document(&uri, text);
+        assert_eq!(actions.len(), 1, "{label}: {actions:#?}");
+        assert_eq!(actions[0]["kind"], "quickfix");
+        assert_eq!(actions[0]["isPreferred"], true);
+
+        let edits = actions[0]["edit"]["changes"][&uri]
+            .as_array()
+            .expect("quick fix edits");
+        assert!(edits.iter().any(|edit| edit["newText"] == replacement));
+
+        let first_edit = &edits[0];
+        let byte_start = match label {
+            "has" => text.find("has").unwrap(),
+            "isEmpty" => text.find("isEmpty").unwrap() + "isEmpty".len(),
+            "List::from" => text.find("List::from").unwrap(),
+            "Dictionary::from" => text.rfind("Dictionary::from").unwrap(),
+            _ => unreachable!(),
+        };
+        let expected = byte_offset_to_position(text, byte_start);
+        assert_eq!(first_edit["range"]["start"]["line"], expected.line);
+        assert_eq!(
+            first_edit["range"]["start"]["character"], expected.character,
+            "{label} must convert compiler byte offsets to UTF-16"
+        );
+    }
+}
+
+#[test]
+fn accepts_the_complete_decision_0113_surface_after_non_ascii_text() {
+    let source = r#"function main(): void
+{
+    echo "😀";
+    writable List<int> $list = [1];
+    let $position = $list->indexOf(1);
+    $list->remove(1);
+    $list->clear();
+    writable Dictionary<string, int> $dictionary = ["one" => 1];
+    echo $dictionary->containsValue(1);
+    $dictionary->clear();
+    writable Set<int> $set = Set::from([1]);
+    let $first = $set->first;
+    let $last = $set->last;
+    $set->clear();
+    writable SortedDictionary<int, int> $sortedDictionary = SortedDictionary::from([1 => 1]);
+    echo $sortedDictionary->containsValue(1);
+    $sortedDictionary->clear();
+    writable SortedSet<int> $sortedSet = SortedSet::from([1]);
+    let $sortedFirst = $sortedSet->first;
+    let $sortedLast = $sortedSet->last;
+    $sortedSet->clear();
+    writable PriorityQueue<int> $queue = PriorityQueue::from([1]);
+    $queue->clear();
+    writable Deque<int> $deque = Deque::from([1]);
+    $deque->clear();
+}
+"#;
+    let diagnostics = diagnostics_for_document("file:///decision-0113.doria", source);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn preserves_the_compiler_readonly_clear_diagnostic_after_non_ascii_text() {
+    let source =
+        "function main(): void { echo \"😀\"; List<int> $values = [1]; $values->clear(); }";
+    let diagnostics = diagnostics_for_document("file:///readonly-clear.doria", source);
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0201")
+        .unwrap_or_else(|| panic!("missing readonly clear diagnostic: {diagnostics:#?}"));
+    let expected = byte_offset_to_position(source, source.find("$values->clear").unwrap());
+    assert_eq!(diagnostic["range"]["start"]["line"], expected.line);
+    assert_eq!(
+        diagnostic["range"]["start"]["character"],
+        expected.character
+    );
+}
+
+#[test]
+fn payload_enum_execution_and_match_boundary_come_from_the_compiler() {
+    let accepted = diagnostics_for_document(
+        "file:///enums.doria",
+        r#"enum Status { case Draft; }
+enum Priority: int { case High = 2; }
+enum Transport: string { case Rail = "rail"; }
+function main(): void
+{
+    Status $status = Status::Draft;
+    Priority $priority = Priority::High;
+    Transport $transport = Transport::Rail;
+    echo "{$status == Status::Draft}:{$priority->value}:{$transport->value}";
+}
+"#,
+    );
+    assert!(accepted.is_empty(), "{accepted:#?}");
+
+    let payload = diagnostics_for_document(
+        "file:///payload-enum.doria",
+        "enum Shape { case Circle(float $radius); } Shape $shape = Shape::Circle(2.5);",
+    );
+    assert!(payload.is_empty(), "{payload:#?}");
+
+    let matching = diagnostics_for_document(
+        "file:///match.doria",
+        "enum Status { case Draft; } let $label = match (Status::Draft) { Status::Draft => 1, default => 0, };",
+    );
+    assert_eq!(matching.len(), 1, "{matching:#?}");
+    assert_eq!(matching[0]["code"], "E0576");
+}
+
+#[test]
+fn enum_case_fixes_remain_machine_applicable_and_utf16_safe() {
+    let uri = "file:///enum-fixes.doria";
+    let source = r#"enum Status { case Draft; }
+function main(): void { echo "😀"; Status $status = Status::Draft(); }
+"#;
+    let diagnostics = diagnostics_for_document(uri, source);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+    assert_eq!(diagnostics[0]["code"], "E0575");
+
+    let actions = code_actions_for_document(uri, source);
+    assert_eq!(actions.len(), 1, "{actions:#?}");
+    let edit = &actions[0]["edit"]["changes"][uri][0];
+    assert_eq!(edit["newText"], "");
+    let parentheses = source.rfind("()").expect("unit-case parentheses");
+    let expected = byte_offset_to_position(source, parentheses);
+    assert_eq!(edit["range"]["start"]["line"], expected.line);
+    assert_eq!(edit["range"]["start"]["character"], expected.character);
+
+    let suggestion_uri = "file:///enum-suggestion.doria";
+    let suggestion_source = "enum Status { case Draft; } Status $status = Status::Draf;";
+    let suggestion = code_actions_for_document(suggestion_uri, suggestion_source);
+    assert_eq!(suggestion.len(), 1, "{suggestion:#?}");
+    assert_eq!(
+        suggestion[0]["edit"]["changes"][suggestion_uri][0]["newText"],
+        "Draft"
+    );
+}
+
+#[test]
+fn payload_enum_diagnostics_keep_compiler_codes_and_utf16_ranges() {
+    let cases = [
+        (
+            "construction",
+            r#"enum Shape { case Circle(float $radius); }
+function main(): void { echo "😀"; Shape $shape = Shape::Circle("wide"); }"#,
+            "E0408",
+            "\"wide\"",
+        ),
+        (
+            "named argument",
+            r#"enum Coordinate { case Point(int $x, int $y); }
+function main(): void { echo "😀"; let $point = Coordinate::Point(z: 1, y: 2); }"#,
+            "E0516",
+            "z:",
+        ),
+        (
+            "recursive layout",
+            r#"echo "😀"; enum Node { case Next(Node $next); }"#,
+            "E0581",
+            "Node $next",
+        ),
+        (
+            "move",
+            r#"class Document {}
+enum LoadResult { case Loaded(Document $document); }
+function main(): void { echo "😀"; Document $document = new Document(); LoadResult $result = LoadResult::Loaded($document); let $again = $document; }"#,
+            "E0470",
+            "$document; }",
+        ),
+        (
+            "equality",
+            r#"enum Bucket { case Values(List<int> $values); }
+function main(): void { echo "😀"; Bucket $left = Bucket::Values([1]); Bucket $right = Bucket::Values([1]); bool $same = $left == $right; }"#,
+            "E0584",
+            "$left ==",
+        ),
+        (
+            "match",
+            r#"enum Status { case Draft; }
+function main(): void { echo "😀"; let $label = match (Status::Draft) { Status::Draft => 1, default => 0, }; }"#,
+            "E0576",
+            "match",
+        ),
+    ];
+
+    for (label, source, code, needle) in cases {
+        let diagnostics = diagnostics_for_document(&format!("file:///{label}.doria"), source);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic["code"] == code)
+            .unwrap_or_else(|| panic!("missing {code} for {label}: {diagnostics:#?}"));
+        let expected = byte_offset_to_position(source, source.find(needle).expect("range needle"));
+        assert_eq!(
+            diagnostic["range"]["start"]["line"], expected.line,
+            "{label}"
+        );
+        assert_eq!(
+            diagnostic["range"]["start"]["character"], expected.character,
+            "{label} must convert compiler byte offsets to UTF-16"
+        );
+    }
+}
+
+#[test]
+fn accepts_completed_decision_0113_clear_without_false_diagnostics() {
+    let source = "function main(): void { writable List<int> $v = []; $v->clear(); }";
+    let uri = "file:///completed-collection.doria";
+    let diagnostics = diagnostics_for_document(uri, source);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    assert!(code_actions_for_document(uri, source).is_empty());
 }
 
 #[test]
@@ -394,6 +714,33 @@ let $bad = $counter->share();
             "{uri} should report {expected_code}: {diagnostics:#?}"
         );
     }
+}
+
+#[test]
+fn shared_operation_diagnostics_preserve_utf16_ranges_after_emoji() {
+    let source = r#"class Counter {}
+function main(): void
+{
+    echo "😀";
+    let $counter = new WritableSharedReference(new Counter());
+    let $moved = $counter;
+    let $bad = $counter->share();
+}
+"#;
+    let diagnostics = diagnostics_for_document("file:///utf16-shared.doria", source);
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0470")
+        .expect("use-after-move diagnostic");
+    let moved_use = source
+        .rfind("$counter->share")
+        .expect("moved shared operation");
+    let expected = byte_offset_to_position(source, moved_use);
+    assert_eq!(diagnostic["range"]["start"]["line"], expected.line);
+    assert_eq!(
+        diagnostic["range"]["start"]["character"],
+        expected.character
+    );
 }
 
 #[test]

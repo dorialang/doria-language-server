@@ -52,7 +52,7 @@ php scripts/build.php <target>
 | `server-release` | Optimized `doria-lsp` executable |
 | `install-server` | Install `doria-lsp` into Cargo's global bin directory |
 | `vscode` | Platform-specific `dist/doria-language-support.vsix` with bundled `doria-lsp` |
-| `intellij` | Installable `doria-intellij-plugin-<version>.zip` under `editors/intellij/doria/build/distributions/` |
+| `intellij` | Installable JetBrains ZIP with a compiler-matched `doria-lsp` under `editors/intellij/doria/build/distributions/` |
 | `editors` | Both editor packages |
 | `all` | Debug server and both editor packages |
 
@@ -106,21 +106,26 @@ Every target prints the absolute path of each artifact it creates. PHP and Rust/
 
    Add that `export` line to your shell startup file to keep it across terminals. On Windows, add `%USERPROFILE%\.cargo\bin` through **System Properties → Environment Variables → Path**. Restart the IDE after changing `PATH`.
 
-For GUI-launched IDEs that do not inherit your shell environment, set the editor's explicit Doria language-server path or set `DORIA_LSP_PATH` to the absolute executable path. In VS Code this is the `doria.languageServer.path` setting; in JetBrains IDEs use **Settings → Languages & Frameworks → Doria → Language server path**. An explicit path is the most deterministic development setup.
+For local compiler or language-server development, an explicit override remains
+available. In VS Code this is the `doria.languageServer.path` setting; in
+JetBrains IDEs use **Settings → Languages & Frameworks → Doria → Language server
+path**, or set `DORIA_LSP_PATH`. Released packages need none of these settings.
 
-CI builds and tests the server on Linux, macOS, and Windows. GitHub release workflows build native archives and matching platform-specific VSIX packages for all three operating systems on x64 and arm64, plus the IntelliJ Platform plugin.
+CI builds and tests the server on Linux, macOS, and Windows. GitHub release workflows build native archives and matching platform-specific VSIX packages for all three operating systems on x64 and arm64. The IntelliJ Platform plugin carries those six server binaries in one universal ZIP and selects the current host at runtime.
 
 Both editor clients resolve the server in this order:
 
-1. The editor's explicit Doria language-server setting.
-2. `DORIA_LSP_PATH`.
-3. The platform-matched `doria-lsp` bundled with the editor package, when present.
+1. The editor's explicit Doria language-server setting (development override).
+2. `DORIA_LSP_PATH` (development override).
+3. The platform-matched `doria-lsp` bundled with the editor package.
 4. Cargo's installed bin directory.
 5. `doria-lsp` on `PATH`.
 
-Repository-local `target/debug` binaries are used only when selected explicitly.
-This prevents an old or partially rebuilt workspace artifact from silently
-becoming the IDE's language server.
+Normal installations therefore require no compiler selection, Cargo installation,
+PATH setup, or language-server configuration. Repository-local `target/debug`
+binaries are used only when selected explicitly. This prevents an old or
+partially rebuilt workspace artifact from silently becoming the IDE's language
+server.
 
 ## Development
 
@@ -144,13 +149,15 @@ cd editors/intellij/doria
 
 The packaged plugin is the single `doria-intellij-plugin-<version>.zip` written
 to `editors/intellij/doria/build/distributions/`. JARs under `build/libs/` are
-Gradle intermediates and are not installed through the IDE.
+Gradle intermediates and are not installed through the IDE. A local build bundles
+the current host's server; the release workflow assembles all six supported hosts
+into the universal Marketplace artifact.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow, [docs/architecture.md](docs/architecture.md) for component boundaries, and [docs/releasing.md](docs/releasing.md) for CalVer release coordination.
 
-Semantic hover uses compiler-resolved symbols for same-file classes, free functions,
-instance methods, and static methods. It displays callable signatures and attached
-PHPDoc consistently in VS Code and JetBrains IDEs. See
+Semantic hover uses compiler-resolved symbols for same-file classes, enums and enum
+cases, free functions, instance methods, and static methods. It displays signatures
+and attached PHPDoc consistently in VS Code and JetBrains IDEs. See
 [docs/semantic-hover.md](docs/semantic-hover.md) for the behavior contract and
 planned workspace-wide extensions.
 

@@ -118,11 +118,17 @@ The plugin looks for `doria-lsp` in this order:
 ```text
 1. Doria settings: Language server path
 2. DORIA_LSP_PATH environment variable
-3. Cargo's installed bin directory
-4. doria-lsp on PATH
+3. The version-matched native server bundled with the plugin
+4. Cargo's installed bin directory (development fallback)
+5. doria-lsp on PATH (development fallback)
 ```
 
 On Windows, the executable name is `doria-lsp.exe`.
+
+Normal plugin installations use the bundled server automatically. The settings,
+environment, Cargo, and PATH forms are retained for contributors testing a local
+compiler or language-server build; end users do not configure a compiler or
+language-server path.
 
 The settings path also accepts `$PROJECT_DIR$`, for example:
 

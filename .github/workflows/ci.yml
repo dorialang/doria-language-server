@@ -116,6 +116,11 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
       - name: Build and test IntelliJ plugin
         working-directory: editors/intellij/doria
         run: ./gradlew test buildPlugin --no-daemon

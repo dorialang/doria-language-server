@@ -27,6 +27,8 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
         DoriaTokenTypes.ATTRIBUTE_DELIMITER -> ATTRIBUTE_DELIMITER_KEYS
         DoriaTokenTypes.ATTRIBUTE_NAME -> ATTRIBUTE_NAME_KEYS
         DoriaTokenTypes.ATTRIBUTE_ARGUMENT -> ATTRIBUTE_ARGUMENT_KEYS
+        DoriaTokenTypes.ENUM_DECLARATION -> ENUM_DECLARATION_KEYS
+        DoriaTokenTypes.ENUM_CASE -> ENUM_CASE_KEYS
         DoriaTokenTypes.FUNCTION_DECLARATION -> FUNCTION_DECLARATION_KEYS
         DoriaTokenTypes.FUNCTION_CALL -> FUNCTION_CALL_KEYS
         DoriaTokenTypes.METHOD_CALL -> METHOD_CALL_KEYS
@@ -120,6 +122,14 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
         val ATTRIBUTE_ARGUMENT: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
             "DORIA_ATTRIBUTE_ARGUMENT",
             DefaultLanguageHighlighterColors.PARAMETER,
+        )
+        val ENUM_DECLARATION: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
+            "DORIA_ENUM_DECLARATION",
+            DefaultLanguageHighlighterColors.CLASS_NAME,
+        )
+        val ENUM_CASE: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
+            "DORIA_ENUM_CASE",
+            DefaultLanguageHighlighterColors.CONSTANT,
         )
         val FUNCTION_DECLARATION: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
             "DORIA_FUNCTION_DECLARATION",
@@ -239,6 +249,8 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
         private val ATTRIBUTE_DELIMITER_KEYS = arrayOf(ATTRIBUTE_DELIMITER)
         private val ATTRIBUTE_NAME_KEYS = arrayOf(ATTRIBUTE_NAME)
         private val ATTRIBUTE_ARGUMENT_KEYS = arrayOf(ATTRIBUTE_ARGUMENT)
+        private val ENUM_DECLARATION_KEYS = arrayOf(ENUM_DECLARATION)
+        private val ENUM_CASE_KEYS = arrayOf(ENUM_CASE)
         private val FUNCTION_DECLARATION_KEYS = arrayOf(FUNCTION_DECLARATION)
         private val FUNCTION_CALL_KEYS = arrayOf(FUNCTION_CALL)
         private val METHOD_CALL_KEYS = arrayOf(METHOD_CALL)

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "repository": "dorialang/doria-language-server",
+  "pins": [
+    {
+      "id": "doriac-library",
+      "repository": "dorialang/doria",
+      "publishedRefs": ["refs/heads/main", "refs/heads/develop"],
+      "source": {
+        "file": "Cargo.toml",
+        "format": "regex",
+        "pattern": "/doriac\\s*=\\s*\\{[^}]*\\brev\\s*=\\s*\"([0-9a-f]{40})\"/"
+      },
+      "purpose": "Compiler revision the language server builds its analysis against; hover, diagnostics, and completion must match the compiler a user compiles with."
+    },
+    {
+      "id": "tree-sitter-doria-grammar",
+      "repository": "dorialang/tree-sitter-doria",
+      "publishedRefs": ["refs/heads/main"],
+      "placeholder": true,
+      "source": {
+        "file": "editors/zed/doria/extension.toml",
+        "format": "regex",
+        "pattern": "/\\[grammars\\.doria\\][^\\[]*?\\brev\\s*=\\s*\"([0-9a-f]{40})\"/s"
+      },
+      "purpose": "Zed grammar revision. The grammar repository does not exist yet, so this pin is deliberately unresolved and the extension does not load."
+    }
+  ]
+}

@@ -486,10 +486,13 @@ class DoriaLexer : LexerBase() {
 
             else -> when {
                 isFunctionDeclarationName() -> DoriaTokenTypes.FUNCTION_DECLARATION
+                isEnumDeclarationName() -> DoriaTokenTypes.ENUM_DECLARATION
+                isEnumCaseName(text) -> DoriaTokenTypes.ENUM_CASE
                 isConstructorTypeName() -> DoriaTokenTypes.TYPE_NAME
                 isCallName() -> callableTokenType()
                 isConstantName(text) -> DoriaTokenTypes.CLASS_CONSTANT
                 isStaticPropertyName(text) -> DoriaTokenTypes.STATIC_PROPERTY
+                previousAccessor() == "->" -> DoriaTokenTypes.PROPERTY
                 text.first().isUpperCase() -> DoriaTokenTypes.TYPE_NAME
                 else -> DoriaTokenTypes.IDENTIFIER
             }
@@ -598,6 +601,12 @@ class DoriaLexer : LexerBase() {
 
     private fun isFunctionDeclarationName(): Boolean =
         nextNonWhitespace(tokenEnd) in setOf('(', '<') && previousIdentifier() == "function"
+
+    private fun isEnumDeclarationName(): Boolean = previousIdentifier() == "enum"
+
+    private fun isEnumCaseName(text: String): Boolean =
+        (previousIdentifier() == "case" && text.first().isUpperCase()) ||
+            (previousAccessor() == "::" && ENUM_CASE_REFERENCE_NAME.matches(text))
 
     private fun isCallName(): Boolean = nextNonWhitespace(tokenEnd) == '('
 
@@ -960,6 +969,7 @@ class DoriaLexer : LexerBase() {
         private val MODIFIERS = setOf("take", "writable", "readonly", "internal", "static", "shared")
 
         private val CONSTANT_REFERENCE_NAME = Regex("[A-Z][A-Z0-9_]+")
+        private val ENUM_CASE_REFERENCE_NAME = Regex("[A-Z][A-Za-z0-9]*[a-z][A-Za-z0-9]*")
 
         private val CONSTANT_DECLARATION_PREFIX =
             Regex("\\s*(?:internal\\s+)?const(?:\\s+\\??[A-Za-z_][A-Za-z0-9_]*(?:<[^>]+>)?(?:\\[\\])*)?\\s+")
@@ -992,6 +1002,10 @@ class DoriaLexer : LexerBase() {
             "List",
             "Dictionary",
             "Set",
+            "SortedDictionary",
+            "SortedSet",
+            "PriorityQueue",
+            "Deque",
             "SharedReference",
             "WeakReference",
             "WritableSharedReference",
