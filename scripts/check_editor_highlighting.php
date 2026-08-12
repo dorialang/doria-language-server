@@ -1489,6 +1489,9 @@ function check_fixture(): void
         '$repository->findById($id)',
         'let $reference = shared new SharedEditorPayload();',
         '$reference->referencedValue->name',
+        'let $score = match ($option)',
+        'Option::Some($value) => $value',
+        'Option::None => 0',
     ];
     foreach ($requiredSnippets as $snippet) {
         require_check(str_contains($fixtureText, $snippet), 'shared editor fixture is missing ' . $snippet);

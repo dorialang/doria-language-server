@@ -96,7 +96,8 @@ class DoriaLexerTest : TestCase() {
             "enum Status { case Draft; case Ready(int \$code); } " +
                 "Status \$status = Status::Draft; " +
                 "Status \$ready = Status::Ready(code: 42); " +
-                "let \$label = match (\$status) { Status::Draft => 1, default => 0, };",
+                "let \$label = match (\$status) { " +
+                "Status::Ready(\$value) => \$value, Status::Draft => 1, default => 0, };",
         )
 
         assertEquals(DoriaTokenTypes.ENUM_DECLARATION, tokens.first { it.text == "Status" }.type)
@@ -108,6 +109,9 @@ class DoriaLexerTest : TestCase() {
         }
         for (keyword in listOf("enum", "case", "match", "default")) {
             assertEquals(DoriaTokenTypes.KEYWORD, tokens.first { it.text == keyword }.type)
+        }
+        for (binding in tokens.filter { it.text == "\$value" }) {
+            assertEquals(DoriaTokenTypes.VARIABLE, binding.type)
         }
         assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
     }

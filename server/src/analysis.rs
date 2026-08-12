@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use doriac::ast::{
     Block, ClassDecl, ClassMember, ElseBranch, EnumDecl, Expr, ForIncrement, ForInitializer,
-    FunctionDecl, Item, MatchPattern, MemberAccess, Param, Program, StaticQualifier, Stmt, VarDecl,
+    FunctionDecl, Item, MatchOrigin, MatchPattern, MemberAccess, Param, Program, StaticQualifier,
+    Stmt, VarDecl,
 };
 use doriac::diagnostics::Diagnostic;
 use doriac::enums::{EnumBackingType, EnumBackingValue};
@@ -328,6 +329,20 @@ impl AnalysisSnapshot {
         spans
     }
 
+    pub(crate) fn semantic_token_spans(&self) -> Vec<(Span, u32)> {
+        let mut spans = self
+            .occurrences
+            .iter()
+            .filter_map(|occurrence| {
+                let symbol = self.symbols.get(occurrence.symbol)?;
+                semantic_token_type(symbol).map(|token_type| (occurrence.span, token_type))
+            })
+            .collect::<Vec<_>>();
+        spans.sort_by_key(|(span, _)| (span.start, span.end));
+        spans.dedup_by_key(|(span, _)| (span.start, span.end));
+        spans
+    }
+
     pub(crate) fn rename_replacement_at_offset(
         &self,
         offset: usize,
@@ -348,6 +363,29 @@ impl AnalysisSnapshot {
             .min_by_key(|occurrence| occurrence.span.end.saturating_sub(occurrence.span.start))
             .map(|occurrence| occurrence.symbol)
     }
+}
+
+fn semantic_token_type(symbol: &Symbol) -> Option<u32> {
+    if symbol.kind == SymbolKind::Variable {
+        return Some(0);
+    }
+    if symbol.signature.starts_with("enum ")
+        || symbol.signature.starts_with("class ")
+        || symbol.signature.starts_with("interface ")
+        || symbol.signature.starts_with("trait ")
+    {
+        return Some(1);
+    }
+    if symbol.signature.contains("::") {
+        return Some(2);
+    }
+    if symbol.signature.starts_with("function ") {
+        return Some(3);
+    }
+    if symbol.signature.starts_with("match (...): ") {
+        return Some(4);
+    }
+    None
 }
 
 struct SnapshotBuilder<'a> {
@@ -1229,10 +1267,32 @@ impl<'a> SnapshotBuilder<'a> {
                 self.visit_expr(index, current_class, parent_class);
             }
             Expr::Match {
-                scrutinee, arms, ..
+                scrutinee,
+                arms,
+                origin,
+                span,
             } => {
                 self.visit_expr(scrutinee, current_class, parent_class);
-                for arm in arms {
+                let match_info = self
+                    .semantic_info
+                    .and_then(|info| info.matches.get(&(span.start, span.end)))
+                    .cloned();
+                if *origin == MatchOrigin::Match {
+                    if let (Some(info), Some(keyword)) = (
+                        match_info.as_ref(),
+                        tokens_in_span(self.tokens, *span)
+                            .find(|token| matches!(token.kind, TokenKind::Match)),
+                    ) {
+                        self.add_reference_symbol(
+                            keyword.span,
+                            format!("match (...): {}", display_resolved_type(&info.result_type)),
+                            Some("Exhaustive match expression result.".to_string()),
+                            SymbolKind::Plain,
+                        );
+                    }
+                }
+                for (index, arm) in arms.iter().enumerate() {
+                    self.push_local_scope(arm.span.end);
                     match &arm.pattern {
                         MatchPattern::Expression(pattern) => {
                             self.visit_expr(pattern, current_class, parent_class)
@@ -1242,6 +1302,7 @@ impl<'a> SnapshotBuilder<'a> {
                             qualifier_span,
                             case,
                             case_span,
+                            bindings,
                             ..
                         } => {
                             self.record_enum_static_reference(
@@ -1250,16 +1311,71 @@ impl<'a> SnapshotBuilder<'a> {
                                 case,
                                 *case_span,
                             );
+                            if let (Some(bindings), Some(arm_info)) = (
+                                bindings.as_ref(),
+                                match_info.as_ref().and_then(|info| info.arms.get(index)),
+                            ) {
+                                self.declare_match_bindings(
+                                    bindings,
+                                    arm_info.bindings.iter().map(|binding| &binding.ty),
+                                    arm.value.span().start,
+                                );
+                            }
+                        }
+                        MatchPattern::TypeBinding { ty, binding, span } => {
+                            self.record_match_type_reference(ty, *span);
+                            if let Some(binding_info) = match_info
+                                .as_ref()
+                                .and_then(|info| info.arms.get(index))
+                                .and_then(|arm| arm.bindings.first())
+                            {
+                                self.declare_match_bindings(
+                                    std::slice::from_ref(binding),
+                                    std::iter::once(&binding_info.ty),
+                                    arm.value.span().start,
+                                );
+                            }
                         }
                         MatchPattern::Default { .. } => {}
                     }
                     self.visit_expr(&arm.value, current_class, parent_class);
+                    self.pop_local_scope();
                 }
             }
             // IDE analysis is best-effort across compiler feature branches. New
             // expression forms remain diagnostic-safe until their symbol-bearing
             // children need explicit traversal here.
             _ => {}
+        }
+    }
+
+    fn declare_match_bindings<'b>(
+        &mut self,
+        bindings: &'b [doriac::ast::MatchBinding],
+        types: impl Iterator<Item = &'b ResolvedType>,
+        visibility_start: usize,
+    ) {
+        for (binding, ty) in bindings.iter().zip(types) {
+            self.declare_local_binding(
+                &binding.name,
+                binding.span,
+                format!("{} ${}", display_resolved_type(ty), binding.name),
+                visibility_start,
+            );
+        }
+    }
+
+    fn record_match_type_reference(&mut self, ty: &doriac::types::TypeRef, span: Span) {
+        let Some(type_span) = find_identifier_span(self.tokens, span, &ty.name) else {
+            return;
+        };
+        if let Some(symbol) = self
+            .enums
+            .get(&ty.name)
+            .or_else(|| self.classes.get(&ty.name))
+            .copied()
+        {
+            self.record_reference(type_span, symbol);
         }
     }
 
@@ -2125,7 +2241,7 @@ function main(): void
     }
 
     #[test]
-    fn payload_execution_is_accepted_while_match_keeps_its_compiler_owned_diagnostic() {
+    fn executable_match_bindings_share_hover_reference_rename_and_scope_identity() {
         let payload = AnalysisSnapshot::analyze(
             "payload.doria",
             "enum Shape { case Circle(float $radius); } Shape $shape = Shape::Circle(2.5);",
@@ -2136,13 +2252,87 @@ function main(): void
             payload.diagnostics()
         );
 
-        let matching_source = "enum Status { case Draft; } let $label = match (Status::Draft) { Status::Draft => 1, default => 0, };";
+        let matching_source = r#"enum Result { case Value(string $text); case Missing; }
+function main(): void
+{
+    Result $result = Result::Value("ok");
+    string $label = match ($result) {
+        Result::Value($value) => "😀 {$value}",
+        Result::Missing => "missing",
+    };
+}"#;
         let matching = AnalysisSnapshot::analyze("match.doria", matching_source);
-        assert_eq!(matching.diagnostics().len(), 1);
-        assert_eq!(matching.diagnostics()[0].code, "E0576");
-        assert!(hover(matching_source, "Draft", 2)
+        assert!(
+            matching.diagnostics().is_empty(),
+            "{:?}",
+            matching.diagnostics()
+        );
+        assert!(hover(matching_source, "match", 0)
             .markdown
-            .contains("Status::Draft: Status"));
+            .contains("match (...): string"));
+        assert!(hover(matching_source, "$result", 1)
+            .markdown
+            .contains("Result $result"));
+        assert!(hover(matching_source, "Value", 2)
+            .markdown
+            .contains("Result::Value(string $text): Result"));
+        assert!(hover(matching_source, "$value", 0)
+            .markdown
+            .contains("string $value"));
+
+        let binding_offset = matching_source.find("$value").expect("pattern binding");
+        assert_eq!(
+            matching
+                .reference_spans_at_offset(binding_offset, true)
+                .len(),
+            2
+        );
+        assert_eq!(
+            matching.rename_replacement_at_offset(binding_offset, "renamed"),
+            Some("$renamed".to_string())
+        );
+        assert!(matching
+            .semantic_token_spans()
+            .iter()
+            .any(
+                |(span, token_type)| *span == Span::new(binding_offset, binding_offset + 6)
+                    && *token_type == 0
+            ));
+
+        let leaked = AnalysisSnapshot::analyze(
+            "leaked.doria",
+            "enum Result { case Value(string $text); } function main(): void { Result $r = Result::Value(\"ok\"); string $v = match ($r) { Result::Value($inside) => $inside, }; echo $inside; }",
+        );
+        assert!(leaked
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0101"));
+    }
+
+    #[test]
+    fn exact_type_match_binding_hovers_with_its_narrowed_type() {
+        let source = r#"class Document {}
+function label(mixed $value): string
+{
+    return match ($value) {
+        Document $document => "document",
+        string $text => $text,
+        default => "other",
+    };
+}"#;
+        let snapshot = AnalysisSnapshot::analyze("types.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        assert!(hover(source, "$document", 0)
+            .markdown
+            .contains("Document $document"));
+        assert!(hover(source, "$text", 0).markdown.contains("string $text"));
+        assert!(hover(source, "Document", 1)
+            .markdown
+            .contains("class Document"));
     }
 
     #[test]

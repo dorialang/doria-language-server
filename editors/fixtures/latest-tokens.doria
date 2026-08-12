@@ -337,7 +337,7 @@ Option $some = Option::Some(42);
 Option $named = Option::Some(value: 43);
 ?Option $maybe = $some;
 
-// Stage 28 grammar preparation: syntax is accepted while semantics remain pending.
+// Executable exhaustive match with a payload binding scoped to its arm.
 let $score = match ($option) {
     Option::Some($value) => $value,
     Option::None => 0,

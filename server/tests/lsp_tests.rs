@@ -299,7 +299,7 @@ fn preserves_the_compiler_readonly_clear_diagnostic_after_non_ascii_text() {
 }
 
 #[test]
-fn payload_enum_execution_and_match_boundary_come_from_the_compiler() {
+fn payload_enums_and_core_match_execution_come_from_the_compiler() {
     let accepted = diagnostics_for_document(
         "file:///enums.doria",
         r#"enum Status { case Draft; }
@@ -324,10 +324,71 @@ function main(): void
 
     let matching = diagnostics_for_document(
         "file:///match.doria",
-        "enum Status { case Draft; } let $label = match (Status::Draft) { Status::Draft => 1, default => 0, };",
+        "enum Status { case Draft; } let $label = match (Status::Draft) { Status::Draft => 1, };",
     );
-    assert_eq!(matching.len(), 1, "{matching:#?}");
-    assert_eq!(matching[0]["code"], "E0576");
+    assert!(matching.is_empty(), "{matching:#?}");
+
+    let missing = diagnostics_for_document(
+        "file:///missing-match-case.doria",
+        "enum Status { case Draft; case Published; } let $label = match (Status::Draft) { Status::Draft => 1, };",
+    );
+    assert!(missing
+        .iter()
+        .any(|diagnostic| diagnostic["code"] == "E0585"));
+}
+
+#[test]
+fn match_payload_guard_and_ternary_diagnostics_remain_compiler_owned() {
+    let payload = diagnostics_for_document(
+        "file:///payload-pattern.doria",
+        r#"enum Pair { case Values(int $left, int $right); }
+function main(): void
+{
+    echo "😀";
+    Pair $pair = Pair::Values(1, 2);
+    int $value = match ($pair) { Pair::Values($left) => $left, };
+}
+"#,
+    );
+    assert!(payload
+        .iter()
+        .any(|diagnostic| diagnostic["code"] == "E0590"));
+
+    let guard = diagnostics_for_document(
+        "file:///match-guard.doria",
+        "enum State { case Ready; } function f(State $state): string { return match ($state) { State::Ready if true => \"ready\", }; }",
+    );
+    assert_eq!(guard.len(), 1, "{guard:#?}");
+    assert!(guard[0]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("pattern guards are not available")));
+
+    let ternary_source =
+        "function f(int $value): string { echo \"😀\"; return $value ? \"yes\" : \"no\"; }";
+    let ternary = diagnostics_for_document("file:///ternary.doria", ternary_source);
+    let diagnostic = ternary
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0595")
+        .unwrap_or_else(|| panic!("missing strict ternary diagnostic: {ternary:#?}"));
+    let expected = byte_offset_to_position(
+        ternary_source,
+        ternary_source.rfind("$value").expect("ternary condition"),
+    );
+    assert_eq!(diagnostic["range"]["start"]["line"], expected.line);
+    assert_eq!(
+        diagnostic["range"]["start"]["character"],
+        expected.character
+    );
+
+    let elvis = diagnostics_for_document(
+        "file:///elvis.doria",
+        "function f(?string $value): string { return $value ?: \"fallback\"; }",
+    );
+    assert_eq!(elvis.len(), 1, "{elvis:#?}");
+    let message = elvis[0]["message"].as_str().expect("Elvis diagnostic");
+    assert!(message.contains("short ternary"));
+    assert!(message.contains("`??`"));
+    assert!(message.contains("full `? :`"));
 }
 
 #[test]
@@ -399,9 +460,9 @@ function main(): void { echo "😀"; Bucket $left = Bucket::Values([1]); Bucket 
         ),
         (
             "match",
-            r#"enum Status { case Draft; }
-function main(): void { echo "😀"; let $label = match (Status::Draft) { Status::Draft => 1, default => 0, }; }"#,
-            "E0576",
+            r#"enum Status { case Draft; case Published; }
+function main(): void { echo "😀"; let $label = match (Status::Draft) { Status::Draft => 1, }; }"#,
+            "E0585",
             "match",
         ),
     ];

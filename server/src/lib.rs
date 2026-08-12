@@ -292,6 +292,11 @@ impl Server {
                     send_response(writer, id, self.rename(message.get("params")))?;
                 }
             }
+            "textDocument/semanticTokens/full" => {
+                if let Some(id) = id {
+                    send_response(writer, id, self.semantic_tokens(message.get("params")))?;
+                }
+            }
             _ => {
                 if let Some(id) = id {
                     send_error(
@@ -470,7 +475,13 @@ impl Server {
         if document.text[..offset].ends_with("::") {
             const PLACEHOLDER: &str = "__doria_completion";
             let mut source = document.text.clone();
-            source.insert_str(offset, PLACEHOLDER);
+            let suffix = document.text[offset..].trim_start();
+            let insertion = if suffix.starts_with(',') || suffix.starts_with('}') {
+                format!("{PLACEHOLDER} => 0")
+            } else {
+                PLACEHOLDER.to_string()
+            };
+            source.insert_str(offset, &insertion);
             let analysis = AnalysisSnapshot::analyze(&uri, &source);
             if let Some(completions) = analysis.static_completions_at_offset(offset) {
                 return semantic_completion_items(completions);
@@ -529,6 +540,46 @@ impl Server {
         }
     }
 
+    fn semantic_tokens(&self, params: Option<&Value>) -> Value {
+        let Some(uri) = params
+            .and_then(|params| params.get("textDocument"))
+            .and_then(|text_document| text_document.get("uri"))
+            .and_then(Value::as_str)
+        else {
+            return json!({ "data": [] });
+        };
+        let Some(document) = self.documents.get(uri) else {
+            return json!({ "data": [] });
+        };
+
+        let mut data = Vec::new();
+        let mut previous_line = 0;
+        let mut previous_start = 0;
+        for (span, token_type) in document.analysis.semantic_token_spans() {
+            let start = byte_offset_to_position(&document.text, span.start);
+            let end = byte_offset_to_position(&document.text, span.end);
+            if start.line != end.line {
+                continue;
+            }
+            let delta_line = start.line - previous_line;
+            let delta_start = if delta_line == 0 {
+                start.character - previous_start
+            } else {
+                start.character
+            };
+            data.extend([
+                delta_line,
+                delta_start,
+                end.character - start.character,
+                token_type,
+                0,
+            ]);
+            previous_line = start.line;
+            previous_start = start.character;
+        }
+        json!({ "data": data })
+    }
+
     fn uri_document_and_offset<'a>(
         &'a self,
         params: Option<&Value>,
@@ -583,6 +634,13 @@ fn initialize_result() -> Value {
             "hoverProvider": true,
             "referencesProvider": true,
             "renameProvider": true,
+            "semanticTokensProvider": {
+                "legend": {
+                    "tokenTypes": ["variable", "type", "enumMember", "function", "keyword"],
+                    "tokenModifiers": []
+                },
+                "full": true
+            },
             "codeActionProvider": true
         },
         "serverInfo": {
@@ -1174,7 +1232,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
         TokenKind::Enum => Some("Declares a nominal Doria enum type."),
         TokenKind::Case => Some("Declares a case inside an enum."),
         TokenKind::Match => Some(
-            "Begins an expression-position `match`. Its grammar is accepted; semantic execution lands in Stage 28.",
+            "Begins an exhaustive expression that selects one value through enum, constant, null, exact-type, or ordered bool patterns.",
         ),
         TokenKind::Default => Some("Declares the fallback arm of a `match` expression."),
         TokenKind::Not => Some("Boolean NOT operator; exact synonym for `!`."),
@@ -1216,7 +1274,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             name @ ("SharedReference" | "WeakReference" | "WritableSharedReference"
             | "WritableWeakReference" | "ReadonlySharedReferenceAccess"
             | "WritableSharedReferenceAccess") => shared_ownership_type_description(name),
-            "mixed" => Some("The dynamic boundary type: a boxed runtime value that accepts any type but rejects every operation until narrowed with the exact `is` type-test operator. `?mixed` adds nullability."),
+            "mixed" => Some("The dynamic boundary type: a boxed runtime value that accepts any type but rejects every operation until narrowed with the exact `is` type-test operator or an exact `match` type-binding pattern. `?mixed` adds nullability."),
             "resource" => Some("Reserved for future PHP interop; not a usable core type."),
             companion @ ("Int" | "Int8" | "Int16" | "Int32" | "Int64" | "UInt8"
             | "UInt16" | "UInt32" | "UInt64") => integer_conversion_description(companion),
@@ -1841,7 +1899,7 @@ function main(): void
         let mixed_hover = hover_description(&TokenKind::Identifier("mixed".to_string()))
             .expect("mixed should have hover text");
         assert!(mixed_hover.contains("exact `is` type-test operator"));
-        assert!(!mixed_hover.contains("`match`"));
+        assert!(mixed_hover.contains("exact `match` type-binding pattern"));
 
         let is_hover = hover_description(&TokenKind::Is).expect("is should have hover text");
         assert!(is_hover.contains("Exact type-test operator"));
@@ -1979,6 +2037,36 @@ function main(): void { Status::; }
             .collect::<HashSet<_>>();
         assert_eq!(labels, HashSet::from(["Draft", "Published"]));
         assert!(items.iter().all(|item| item["kind"] == 20));
+    }
+
+    #[test]
+    fn enum_case_completion_works_in_match_pattern_position() {
+        let uri = "file:///match-completion.doria";
+        let source = r#"enum Status { case Draft; case Published; }
+function main(): void
+{
+    Status $status = Status::Draft;
+    string $label = match ($status) { Status::, };
+}
+"#;
+        let offset = source.find("::,").expect("pattern accessor") + 2;
+        let position = byte_offset_to_position(source, offset);
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document::new(uri, source.to_string(), Some(1)),
+        );
+        let response = server.completion(Some(&json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": position.line, "character": position.character },
+        })));
+        let labels = response["items"]
+            .as_array()
+            .expect("completion items")
+            .iter()
+            .filter_map(|item| item["label"].as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(labels, HashSet::from(["Draft", "Published"]));
     }
 
     #[test]
@@ -2433,6 +2521,111 @@ function main(): void { Status::; }
         let edits = rename["changes"][uri].as_array().unwrap();
         assert_eq!(edits.len(), 2);
         assert!(edits.iter().all(|edit| edit["newText"] == "$renamed"));
+    }
+
+    #[test]
+    fn match_binding_lsp_features_share_utf16_safe_symbol_identity() {
+        let uri = "file:///match-bindings.doria";
+        let text = r#"enum Result { case Value(string $text); case Missing; }
+function main(): void
+{
+    Result $result = Result::Value("ok");
+    string $label = match ($result) {
+        /* 😀 */ Result::Value($payload) => $payload,
+        Result::Missing => "missing",
+    };
+}
+"#;
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document::new(uri, text.to_string(), Some(1)),
+        );
+
+        let binding_offset = text.find("$payload").expect("payload binding");
+        let binding_position = byte_offset_to_position(text, binding_offset);
+        let line_start = text[..binding_offset]
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
+        assert_ne!(
+            binding_position.character as usize,
+            binding_offset - line_start,
+            "fixture must distinguish UTF-16 columns from byte columns"
+        );
+        let params = json!({
+            "textDocument": { "uri": uri },
+            "position": {
+                "line": binding_position.line,
+                "character": binding_position.character,
+            }
+        });
+
+        let hover = server.hover(Some(&params)).expect("payload binding hover");
+        assert!(hover["contents"]["value"]
+            .as_str()
+            .is_some_and(|contents| contents.contains("string $payload")));
+        assert_eq!(
+            hover["range"]["start"]["character"],
+            binding_position.character
+        );
+
+        let references = server.references(Some(&params));
+        let locations = references.as_array().expect("payload references");
+        assert_eq!(locations.len(), 2);
+        assert!(locations.iter().all(|location| {
+            let line = location["range"]["start"]["line"].as_u64().unwrap() as u32;
+            let character = location["range"]["start"]["character"].as_u64().unwrap() as u32;
+            text[position_to_byte_offset(text, line, character)..].starts_with("$payload")
+        }));
+
+        let rename = server.rename(Some(&json!({
+            "textDocument": { "uri": uri },
+            "position": {
+                "line": binding_position.line,
+                "character": binding_position.character,
+            },
+            "newName": "value",
+        })));
+        let edits = rename["changes"][uri].as_array().expect("rename edits");
+        assert_eq!(edits.len(), 2);
+        assert!(edits.iter().all(|edit| edit["newText"] == "$value"));
+
+        let semantic_tokens = server.semantic_tokens(Some(&json!({
+            "textDocument": { "uri": uri },
+        })));
+        let data = semantic_tokens["data"].as_array().expect("semantic tokens");
+        let mut line = 0_u32;
+        let mut character = 0_u32;
+        let mut found_binding = false;
+        for token in data.chunks_exact(5) {
+            let delta_line = token[0].as_u64().unwrap() as u32;
+            let delta_start = token[1].as_u64().unwrap() as u32;
+            if delta_line == 0 {
+                character += delta_start;
+            } else {
+                line += delta_line;
+                character = delta_start;
+            }
+            if line == binding_position.line && character == binding_position.character {
+                assert_eq!(token[2], "$payload".encode_utf16().count());
+                assert_eq!(token[3], 0);
+                found_binding = true;
+            }
+        }
+        assert!(
+            found_binding,
+            "payload binding semantic token was not published"
+        );
+    }
+
+    #[test]
+    fn initialize_advertises_the_semantic_token_legend() {
+        let provider = &initialize_result()["capabilities"]["semanticTokensProvider"];
+        assert_eq!(provider["full"], true);
+        assert_eq!(
+            provider["legend"]["tokenTypes"],
+            json!(["variable", "type", "enumMember", "function", "keyword"])
+        );
     }
 
     #[test]
