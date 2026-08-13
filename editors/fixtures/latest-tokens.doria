@@ -339,9 +339,28 @@ Option $named = Option::Some(value: 43);
 
 // Executable exhaustive match with a payload binding scoped to its arm.
 let $score = match ($option) {
-    Option::Some($value) => $value,
+    Option::Some($value) if $value > 0 => $value,
+    Option::Some($value) => 0,
     Option::None => 0,
     default => -1,
+};
+
+class FixtureDocument
+{
+}
+
+enum FixtureLoadResult
+{
+    case Loaded(FixtureDocument $document);
+    case Missing;
+}
+
+let $ready = true;
+FixtureLoadResult $loadResult = FixtureLoadResult::Loaded(new FixtureDocument());
+FixtureDocument $loaded = match (take $loadResult) {
+    FixtureLoadResult::Loaded($document) if $ready => $document,
+    FixtureLoadResult::Loaded($document) => $document,
+    FixtureLoadResult::Missing => new FixtureDocument(),
 };
 
 // Planned/future: checked errors.

@@ -338,7 +338,7 @@ function main(): void
 }
 
 #[test]
-fn match_payload_guard_and_ternary_diagnostics_remain_compiler_owned() {
+fn match_payload_guard_and_ternary_semantics_remain_compiler_owned() {
     let payload = diagnostics_for_document(
         "file:///payload-pattern.doria",
         r#"enum Pair { case Values(int $left, int $right); }
@@ -356,12 +356,17 @@ function main(): void
 
     let guard = diagnostics_for_document(
         "file:///match-guard.doria",
-        "enum State { case Ready; } function f(State $state): string { return match ($state) { State::Ready if true => \"ready\", }; }",
+        "enum State { case Ready; } function f(State $state, bool $enabled): string { return match ($state) { State::Ready if $enabled => \"ready\", State::Ready => \"disabled\", }; }",
     );
-    assert_eq!(guard.len(), 1, "{guard:#?}");
-    assert!(guard[0]["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("pattern guards are not available")));
+    assert!(guard.is_empty(), "{guard:#?}");
+
+    let non_bool_guard = diagnostics_for_document(
+        "file:///match-guard-type.doria",
+        "enum State { case Ready; } function f(State $state): string { return match ($state) { State::Ready if 1 => \"ready\", State::Ready => \"fallback\", }; }",
+    );
+    assert!(non_bool_guard
+        .iter()
+        .any(|diagnostic| diagnostic["code"] == "E0597"));
 
     let ternary_source =
         "function f(int $value): string { echo \"😀\"; return $value ? \"yes\" : \"no\"; }";

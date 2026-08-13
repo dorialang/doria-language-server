@@ -96,8 +96,9 @@ class DoriaLexerTest : TestCase() {
             "enum Status { case Draft; case Ready(int \$code); } " +
                 "Status \$status = Status::Draft; " +
                 "Status \$ready = Status::Ready(code: 42); " +
-                "let \$label = match (\$status) { " +
-                "Status::Ready(\$value) => \$value, Status::Draft => 1, default => 0, };",
+                "let \$label = match (take \$ready) { " +
+                "Status::Ready(\$value) if \$value > 0 => \$value, " +
+                "Status::Ready(\$value) => 0, Status::Draft => 1, default => 0, };",
         )
 
         assertEquals(DoriaTokenTypes.ENUM_DECLARATION, tokens.first { it.text == "Status" }.type)
@@ -107,13 +108,21 @@ class DoriaLexerTest : TestCase() {
         for (token in tokens.filter { it.text == "Ready" }) {
             assertEquals(DoriaTokenTypes.ENUM_CASE, token.type)
         }
-        for (keyword in listOf("enum", "case", "match", "default")) {
+        for (keyword in listOf("enum", "case", "match", "if", "default")) {
             assertEquals(DoriaTokenTypes.KEYWORD, tokens.first { it.text == keyword }.type)
         }
+        assertEquals(DoriaTokenTypes.MODIFIER, tokens.first { it.text == "take" }.type)
         for (binding in tokens.filter { it.text == "\$value" }) {
             assertEquals(DoriaTokenTypes.VARIABLE, binding.type)
         }
         assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
+    }
+
+    fun testMatchGuardsDoNotCreateWhenOrWhereAliases() {
+        val tokens = lex("match (\$value) { Item \$item if true => \$item, }")
+        assertEquals(DoriaTokenTypes.KEYWORD, tokens.first { it.text == "if" }.type)
+        assertFalse(tokens.any { it.text == "where" })
+        assertFalse(tokens.any { it.text == "when" })
     }
 
     private fun lex(source: String): List<Token> {

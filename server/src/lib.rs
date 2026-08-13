@@ -2619,6 +2619,118 @@ function main(): void
     }
 
     #[test]
+    fn guarded_consuming_match_lsp_ranges_are_utf16_safe() {
+        let uri = "file:///guarded-take.doria";
+        let text = r#"class Document
+{
+    function __construct(string $name) {}
+    function isReady(): bool { return true; }
+}
+enum LoadResult { case Loaded(Document $document); case Missing; }
+function main(): void
+{
+    LoadResult $result = LoadResult::Loaded(new Document("ready"));
+    Document $selected = match (take $result) {
+        /* 😀 */ LoadResult::Loaded($document) if $document->isReady() => $document,
+        LoadResult::Loaded($document) => $document,
+        LoadResult::Missing => new Document("fallback"),
+    };
+}"#;
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document::new(uri, text.to_string(), Some(1)),
+        );
+
+        let match_offset = text.find("match (take").expect("consuming match");
+        let binding_offset = text[match_offset..]
+            .find("LoadResult::Loaded($document)")
+            .map(|offset| match_offset + offset + "LoadResult::Loaded(".len())
+            .expect("payload binding");
+        let guard_offset = text[binding_offset + 1..]
+            .find("$document")
+            .map(|offset| binding_offset + 1 + offset)
+            .expect("guard binding reference");
+        let binding_position = byte_offset_to_position(text, binding_offset);
+        let line_start = text[..binding_offset]
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
+        assert_ne!(
+            binding_position.character as usize,
+            binding_offset - line_start,
+            "fixture must distinguish UTF-16 columns from byte columns"
+        );
+
+        let params = json!({
+            "textDocument": { "uri": uri },
+            "position": {
+                "line": binding_position.line,
+                "character": binding_position.character,
+            }
+        });
+        let hover = server.hover(Some(&params)).expect("guarded binding hover");
+        assert!(hover["contents"]["value"]
+            .as_str()
+            .is_some_and(|value| value.contains("owns the selected Move payload")));
+
+        let references = server.references(Some(&params));
+        assert_eq!(references.as_array().expect("references").len(), 3);
+        let rename = server.rename(Some(&json!({
+            "textDocument": { "uri": uri },
+            "position": {
+                "line": byte_offset_to_position(text, guard_offset).line,
+                "character": byte_offset_to_position(text, guard_offset).character,
+            },
+            "newName": "payload",
+        })));
+        let edits = rename["changes"][uri].as_array().expect("rename edits");
+        assert_eq!(edits.len(), 3);
+        assert!(edits.iter().all(|edit| edit["newText"] == "$payload"));
+
+        let take_offset = text.find("take").expect("take keyword");
+        let take_position = byte_offset_to_position(text, take_offset);
+        let take_hover = server
+            .hover(Some(&json!({
+                "textDocument": { "uri": uri },
+                "position": {
+                    "line": take_position.line,
+                    "character": take_position.character,
+                }
+            })))
+            .expect("match take hover");
+        assert!(take_hover["contents"]["value"]
+            .as_str()
+            .is_some_and(|value| value.contains("whole Move value")));
+
+        let tokens = server.semantic_tokens(Some(&json!({
+            "textDocument": { "uri": uri },
+        })));
+        let data = tokens["data"].as_array().expect("semantic tokens");
+        let mut line = 0_u32;
+        let mut character = 0_u32;
+        let mut found = false;
+        for token in data.chunks_exact(5) {
+            let delta_line = token[0].as_u64().unwrap() as u32;
+            let delta_start = token[1].as_u64().unwrap() as u32;
+            if delta_line == 0 {
+                character += delta_start;
+            } else {
+                line += delta_line;
+                character = delta_start;
+            }
+            if line == binding_position.line && character == binding_position.character {
+                assert_eq!(token[2], "$document".encode_utf16().count());
+                assert_eq!(token[3], 0);
+                found = true;
+            }
+        }
+        assert!(
+            found,
+            "guarded payload binding semantic token was not published"
+        );
+    }
+
+    #[test]
     fn initialize_advertises_the_semantic_token_legend() {
         let provider = &initialize_result()["capabilities"]["semanticTokensProvider"];
         assert_eq!(provider["full"], true);

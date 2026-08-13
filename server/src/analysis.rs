@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use doriac::ast::{
     Block, ClassDecl, ClassMember, ElseBranch, EnumDecl, Expr, ForIncrement, ForInitializer,
-    FunctionDecl, Item, MatchOrigin, MatchPattern, MemberAccess, Param, Program, StaticQualifier,
-    Stmt, VarDecl,
+    FunctionDecl, Item, MatchMode, MatchOrigin, MatchPattern, MemberAccess, Param, Program,
+    StaticQualifier, Stmt, VarDecl,
 };
 use doriac::diagnostics::Diagnostic;
 use doriac::enums::{EnumBackingType, EnumBackingValue};
@@ -914,8 +914,29 @@ impl<'a> SnapshotBuilder<'a> {
         signature: String,
         visibility_start: usize,
     ) {
-        let symbol =
-            self.add_declaration_symbol(selection_span, signature, None, SymbolKind::Variable);
+        self.declare_local_binding_with_documentation(
+            name,
+            selection_span,
+            signature,
+            visibility_start,
+            None,
+        );
+    }
+
+    fn declare_local_binding_with_documentation(
+        &mut self,
+        name: &str,
+        selection_span: Span,
+        signature: String,
+        visibility_start: usize,
+        documentation: Option<String>,
+    ) {
+        let symbol = self.add_declaration_symbol(
+            selection_span,
+            signature,
+            documentation,
+            SymbolKind::Variable,
+        );
         self.symbols[symbol].local_name = Some(name.to_string());
         self.local_visibilities.push(LocalVisibility {
             symbol,
@@ -1268,6 +1289,7 @@ impl<'a> SnapshotBuilder<'a> {
             }
             Expr::Match {
                 scrutinee,
+                mode,
                 arms,
                 origin,
                 span,
@@ -1291,8 +1313,23 @@ impl<'a> SnapshotBuilder<'a> {
                         );
                     }
                 }
+                if let MatchMode::Consumed { take_span } = mode {
+                    self.add_reference_symbol(
+                        *take_span,
+                        "match (take $value)".to_string(),
+                        Some(
+                            "Gives the whole Move value to this match. A matching guard sees readonly payload views; the selected arm receives owned Move payload bindings."
+                                .to_string(),
+                        ),
+                        SymbolKind::Plain,
+                    );
+                }
                 for (index, arm) in arms.iter().enumerate() {
                     self.push_local_scope(arm.span.end);
+                    let visibility_start = arm.guard.as_ref().map_or_else(
+                        || arm.value.span().start,
+                        |guard| guard.condition.span().start,
+                    );
                     match &arm.pattern {
                         MatchPattern::Expression(pattern) => {
                             self.visit_expr(pattern, current_class, parent_class)
@@ -1317,8 +1354,8 @@ impl<'a> SnapshotBuilder<'a> {
                             ) {
                                 self.declare_match_bindings(
                                     bindings,
-                                    arm_info.bindings.iter().map(|binding| &binding.ty),
-                                    arm.value.span().start,
+                                    arm_info.bindings.iter(),
+                                    visibility_start,
                                 );
                             }
                         }
@@ -1331,12 +1368,15 @@ impl<'a> SnapshotBuilder<'a> {
                             {
                                 self.declare_match_bindings(
                                     std::slice::from_ref(binding),
-                                    std::iter::once(&binding_info.ty),
-                                    arm.value.span().start,
+                                    std::iter::once(binding_info),
+                                    visibility_start,
                                 );
                             }
                         }
                         MatchPattern::Default { .. } => {}
+                    }
+                    if let Some(guard) = &arm.guard {
+                        self.visit_expr(&guard.condition, current_class, parent_class);
                     }
                     self.visit_expr(&arm.value, current_class, parent_class);
                     self.pop_local_scope();
@@ -1352,15 +1392,26 @@ impl<'a> SnapshotBuilder<'a> {
     fn declare_match_bindings<'b>(
         &mut self,
         bindings: &'b [doriac::ast::MatchBinding],
-        types: impl Iterator<Item = &'b ResolvedType>,
+        semantics: impl Iterator<Item = &'b doriac::semantics::MatchBindingSemanticInfo>,
         visibility_start: usize,
     ) {
-        for (binding, ty) in bindings.iter().zip(types) {
-            self.declare_local_binding(
+        for (binding, semantic) in bindings.iter().zip(semantics) {
+            self.declare_local_binding_with_documentation(
                 &binding.name,
                 binding.span,
-                format!("{} ${}", display_resolved_type(ty), binding.name),
+                format!(
+                    "{} ${}",
+                    display_resolved_type(&semantic.ty),
+                    binding.name
+                ),
                 visibility_start,
+                Some(if !semantic.borrowed {
+                    "Readonly while the guard is evaluated; owns the selected Move payload in the arm."
+                        .to_string()
+                } else {
+                    "Readonly pattern binding available in this arm's guard and result."
+                        .to_string()
+                }),
             );
         }
     }
@@ -2307,6 +2358,116 @@ function main(): void
             .diagnostics()
             .iter()
             .any(|diagnostic| diagnostic.code == "E0101"));
+    }
+
+    #[test]
+    fn guarded_consuming_match_keeps_one_source_binding_identity() {
+        let source = r#"class Document
+{
+    function __construct(string $name) {}
+    function isReady(): bool { return true; }
+}
+enum LoadResult { case Loaded(Document $document); case Missing; }
+function main(): void
+{
+    echo "😀";
+    LoadResult $result = LoadResult::Loaded(new Document("ready"));
+    Document $selected = match (take $result) {
+        LoadResult::Loaded($document) if $document->isReady() => $document,
+        LoadResult::Loaded($document) => $document,
+        LoadResult::Missing => new Document("fallback"),
+    };
+}"#;
+        let snapshot = AnalysisSnapshot::analyze("guarded-take.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+
+        let take_offset = source.find("take").expect("take modifier");
+        let take_hover = snapshot
+            .hover_at_offset(take_offset)
+            .expect("consuming-match hover");
+        assert!(take_hover.markdown.contains("whole Move value"));
+
+        let match_offset = source.find("match (take").expect("consuming match");
+        let binding_offset = source[match_offset..]
+            .find("LoadResult::Loaded($document)")
+            .map(|offset| match_offset + offset + "LoadResult::Loaded(".len())
+            .expect("payload binding");
+        let guard_offset = source[binding_offset + 1..]
+            .find("$document")
+            .map(|offset| binding_offset + 1 + offset)
+            .expect("guard reference");
+        let arm_offset = source[guard_offset + 1..]
+            .find("$document")
+            .map(|offset| guard_offset + 1 + offset)
+            .expect("arm reference");
+        for offset in [binding_offset, guard_offset, arm_offset] {
+            let hover = snapshot
+                .hover_at_offset(offset)
+                .expect("guarded binding hover");
+            assert!(hover.markdown.contains("Document $document"));
+            assert!(hover.markdown.contains("Readonly while the guard"));
+            assert!(hover.markdown.contains("owns the selected Move payload"));
+        }
+        assert_eq!(
+            snapshot
+                .reference_spans_at_offset(binding_offset, true)
+                .len(),
+            3
+        );
+        assert_eq!(
+            snapshot.rename_replacement_at_offset(guard_offset, "payload"),
+            Some("$payload".to_string())
+        );
+
+        let second_binding = source[arm_offset + 1..]
+            .find("$document")
+            .map(|offset| arm_offset + 1 + offset)
+            .expect("second-arm binding");
+        assert_eq!(
+            snapshot
+                .reference_spans_at_offset(second_binding, true)
+                .len(),
+            2,
+            "each arm owns a separate lexical binding"
+        );
+    }
+
+    #[test]
+    fn copy_pattern_binding_masks_an_outer_move_symbol() {
+        let source = r#"class Box {}
+enum Number { case Value(int $item); }
+function main(): void
+{
+    Box $item = new Box();
+    int $value = match (Number::Value(42)) {
+        Number::Value($item) => $item,
+    };
+    Box $stillOwned = $item;
+}"#;
+        let snapshot = AnalysisSnapshot::analyze("copy-shadow.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        let pattern_offset = source.rfind("Number::Value($item)").unwrap() + "Number::Value(".len();
+        assert_eq!(
+            snapshot
+                .reference_spans_at_offset(pattern_offset, true)
+                .len(),
+            2,
+            "the Copy pattern binding must not resolve to the outer Box"
+        );
+        let outer_offset = source.find("$item = new Box").expect("outer binding");
+        assert_eq!(
+            snapshot.reference_spans_at_offset(outer_offset, true).len(),
+            2,
+            "the outer Move symbol remains independent"
+        );
     }
 
     #[test]
