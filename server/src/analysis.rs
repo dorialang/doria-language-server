@@ -2440,13 +2440,14 @@ function main(): void
     fn copy_pattern_binding_masks_an_outer_move_symbol() {
         let source = r#"class Box {}
 enum Number { case Value(int $item); }
+function consume(take Box $item): void {}
 function main(): void
 {
     Box $item = new Box();
+    consume($item);
     int $value = match (Number::Value(42)) {
         Number::Value($item) => $item,
     };
-    Box $stillOwned = $item;
 }"#;
         let snapshot = AnalysisSnapshot::analyze("copy-shadow.doria", source);
         assert!(
@@ -2455,6 +2456,10 @@ function main(): void
             snapshot.diagnostics()
         );
         let pattern_offset = source.rfind("Number::Value($item)").unwrap() + "Number::Value(".len();
+        let pattern_hover = snapshot
+            .hover_at_offset(pattern_offset)
+            .expect("Copy pattern binding hover");
+        assert!(pattern_hover.markdown.contains("int $item"));
         assert_eq!(
             snapshot
                 .reference_spans_at_offset(pattern_offset, true)
@@ -2462,11 +2467,19 @@ function main(): void
             2,
             "the Copy pattern binding must not resolve to the outer Box"
         );
+        assert_eq!(
+            snapshot.rename_replacement_at_offset(pattern_offset, "number"),
+            Some("$number".to_string())
+        );
         let outer_offset = source.find("$item = new Box").expect("outer binding");
+        let outer_hover = snapshot
+            .hover_at_offset(outer_offset)
+            .expect("outer Move binding hover");
+        assert!(outer_hover.markdown.contains("Box $item"));
         assert_eq!(
             snapshot.reference_spans_at_offset(outer_offset, true).len(),
             2,
-            "the outer Move symbol remains independent"
+            "the moved outer symbol remains independent"
         );
     }
 

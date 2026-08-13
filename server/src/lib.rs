@@ -2635,7 +2635,20 @@ function main(): void
         LoadResult::Loaded($document) => $document,
         LoadResult::Missing => new Document("fallback"),
     };
+    echo "😀"; LoadResult $again = $result;
 }"#;
+        let diagnostics = diagnostics_for_document(uri, text);
+        let moved = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic["code"] == "E0470")
+            .unwrap_or_else(|| panic!("missing consuming-match move diagnostic: {diagnostics:#?}"));
+        let moved_offset = text.rfind("$result;").expect("moved source use");
+        let moved_position = byte_offset_to_position(text, moved_offset);
+        assert_eq!(moved["range"]["start"]["line"], moved_position.line);
+        assert_eq!(
+            moved["range"]["start"]["character"], moved_position.character,
+            "moved-source diagnostics must use UTF-16 columns"
+        );
         let mut server = Server::default();
         server.documents.insert(
             uri.to_string(),

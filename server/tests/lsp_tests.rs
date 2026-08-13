@@ -397,6 +397,52 @@ function main(): void
 }
 
 #[test]
+fn contextual_match_results_use_the_final_compiler_rules_in_every_call_form() {
+    let diagnostics = diagnostics_for_document(
+        "file:///contextual-match.doria",
+        r#"class Sink
+{
+    mixed $property = match (1 == 2) { true => 1, false => "text", };
+
+    function __construct(take mixed $value) {}
+    function accept(mixed $value): void {}
+    static function acceptStatic(mixed $value): void {}
+}
+
+function accept(mixed $value): void {}
+function mixedResult(bool $condition): mixed
+{
+    return match ($condition) { true => 1, false => "text", };
+}
+function nullResult(bool $condition): ?string
+{
+    return match ($condition) { true => null, false => null, };
+}
+
+function main(): void
+{
+    bool $condition = true;
+    mixed $local = match ($condition) { true => 1, false => "text", };
+    writable mixed $assigned = 0;
+    $assigned = match (false) { true => 1, false => "text", };
+    accept(match (false) { true => 1, false => "text", });
+    let $sink = new Sink(match (false) { true => 1, false => "text", });
+    $sink->accept(match (false) { true => 1, false => "text", });
+    Sink::acceptStatic(match (false) { true => 1, false => "text", });
+    mixed $nested = match ($condition) {
+        true => match (false) { true => 1, false => "nested", },
+        false => false,
+    };
+    mixed $ternary = true ? match (false) { true => 1, false => "ternary", } : false;
+    mixed $mixed = mixedResult(true);
+    ?string $nullable = nullResult(false);
+}"#,
+    );
+
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
 fn enum_case_fixes_remain_machine_applicable_and_utf16_safe() {
     let uri = "file:///enum-fixes.doria";
     let source = r#"enum Status { case Draft; }
