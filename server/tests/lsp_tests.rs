@@ -933,6 +933,44 @@ while ($count < 3) {
 }
 
 #[test]
+fn accepts_stage28a_executable_control_flow_without_lsp_diagnostics() {
+    let diagnostics = diagnostics_for_document(
+        "file:///stage28a.doria",
+        r#"function main(): void
+{
+    let writable $count = 0;
+    given {
+        let $prepared = true;
+        true;
+    } if ($prepared) {
+        echo "prepared";
+    }
+    string $label = when ($count == 0): string {
+        return "zero";
+    } else {
+        return "other";
+    };
+    do {
+        $count++;
+    } while ($count < 2);
+    echo $label;
+}
+"#,
+    );
+    assert_eq!(diagnostics, Vec::<Value>::new());
+}
+
+#[test]
+fn publishes_the_pending_finalizer_diagnostic_without_syntax_noise() {
+    let diagnostics = diagnostics_for_document(
+        "file:///finally.doria",
+        "function main(): void { if (true) {} finally {} }",
+    );
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+    assert_eq!(diagnostics[0]["code"], "E0611");
+}
+
+#[test]
 fn accepts_builtin_panic_without_lsp_diagnostics() {
     let diagnostics = diagnostics_for_document(
         "file:///main_explicit_panic.doria",

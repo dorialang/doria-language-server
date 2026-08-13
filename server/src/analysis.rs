@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use doriac::ast::{
-    Block, ClassDecl, ClassMember, ElseBranch, EnumDecl, Expr, ForIncrement, ForInitializer,
-    FunctionDecl, Item, MatchMode, MatchOrigin, MatchPattern, MemberAccess, Param, Program,
-    StaticQualifier, Stmt, VarDecl,
+    Block, ClassDecl, ClassMember, ControlFlowFinally, DoWhileStmt, ElseBranch, EnumDecl, Expr,
+    ForIncrement, ForInitializer, FunctionDecl, GivenPrelude, IfStmt, Item, MatchMode, MatchOrigin,
+    MatchPattern, MemberAccess, Param, Program, StaticQualifier, Stmt, VarDecl, WhenExpression,
+    WhileStmt,
 };
 use doriac::diagnostics::Diagnostic;
 use doriac::enums::{EnumBackingType, EnumBackingValue};
@@ -382,7 +383,11 @@ fn semantic_token_type(symbol: &Symbol) -> Option<u32> {
     if symbol.signature.starts_with("function ") {
         return Some(3);
     }
-    if symbol.signature.starts_with("match (...): ") {
+    if symbol.signature.starts_with("match (...): ")
+        || symbol.signature.starts_with("when (...): ")
+        || symbol.signature == "return expression;"
+        || symbol.signature == "finally { ... }"
+    {
         return Some(4);
     }
     None
@@ -409,6 +414,7 @@ struct SnapshotBuilder<'a> {
     local_scopes: Vec<HashMap<String, usize>>,
     local_scope_ends: Vec<usize>,
     local_visibilities: Vec<LocalVisibility>,
+    when_depth: usize,
 }
 
 impl<'a> SnapshotBuilder<'a> {
@@ -439,6 +445,7 @@ impl<'a> SnapshotBuilder<'a> {
             local_scopes: Vec::new(),
             local_scope_ends: Vec::new(),
             local_visibilities: Vec::new(),
+            when_depth: 0,
         }
     }
 
@@ -811,19 +818,34 @@ impl<'a> SnapshotBuilder<'a> {
                 self.visit_expr(&assignment.value, current_class, parent_class);
             }
             Stmt::Echo { expr, .. } => self.visit_expr(expr, current_class, parent_class),
-            Stmt::Return {
-                expr: Some(expr), ..
-            } => self.visit_expr(expr, current_class, parent_class),
-            Stmt::If(if_statement) => {
-                self.visit_expr(&if_statement.condition, current_class, parent_class);
-                self.visit_block(&if_statement.then_block, current_class, parent_class);
-                if let Some(branch) = &if_statement.else_branch {
-                    self.visit_else_branch(branch, current_class, parent_class);
+            Stmt::Return { expr, span } => {
+                if self.when_depth > 0 {
+                    if let Some(keyword) = tokens_in_span(self.tokens, *span)
+                        .find(|token| matches!(token.kind, TokenKind::Return))
+                    {
+                        self.add_reference_symbol(
+                            keyword.span,
+                            "return expression;".to_string(),
+                            Some(
+                                "Yields a value from the nearest enclosing `when` expression."
+                                    .to_string(),
+                            ),
+                            SymbolKind::Plain,
+                        );
+                    }
+                }
+                if let Some(expr) = expr {
+                    self.visit_expr(expr, current_class, parent_class);
                 }
             }
+            Stmt::If(if_statement) => {
+                self.visit_if_statement(if_statement, current_class, parent_class)
+            }
             Stmt::While(while_statement) => {
-                self.visit_expr(&while_statement.condition, current_class, parent_class);
-                self.visit_block(&while_statement.body, current_class, parent_class);
+                self.visit_while_statement(while_statement, current_class, parent_class)
+            }
+            Stmt::DoWhile(do_while) => {
+                self.visit_do_while_statement(do_while, current_class, parent_class)
             }
             Stmt::For(for_statement) => {
                 self.push_local_scope(for_statement.span.end);
@@ -862,6 +884,116 @@ impl<'a> SnapshotBuilder<'a> {
             Stmt::Expr { expr, .. } => self.visit_expr(expr, current_class, parent_class),
             _ => {}
         }
+    }
+
+    fn visit_if_statement(
+        &mut self,
+        if_statement: &IfStmt,
+        current_class: Option<&str>,
+        parent_class: Option<&str>,
+    ) {
+        self.push_local_scope(if_statement.span.end);
+        if let Some(given) = &if_statement.given {
+            self.visit_given_prelude(given, current_class, parent_class);
+        }
+        self.visit_expr(&if_statement.condition, current_class, parent_class);
+        self.visit_block(&if_statement.then_block, current_class, parent_class);
+        if let Some(branch) = &if_statement.else_branch {
+            self.visit_else_branch(branch, current_class, parent_class);
+        }
+        if let Some(finalizer) = &if_statement.finally {
+            self.visit_finally(finalizer, current_class, parent_class);
+        }
+        self.pop_local_scope();
+    }
+
+    fn visit_while_statement(
+        &mut self,
+        while_statement: &WhileStmt,
+        current_class: Option<&str>,
+        parent_class: Option<&str>,
+    ) {
+        self.push_local_scope(while_statement.span.end);
+        if let Some(given) = &while_statement.given {
+            self.visit_given_prelude(given, current_class, parent_class);
+        }
+        self.visit_expr(&while_statement.condition, current_class, parent_class);
+        self.visit_block(&while_statement.body, current_class, parent_class);
+        if let Some(finalizer) = &while_statement.finally {
+            self.visit_finally(finalizer, current_class, parent_class);
+        }
+        self.pop_local_scope();
+    }
+
+    fn visit_do_while_statement(
+        &mut self,
+        do_while: &DoWhileStmt,
+        current_class: Option<&str>,
+        parent_class: Option<&str>,
+    ) {
+        self.visit_block(&do_while.body, current_class, parent_class);
+        self.visit_expr(&do_while.condition, current_class, parent_class);
+        self.add_reference_symbol(
+            do_while.condition.span(),
+            "do ... while condition: bool".to_string(),
+            Some("Boolean condition evaluated after each completed loop body.".to_string()),
+            SymbolKind::Plain,
+        );
+        if let Some(finalizer) = &do_while.finally {
+            self.visit_finally(finalizer, current_class, parent_class);
+        }
+    }
+
+    fn visit_given_prelude(
+        &mut self,
+        given: &GivenPrelude,
+        current_class: Option<&str>,
+        parent_class: Option<&str>,
+    ) {
+        let predicate_indices = self
+            .semantic_info
+            .and_then(|info| info.given_preludes.get(&(given.span.start, given.span.end)))
+            .map(|info| {
+                info.predicate_statement_indices
+                    .iter()
+                    .copied()
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+        for (index, statement) in given.block.statements.iter().enumerate() {
+            self.visit_stmt(statement, current_class, parent_class);
+            if predicate_indices.contains(&index) {
+                if let Stmt::Expr { expr, .. } = statement {
+                    self.add_reference_symbol(
+                        expr.span(),
+                        "given predicate: bool".to_string(),
+                        Some(
+                            "Boolean gate evaluated in source order before the attached condition."
+                                .to_string(),
+                        ),
+                        SymbolKind::Plain,
+                    );
+                }
+            }
+        }
+    }
+
+    fn visit_finally(
+        &mut self,
+        finalizer: &ControlFlowFinally,
+        current_class: Option<&str>,
+        parent_class: Option<&str>,
+    ) {
+        self.add_reference_symbol(
+            finalizer.keyword_span,
+            "finally { ... }".to_string(),
+            Some(
+                "Accepted control-flow finalizer syntax. Execution currently reports the compiler's pending-finalizer diagnostic."
+                    .to_string(),
+            ),
+            SymbolKind::Plain,
+        );
+        self.visit_block(&finalizer.block, current_class, parent_class);
     }
 
     fn visit_local_declaration(
@@ -977,11 +1109,7 @@ impl<'a> SnapshotBuilder<'a> {
         parent_class: Option<&str>,
     ) {
         if let ElseBranch::If(if_statement) = branch {
-            self.visit_expr(&if_statement.condition, current_class, parent_class);
-            self.visit_block(&if_statement.then_block, current_class, parent_class);
-            if let Some(branch) = &if_statement.else_branch {
-                self.visit_else_branch(branch, current_class, parent_class);
-            }
+            self.visit_if_statement(if_statement, current_class, parent_class);
         }
         if let ElseBranch::Block(block) = branch {
             self.visit_block(block, current_class, parent_class);
@@ -1382,11 +1510,49 @@ impl<'a> SnapshotBuilder<'a> {
                     self.pop_local_scope();
                 }
             }
+            Expr::When(when) => self.visit_when_expression(when, current_class, parent_class),
             // IDE analysis is best-effort across compiler feature branches. New
             // expression forms remain diagnostic-safe until their symbol-bearing
             // children need explicit traversal here.
             _ => {}
         }
+    }
+
+    fn visit_when_expression(
+        &mut self,
+        when: &WhenExpression,
+        current_class: Option<&str>,
+        parent_class: Option<&str>,
+    ) {
+        self.push_local_scope(when.span.end);
+        if let Some(given) = &when.given {
+            self.visit_given_prelude(given, current_class, parent_class);
+        }
+        if let (Some(info), Some(keyword)) = (
+            self.semantic_info
+                .and_then(|semantic| semantic.whens.get(&(when.span.start, when.span.end))),
+            tokens_in_span(self.tokens, when.span)
+                .find(|token| matches!(token.kind, TokenKind::When)),
+        ) {
+            self.add_reference_symbol(
+                keyword.span,
+                format!("when (...): {}", display_resolved_type(&info.result_type)),
+                Some("Exhaustive conditional expression result.".to_string()),
+                SymbolKind::Plain,
+            );
+        }
+        for branch in &when.branches {
+            if let Some(condition) = &branch.condition {
+                self.visit_expr(condition, current_class, parent_class);
+            }
+            self.when_depth += 1;
+            self.visit_block(&branch.block, current_class, parent_class);
+            self.when_depth -= 1;
+        }
+        if let Some(finalizer) = &when.finally {
+            self.visit_finally(finalizer, current_class, parent_class);
+        }
+        self.pop_local_scope();
     }
 
     fn declare_match_bindings<'b>(
@@ -2358,6 +2524,122 @@ function main(): void
             .diagnostics()
             .iter()
             .any(|diagnostic| diagnostic.code == "E0101"));
+    }
+
+    #[test]
+    fn control_flow_foundations_share_semantic_scope_hover_and_rename_identity() {
+        let source = r#"function main(): void
+{
+    echo "😀"; given {
+        /* 😀 */ let $prepared = true;
+        /* 😀 */ true;
+    } if ($prepared) {
+        echo "{$prepared}";
+    }
+
+    echo "😀"; string $label = given {
+        let $choice = true;
+        true;
+    } when ($choice): string {
+        echo "😀"; let $branch = 1;
+        echo "{$branch}";
+        echo "😀"; return "selected";
+    } else {
+        return "fallback";
+    };
+
+    do {
+        echo $label;
+    } while (/* 😀 */ true);
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("control-flow.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+
+        let prepared = source.find("$prepared").expect("given declaration");
+        assert!(snapshot
+            .hover_at_offset(prepared)
+            .expect("given local hover")
+            .markdown
+            .contains("bool $prepared"));
+        assert_eq!(
+            snapshot.reference_spans_at_offset(prepared, true).len(),
+            3,
+            "given declaration, attached condition, and selected branch share one symbol"
+        );
+        assert_eq!(
+            snapshot.rename_replacement_at_offset(prepared, "ready"),
+            Some("$ready".to_string())
+        );
+        assert!(snapshot
+            .semantic_token_spans()
+            .iter()
+            .any(|(span, token_type)| span.start == prepared && *token_type == 0));
+
+        let if_body = source.find("echo \"{$prepared}\"").unwrap();
+        assert!(snapshot
+            .local_completions_at_offset(if_body)
+            .iter()
+            .any(|completion| completion.label == "$prepared"));
+        let after_if = source.find("string $label").unwrap();
+        assert!(!snapshot
+            .local_completions_at_offset(after_if)
+            .iter()
+            .any(|completion| completion.label == "$prepared"));
+
+        let predicate = source.find("true;\n    } if").unwrap();
+        assert!(snapshot
+            .hover_at_offset(predicate)
+            .expect("given predicate hover")
+            .markdown
+            .contains("given predicate: bool"));
+        assert!(hover(source, "when", 0)
+            .markdown
+            .contains("when (...): string"));
+        assert!(hover(source, "return", 0)
+            .markdown
+            .contains("Yields a value"));
+        assert!(hover(source, "true);", 0)
+            .markdown
+            .contains("do ... while condition: bool"));
+
+        let branch = source.rfind("$branch").expect("when branch local use");
+        assert!(snapshot
+            .local_completions_at_offset(branch)
+            .iter()
+            .any(|completion| completion.label == "$branch"));
+        let after_when = source.find("do {").unwrap();
+        assert!(!snapshot
+            .local_completions_at_offset(after_when)
+            .iter()
+            .any(|completion| completion.label == "$branch"));
+    }
+
+    #[test]
+    fn pending_finally_keeps_ast_hover_and_compiler_diagnostic() {
+        let source = r#"function main(): void
+{
+    if (true) {
+        echo "body";
+    } /* 😀 */ finally {
+        echo "cleanup";
+    }
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("finally.doria", source);
+        assert!(snapshot
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0611"));
+        assert!(snapshot
+            .hover_at_offset(source.find("finally").unwrap())
+            .expect("finally hover")
+            .markdown
+            .contains("pending-finalizer diagnostic"));
     }
 
     #[test]

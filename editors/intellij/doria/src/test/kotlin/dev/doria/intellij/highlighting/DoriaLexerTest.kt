@@ -125,6 +125,22 @@ class DoriaLexerTest : TestCase() {
         assertFalse(tokens.any { it.text == "when" })
     }
 
+    fun testStage28aControlFlowFoundationsUseKeywordHighlighting() {
+        val tokens = lex(
+            "given { let \$ready = true; true; } if (\$ready) {} " +
+                "let \$label = when (true): string { return \"yes\"; } else { return \"no\"; }; " +
+                "do {} while (false); if (true) {} finally {}",
+        )
+
+        for (keyword in listOf("given", "if", "when", "return", "else", "do", "while", "finally")) {
+            for (token in tokens.filter { it.text == keyword }) {
+                assertEquals(DoriaTokenTypes.KEYWORD, token.type)
+            }
+        }
+        assertFalse(tokens.any { it.text == "elseif" })
+        assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
+    }
+
     private fun lex(source: String): List<Token> {
         val lexer = DoriaLexer()
         lexer.start(source)

@@ -124,10 +124,6 @@ $plannedKeywords = [
     'throws',
     'try',
     'catch',
-    'finally',
-    'when',
-    'given',
-    'do',
     'fn',
     'get',
     'set',
@@ -207,6 +203,16 @@ $rejectedTypes = [
 $stage28GuardForms = [
     'Option::Some($value) if $value > 0 => $value,',
     'match (take $loadResult)',
+];
+
+$stage28aControlFlowForms = [
+    'given {',
+    '} if ($prepared) {',
+    '} when ($prepared): string {',
+    '} while ($remaining > 0) {',
+    'do {',
+    '} while ($count < 2);',
+    '} finally {',
 ];
 
 $lspSupportedTypes = [
@@ -1410,7 +1416,7 @@ function check_editor_fixture_diagnostics_are_skipped(): void
 
 function check_fixture(): void
 {
-    global $fixture, $rejectedFixture, $strictComparison, $rejectedKeywords, $groupedLocalForms, $stage28GuardForms;
+    global $fixture, $rejectedFixture, $strictComparison, $rejectedKeywords, $groupedLocalForms, $stage28GuardForms, $stage28aControlFlowForms;
 
     $fixtureText = read_text($fixture);
     $requiredSnippets = [
@@ -1511,6 +1517,12 @@ function check_fixture(): void
         require_check(
             str_contains($fixtureText, $snippet),
             'shared editor fixture is missing Stage 28 form ' . $snippet,
+        );
+    }
+    foreach ($stage28aControlFlowForms as $snippet) {
+        require_check(
+            str_contains($fixtureText, $snippet),
+            'shared editor fixture is missing Stage 28a control-flow form ' . $snippet,
         );
     }
     require_check(
