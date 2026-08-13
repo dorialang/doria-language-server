@@ -728,7 +728,6 @@ fn completion_items() -> Value {
         "open",
         "override",
         "with",
-        "take",
         "throw",
         "throws",
         "try",
@@ -1582,7 +1581,6 @@ mod tests {
             "open",
             "override",
             "with",
-            "take",
             "throw",
             "throws",
             "try",
@@ -1614,6 +1612,12 @@ mod tests {
             assert_eq!(completion_item(keyword)["detail"], "Doria keyword");
             assert!(hover_description(&kind).is_some());
         }
+    }
+
+    #[test]
+    fn take_completion_describes_active_ownership_syntax() {
+        assert_eq!(completion_item("take")["detail"], "Doria keyword");
+        assert!(hover_description(&TokenKind::Take).is_some());
     }
 
     #[test]

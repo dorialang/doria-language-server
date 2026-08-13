@@ -377,11 +377,11 @@ fn semantic_token_type(symbol: &Symbol) -> Option<u32> {
     {
         return Some(1);
     }
+    if symbol.signature.starts_with("function ") || symbol.signature.contains(" function ") {
+        return Some(3);
+    }
     if symbol.signature.contains("::") {
         return Some(2);
-    }
-    if symbol.signature.starts_with("function ") {
-        return Some(3);
     }
     if symbol.signature.starts_with("match (...): ")
         || symbol.signature.starts_with("when (...): ")
@@ -2617,6 +2617,59 @@ function main(): void
             .local_completions_at_offset(after_when)
             .iter()
             .any(|completion| completion.label == "$branch"));
+    }
+
+    #[test]
+    fn semantic_tokens_keep_methods_distinct_from_enum_cases() {
+        let source = r#"class Worker
+{
+    function operate(): void {}
+    static function build(): void {}
+}
+
+enum Status { case Ready; }
+
+function inspect(): void
+{
+    let $worker = new Worker();
+    $worker->operate();
+    Worker::build();
+    Status $status = Status::Ready;
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("methods.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+        let tokens = snapshot.semantic_token_spans();
+
+        for name in ["operate", "build"] {
+            let occurrences = source
+                .match_indices(name)
+                .map(|(start, _)| Span::new(start, start + name.len()))
+                .collect::<Vec<_>>();
+            assert_eq!(occurrences.len(), 2);
+            for span in occurrences {
+                assert!(
+                    tokens
+                        .iter()
+                        .any(|(token_span, token_type)| *token_span == span && *token_type == 3),
+                    "method `{name}` at {span:?} must use the function token type"
+                );
+            }
+        }
+
+        for (start, _) in source.match_indices("Ready") {
+            let span = Span::new(start, start + "Ready".len());
+            assert!(
+                tokens
+                    .iter()
+                    .any(|(token_span, token_type)| *token_span == span && *token_type == 2),
+                "enum case at {span:?} must retain the enum-member token type"
+            );
+        }
     }
 
     #[test]
