@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use doriac::ast::{
-    Block, ClassDecl, ClassMember, ElseBranch, EnumDecl, Expr, ForIncrement, ForInitializer,
-    FunctionDecl, Item, MatchPattern, MemberAccess, Param, Program, StaticQualifier, Stmt, VarDecl,
+    Block, ClassDecl, ClassMember, ControlFlowFinally, DoWhileStmt, ElseBranch, EnumDecl, Expr,
+    ForIncrement, ForInitializer, FunctionDecl, GivenPrelude, IfStmt, Item, MatchMode, MatchOrigin,
+    MatchPattern, MemberAccess, Param, Program, StaticQualifier, Stmt, VarDecl, WhenExpression,
+    WhileStmt,
 };
 use doriac::diagnostics::Diagnostic;
 use doriac::enums::{EnumBackingType, EnumBackingValue};
@@ -328,6 +330,20 @@ impl AnalysisSnapshot {
         spans
     }
 
+    pub(crate) fn semantic_token_spans(&self) -> Vec<(Span, u32)> {
+        let mut spans = self
+            .occurrences
+            .iter()
+            .filter_map(|occurrence| {
+                let symbol = self.symbols.get(occurrence.symbol)?;
+                semantic_token_type(symbol).map(|token_type| (occurrence.span, token_type))
+            })
+            .collect::<Vec<_>>();
+        spans.sort_by_key(|(span, _)| (span.start, span.end));
+        spans.dedup_by_key(|(span, _)| (span.start, span.end));
+        spans
+    }
+
     pub(crate) fn rename_replacement_at_offset(
         &self,
         offset: usize,
@@ -348,6 +364,33 @@ impl AnalysisSnapshot {
             .min_by_key(|occurrence| occurrence.span.end.saturating_sub(occurrence.span.start))
             .map(|occurrence| occurrence.symbol)
     }
+}
+
+fn semantic_token_type(symbol: &Symbol) -> Option<u32> {
+    if symbol.kind == SymbolKind::Variable {
+        return Some(0);
+    }
+    if symbol.signature.starts_with("enum ")
+        || symbol.signature.starts_with("class ")
+        || symbol.signature.starts_with("interface ")
+        || symbol.signature.starts_with("trait ")
+    {
+        return Some(1);
+    }
+    if symbol.signature.starts_with("function ") || symbol.signature.contains(" function ") {
+        return Some(3);
+    }
+    if symbol.signature.contains("::") {
+        return Some(2);
+    }
+    if symbol.signature.starts_with("match (...): ")
+        || symbol.signature.starts_with("when (...): ")
+        || symbol.signature == "return expression;"
+        || symbol.signature == "finally { ... }"
+    {
+        return Some(4);
+    }
+    None
 }
 
 struct SnapshotBuilder<'a> {
@@ -371,6 +414,7 @@ struct SnapshotBuilder<'a> {
     local_scopes: Vec<HashMap<String, usize>>,
     local_scope_ends: Vec<usize>,
     local_visibilities: Vec<LocalVisibility>,
+    when_depth: usize,
 }
 
 impl<'a> SnapshotBuilder<'a> {
@@ -401,6 +445,7 @@ impl<'a> SnapshotBuilder<'a> {
             local_scopes: Vec::new(),
             local_scope_ends: Vec::new(),
             local_visibilities: Vec::new(),
+            when_depth: 0,
         }
     }
 
@@ -773,19 +818,34 @@ impl<'a> SnapshotBuilder<'a> {
                 self.visit_expr(&assignment.value, current_class, parent_class);
             }
             Stmt::Echo { expr, .. } => self.visit_expr(expr, current_class, parent_class),
-            Stmt::Return {
-                expr: Some(expr), ..
-            } => self.visit_expr(expr, current_class, parent_class),
-            Stmt::If(if_statement) => {
-                self.visit_expr(&if_statement.condition, current_class, parent_class);
-                self.visit_block(&if_statement.then_block, current_class, parent_class);
-                if let Some(branch) = &if_statement.else_branch {
-                    self.visit_else_branch(branch, current_class, parent_class);
+            Stmt::Return { expr, span } => {
+                if self.when_depth > 0 {
+                    if let Some(keyword) = tokens_in_span(self.tokens, *span)
+                        .find(|token| matches!(token.kind, TokenKind::Return))
+                    {
+                        self.add_reference_symbol(
+                            keyword.span,
+                            "return expression;".to_string(),
+                            Some(
+                                "Yields a value from the nearest enclosing `when` expression."
+                                    .to_string(),
+                            ),
+                            SymbolKind::Plain,
+                        );
+                    }
+                }
+                if let Some(expr) = expr {
+                    self.visit_expr(expr, current_class, parent_class);
                 }
             }
+            Stmt::If(if_statement) => {
+                self.visit_if_statement(if_statement, current_class, parent_class)
+            }
             Stmt::While(while_statement) => {
-                self.visit_expr(&while_statement.condition, current_class, parent_class);
-                self.visit_block(&while_statement.body, current_class, parent_class);
+                self.visit_while_statement(while_statement, current_class, parent_class)
+            }
+            Stmt::DoWhile(do_while) => {
+                self.visit_do_while_statement(do_while, current_class, parent_class)
             }
             Stmt::For(for_statement) => {
                 self.push_local_scope(for_statement.span.end);
@@ -824,6 +884,116 @@ impl<'a> SnapshotBuilder<'a> {
             Stmt::Expr { expr, .. } => self.visit_expr(expr, current_class, parent_class),
             _ => {}
         }
+    }
+
+    fn visit_if_statement(
+        &mut self,
+        if_statement: &IfStmt,
+        current_class: Option<&str>,
+        parent_class: Option<&str>,
+    ) {
+        self.push_local_scope(if_statement.span.end);
+        if let Some(given) = &if_statement.given {
+            self.visit_given_prelude(given, current_class, parent_class);
+        }
+        self.visit_expr(&if_statement.condition, current_class, parent_class);
+        self.visit_block(&if_statement.then_block, current_class, parent_class);
+        if let Some(branch) = &if_statement.else_branch {
+            self.visit_else_branch(branch, current_class, parent_class);
+        }
+        if let Some(finalizer) = &if_statement.finally {
+            self.visit_finally(finalizer, current_class, parent_class);
+        }
+        self.pop_local_scope();
+    }
+
+    fn visit_while_statement(
+        &mut self,
+        while_statement: &WhileStmt,
+        current_class: Option<&str>,
+        parent_class: Option<&str>,
+    ) {
+        self.push_local_scope(while_statement.span.end);
+        if let Some(given) = &while_statement.given {
+            self.visit_given_prelude(given, current_class, parent_class);
+        }
+        self.visit_expr(&while_statement.condition, current_class, parent_class);
+        self.visit_block(&while_statement.body, current_class, parent_class);
+        if let Some(finalizer) = &while_statement.finally {
+            self.visit_finally(finalizer, current_class, parent_class);
+        }
+        self.pop_local_scope();
+    }
+
+    fn visit_do_while_statement(
+        &mut self,
+        do_while: &DoWhileStmt,
+        current_class: Option<&str>,
+        parent_class: Option<&str>,
+    ) {
+        self.visit_block(&do_while.body, current_class, parent_class);
+        self.visit_expr(&do_while.condition, current_class, parent_class);
+        self.add_reference_symbol(
+            do_while.condition.span(),
+            "do ... while condition: bool".to_string(),
+            Some("Boolean condition evaluated after each completed loop body.".to_string()),
+            SymbolKind::Plain,
+        );
+        if let Some(finalizer) = &do_while.finally {
+            self.visit_finally(finalizer, current_class, parent_class);
+        }
+    }
+
+    fn visit_given_prelude(
+        &mut self,
+        given: &GivenPrelude,
+        current_class: Option<&str>,
+        parent_class: Option<&str>,
+    ) {
+        let predicate_indices = self
+            .semantic_info
+            .and_then(|info| info.given_preludes.get(&(given.span.start, given.span.end)))
+            .map(|info| {
+                info.predicate_statement_indices
+                    .iter()
+                    .copied()
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+        for (index, statement) in given.block.statements.iter().enumerate() {
+            self.visit_stmt(statement, current_class, parent_class);
+            if predicate_indices.contains(&index) {
+                if let Stmt::Expr { expr, .. } = statement {
+                    self.add_reference_symbol(
+                        expr.span(),
+                        "given predicate: bool".to_string(),
+                        Some(
+                            "Boolean gate evaluated in source order before the attached condition."
+                                .to_string(),
+                        ),
+                        SymbolKind::Plain,
+                    );
+                }
+            }
+        }
+    }
+
+    fn visit_finally(
+        &mut self,
+        finalizer: &ControlFlowFinally,
+        current_class: Option<&str>,
+        parent_class: Option<&str>,
+    ) {
+        self.add_reference_symbol(
+            finalizer.keyword_span,
+            "finally { ... }".to_string(),
+            Some(
+                "Accepted control-flow finalizer syntax. Execution currently reports the compiler's pending-finalizer diagnostic."
+                    .to_string(),
+            ),
+            SymbolKind::Plain,
+        );
+        self.visit_block(&finalizer.block, current_class, parent_class);
     }
 
     fn visit_local_declaration(
@@ -876,8 +1046,29 @@ impl<'a> SnapshotBuilder<'a> {
         signature: String,
         visibility_start: usize,
     ) {
-        let symbol =
-            self.add_declaration_symbol(selection_span, signature, None, SymbolKind::Variable);
+        self.declare_local_binding_with_documentation(
+            name,
+            selection_span,
+            signature,
+            visibility_start,
+            None,
+        );
+    }
+
+    fn declare_local_binding_with_documentation(
+        &mut self,
+        name: &str,
+        selection_span: Span,
+        signature: String,
+        visibility_start: usize,
+        documentation: Option<String>,
+    ) {
+        let symbol = self.add_declaration_symbol(
+            selection_span,
+            signature,
+            documentation,
+            SymbolKind::Variable,
+        );
         self.symbols[symbol].local_name = Some(name.to_string());
         self.local_visibilities.push(LocalVisibility {
             symbol,
@@ -918,11 +1109,7 @@ impl<'a> SnapshotBuilder<'a> {
         parent_class: Option<&str>,
     ) {
         if let ElseBranch::If(if_statement) = branch {
-            self.visit_expr(&if_statement.condition, current_class, parent_class);
-            self.visit_block(&if_statement.then_block, current_class, parent_class);
-            if let Some(branch) = &if_statement.else_branch {
-                self.visit_else_branch(branch, current_class, parent_class);
-            }
+            self.visit_if_statement(if_statement, current_class, parent_class);
         }
         if let ElseBranch::Block(block) = branch {
             self.visit_block(block, current_class, parent_class);
@@ -1229,10 +1416,48 @@ impl<'a> SnapshotBuilder<'a> {
                 self.visit_expr(index, current_class, parent_class);
             }
             Expr::Match {
-                scrutinee, arms, ..
+                scrutinee,
+                mode,
+                arms,
+                origin,
+                span,
             } => {
                 self.visit_expr(scrutinee, current_class, parent_class);
-                for arm in arms {
+                let match_info = self
+                    .semantic_info
+                    .and_then(|info| info.matches.get(&(span.start, span.end)))
+                    .cloned();
+                if *origin == MatchOrigin::Match {
+                    if let (Some(info), Some(keyword)) = (
+                        match_info.as_ref(),
+                        tokens_in_span(self.tokens, *span)
+                            .find(|token| matches!(token.kind, TokenKind::Match)),
+                    ) {
+                        self.add_reference_symbol(
+                            keyword.span,
+                            format!("match (...): {}", display_resolved_type(&info.result_type)),
+                            Some("Exhaustive match expression result.".to_string()),
+                            SymbolKind::Plain,
+                        );
+                    }
+                }
+                if let MatchMode::Consumed { take_span } = mode {
+                    self.add_reference_symbol(
+                        *take_span,
+                        "match (take $value)".to_string(),
+                        Some(
+                            "Gives the whole Move value to this match. A matching guard sees readonly payload views; the selected arm receives owned Move payload bindings."
+                                .to_string(),
+                        ),
+                        SymbolKind::Plain,
+                    );
+                }
+                for (index, arm) in arms.iter().enumerate() {
+                    self.push_local_scope(arm.span.end);
+                    let visibility_start = arm.guard.as_ref().map_or_else(
+                        || arm.value.span().start,
+                        |guard| guard.condition.span().start,
+                    );
                     match &arm.pattern {
                         MatchPattern::Expression(pattern) => {
                             self.visit_expr(pattern, current_class, parent_class)
@@ -1242,6 +1467,7 @@ impl<'a> SnapshotBuilder<'a> {
                             qualifier_span,
                             case,
                             case_span,
+                            bindings,
                             ..
                         } => {
                             self.record_enum_static_reference(
@@ -1250,16 +1476,123 @@ impl<'a> SnapshotBuilder<'a> {
                                 case,
                                 *case_span,
                             );
+                            if let (Some(bindings), Some(arm_info)) = (
+                                bindings.as_ref(),
+                                match_info.as_ref().and_then(|info| info.arms.get(index)),
+                            ) {
+                                self.declare_match_bindings(
+                                    bindings,
+                                    arm_info.bindings.iter(),
+                                    visibility_start,
+                                );
+                            }
+                        }
+                        MatchPattern::TypeBinding { ty, binding, span } => {
+                            self.record_match_type_reference(ty, *span);
+                            if let Some(binding_info) = match_info
+                                .as_ref()
+                                .and_then(|info| info.arms.get(index))
+                                .and_then(|arm| arm.bindings.first())
+                            {
+                                self.declare_match_bindings(
+                                    std::slice::from_ref(binding),
+                                    std::iter::once(binding_info),
+                                    visibility_start,
+                                );
+                            }
                         }
                         MatchPattern::Default { .. } => {}
                     }
+                    if let Some(guard) = &arm.guard {
+                        self.visit_expr(&guard.condition, current_class, parent_class);
+                    }
                     self.visit_expr(&arm.value, current_class, parent_class);
+                    self.pop_local_scope();
                 }
             }
+            Expr::When(when) => self.visit_when_expression(when, current_class, parent_class),
             // IDE analysis is best-effort across compiler feature branches. New
             // expression forms remain diagnostic-safe until their symbol-bearing
             // children need explicit traversal here.
             _ => {}
+        }
+    }
+
+    fn visit_when_expression(
+        &mut self,
+        when: &WhenExpression,
+        current_class: Option<&str>,
+        parent_class: Option<&str>,
+    ) {
+        self.push_local_scope(when.span.end);
+        if let Some(given) = &when.given {
+            self.visit_given_prelude(given, current_class, parent_class);
+        }
+        if let (Some(info), Some(keyword)) = (
+            self.semantic_info
+                .and_then(|semantic| semantic.whens.get(&(when.span.start, when.span.end))),
+            tokens_in_span(self.tokens, when.span)
+                .find(|token| matches!(token.kind, TokenKind::When)),
+        ) {
+            self.add_reference_symbol(
+                keyword.span,
+                format!("when (...): {}", display_resolved_type(&info.result_type)),
+                Some("Exhaustive conditional expression result.".to_string()),
+                SymbolKind::Plain,
+            );
+        }
+        for branch in &when.branches {
+            if let Some(condition) = &branch.condition {
+                self.visit_expr(condition, current_class, parent_class);
+            }
+            self.when_depth += 1;
+            self.visit_block(&branch.block, current_class, parent_class);
+            self.when_depth -= 1;
+        }
+        if let Some(finalizer) = &when.finally {
+            self.visit_finally(finalizer, current_class, parent_class);
+        }
+        self.pop_local_scope();
+    }
+
+    fn declare_match_bindings<'b>(
+        &mut self,
+        bindings: &'b [doriac::ast::MatchBinding],
+        semantics: impl Iterator<Item = &'b doriac::semantics::MatchBindingSemanticInfo>,
+        visibility_start: usize,
+    ) {
+        for (binding, semantic) in bindings.iter().zip(semantics) {
+            self.declare_local_binding_with_documentation(
+                &binding.name,
+                binding.span,
+                format!(
+                    "{} ${}",
+                    display_resolved_type(&semantic.ty),
+                    binding.name
+                ),
+                visibility_start,
+                Some(if !semantic.borrowed {
+                    "Readonly while the guard is evaluated; owns the selected Move payload in the arm."
+                        .to_string()
+                } else {
+                    "Readonly pattern binding available in this arm's guard and result."
+                        .to_string()
+                }),
+            );
+        }
+    }
+
+    fn record_match_type_reference(&mut self, ty: &doriac::types::TypeRef, span: Span) {
+        let Some(type_span) = find_identifier_span(self.tokens, span, &ty.name) else {
+            return;
+        };
+        if let Some(symbol) = self
+            .enums
+            .get(&ty.name)
+            .or_else(|| self.classes.get(&ty.name))
+            .copied()
+        {
+            self.record_reference(type_span, symbol);
         }
     }
 
@@ -2125,7 +2458,7 @@ function main(): void
     }
 
     #[test]
-    fn payload_execution_is_accepted_while_match_keeps_its_compiler_owned_diagnostic() {
+    fn executable_match_bindings_share_hover_reference_rename_and_scope_identity() {
         let payload = AnalysisSnapshot::analyze(
             "payload.doria",
             "enum Shape { case Circle(float $radius); } Shape $shape = Shape::Circle(2.5);",
@@ -2136,13 +2469,379 @@ function main(): void
             payload.diagnostics()
         );
 
-        let matching_source = "enum Status { case Draft; } let $label = match (Status::Draft) { Status::Draft => 1, default => 0, };";
+        let matching_source = r#"enum Result { case Value(string $text); case Missing; }
+function main(): void
+{
+    Result $result = Result::Value("ok");
+    string $label = match ($result) {
+        Result::Value($value) => "😀 {$value}",
+        Result::Missing => "missing",
+    };
+}"#;
         let matching = AnalysisSnapshot::analyze("match.doria", matching_source);
-        assert_eq!(matching.diagnostics().len(), 1);
-        assert_eq!(matching.diagnostics()[0].code, "E0576");
-        assert!(hover(matching_source, "Draft", 2)
+        assert!(
+            matching.diagnostics().is_empty(),
+            "{:?}",
+            matching.diagnostics()
+        );
+        assert!(hover(matching_source, "match", 0)
             .markdown
-            .contains("Status::Draft: Status"));
+            .contains("match (...): string"));
+        assert!(hover(matching_source, "$result", 1)
+            .markdown
+            .contains("Result $result"));
+        assert!(hover(matching_source, "Value", 2)
+            .markdown
+            .contains("Result::Value(string $text): Result"));
+        assert!(hover(matching_source, "$value", 0)
+            .markdown
+            .contains("string $value"));
+
+        let binding_offset = matching_source.find("$value").expect("pattern binding");
+        assert_eq!(
+            matching
+                .reference_spans_at_offset(binding_offset, true)
+                .len(),
+            2
+        );
+        assert_eq!(
+            matching.rename_replacement_at_offset(binding_offset, "renamed"),
+            Some("$renamed".to_string())
+        );
+        assert!(matching
+            .semantic_token_spans()
+            .iter()
+            .any(
+                |(span, token_type)| *span == Span::new(binding_offset, binding_offset + 6)
+                    && *token_type == 0
+            ));
+
+        let leaked = AnalysisSnapshot::analyze(
+            "leaked.doria",
+            "enum Result { case Value(string $text); } function main(): void { Result $r = Result::Value(\"ok\"); string $v = match ($r) { Result::Value($inside) => $inside, }; echo $inside; }",
+        );
+        assert!(leaked
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0101"));
+    }
+
+    #[test]
+    fn control_flow_foundations_share_semantic_scope_hover_and_rename_identity() {
+        let source = r#"function main(): void
+{
+    echo "😀"; given {
+        /* 😀 */ let $prepared = true;
+        /* 😀 */ true;
+    } if ($prepared) {
+        echo "{$prepared}";
+    }
+
+    echo "😀"; string $label = given {
+        let $choice = true;
+        true;
+    } when ($choice): string {
+        echo "😀"; let $branch = 1;
+        echo "{$branch}";
+        echo "😀"; return "selected";
+    } else {
+        return "fallback";
+    };
+
+    do {
+        echo $label;
+    } while (/* 😀 */ true);
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("control-flow.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+
+        let prepared = source.find("$prepared").expect("given declaration");
+        assert!(snapshot
+            .hover_at_offset(prepared)
+            .expect("given local hover")
+            .markdown
+            .contains("bool $prepared"));
+        assert_eq!(
+            snapshot.reference_spans_at_offset(prepared, true).len(),
+            3,
+            "given declaration, attached condition, and selected branch share one symbol"
+        );
+        assert_eq!(
+            snapshot.rename_replacement_at_offset(prepared, "ready"),
+            Some("$ready".to_string())
+        );
+        assert!(snapshot
+            .semantic_token_spans()
+            .iter()
+            .any(|(span, token_type)| span.start == prepared && *token_type == 0));
+
+        let if_body = source.find("echo \"{$prepared}\"").unwrap();
+        assert!(snapshot
+            .local_completions_at_offset(if_body)
+            .iter()
+            .any(|completion| completion.label == "$prepared"));
+        let after_if = source.find("string $label").unwrap();
+        assert!(!snapshot
+            .local_completions_at_offset(after_if)
+            .iter()
+            .any(|completion| completion.label == "$prepared"));
+
+        let predicate = source.find("true;\n    } if").unwrap();
+        assert!(snapshot
+            .hover_at_offset(predicate)
+            .expect("given predicate hover")
+            .markdown
+            .contains("given predicate: bool"));
+        assert!(hover(source, "when", 0)
+            .markdown
+            .contains("when (...): string"));
+        assert!(hover(source, "return", 0)
+            .markdown
+            .contains("Yields a value"));
+        assert!(hover(source, "true);", 0)
+            .markdown
+            .contains("do ... while condition: bool"));
+
+        let branch = source.rfind("$branch").expect("when branch local use");
+        assert!(snapshot
+            .local_completions_at_offset(branch)
+            .iter()
+            .any(|completion| completion.label == "$branch"));
+        let after_when = source.find("do {").unwrap();
+        assert!(!snapshot
+            .local_completions_at_offset(after_when)
+            .iter()
+            .any(|completion| completion.label == "$branch"));
+    }
+
+    #[test]
+    fn semantic_tokens_keep_methods_distinct_from_enum_cases() {
+        let source = r#"class Worker
+{
+    function operate(): void {}
+    static function build(): void {}
+}
+
+enum Status { case Ready; }
+
+function inspect(): void
+{
+    let $worker = new Worker();
+    $worker->operate();
+    Worker::build();
+    Status $status = Status::Ready;
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("methods.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+        let tokens = snapshot.semantic_token_spans();
+
+        for name in ["operate", "build"] {
+            let occurrences = source
+                .match_indices(name)
+                .map(|(start, _)| Span::new(start, start + name.len()))
+                .collect::<Vec<_>>();
+            assert_eq!(occurrences.len(), 2);
+            for span in occurrences {
+                assert!(
+                    tokens
+                        .iter()
+                        .any(|(token_span, token_type)| *token_span == span && *token_type == 3),
+                    "method `{name}` at {span:?} must use the function token type"
+                );
+            }
+        }
+
+        for (start, _) in source.match_indices("Ready") {
+            let span = Span::new(start, start + "Ready".len());
+            assert!(
+                tokens
+                    .iter()
+                    .any(|(token_span, token_type)| *token_span == span && *token_type == 2),
+                "enum case at {span:?} must retain the enum-member token type"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_finally_keeps_ast_hover_and_compiler_diagnostic() {
+        let source = r#"function main(): void
+{
+    if (true) {
+        echo "body";
+    } /* 😀 */ finally {
+        echo "cleanup";
+    }
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("finally.doria", source);
+        assert!(snapshot
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0611"));
+        assert!(snapshot
+            .hover_at_offset(source.find("finally").unwrap())
+            .expect("finally hover")
+            .markdown
+            .contains("pending-finalizer diagnostic"));
+    }
+
+    #[test]
+    fn guarded_consuming_match_keeps_one_source_binding_identity() {
+        let source = r#"class Document
+{
+    function __construct(string $name) {}
+    function isReady(): bool { return true; }
+}
+enum LoadResult { case Loaded(Document $document); case Missing; }
+function main(): void
+{
+    echo "😀";
+    LoadResult $result = LoadResult::Loaded(new Document("ready"));
+    Document $selected = match (take $result) {
+        LoadResult::Loaded($document) if $document->isReady() => $document,
+        LoadResult::Loaded($document) => $document,
+        LoadResult::Missing => new Document("fallback"),
+    };
+}"#;
+        let snapshot = AnalysisSnapshot::analyze("guarded-take.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+
+        let take_offset = source.find("take").expect("take modifier");
+        let take_hover = snapshot
+            .hover_at_offset(take_offset)
+            .expect("consuming-match hover");
+        assert!(take_hover.markdown.contains("whole Move value"));
+
+        let match_offset = source.find("match (take").expect("consuming match");
+        let binding_offset = source[match_offset..]
+            .find("LoadResult::Loaded($document)")
+            .map(|offset| match_offset + offset + "LoadResult::Loaded(".len())
+            .expect("payload binding");
+        let guard_offset = source[binding_offset + 1..]
+            .find("$document")
+            .map(|offset| binding_offset + 1 + offset)
+            .expect("guard reference");
+        let arm_offset = source[guard_offset + 1..]
+            .find("$document")
+            .map(|offset| guard_offset + 1 + offset)
+            .expect("arm reference");
+        for offset in [binding_offset, guard_offset, arm_offset] {
+            let hover = snapshot
+                .hover_at_offset(offset)
+                .expect("guarded binding hover");
+            assert!(hover.markdown.contains("Document $document"));
+            assert!(hover.markdown.contains("Readonly while the guard"));
+            assert!(hover.markdown.contains("owns the selected Move payload"));
+        }
+        assert_eq!(
+            snapshot
+                .reference_spans_at_offset(binding_offset, true)
+                .len(),
+            3
+        );
+        assert_eq!(
+            snapshot.rename_replacement_at_offset(guard_offset, "payload"),
+            Some("$payload".to_string())
+        );
+
+        let second_binding = source[arm_offset + 1..]
+            .find("$document")
+            .map(|offset| arm_offset + 1 + offset)
+            .expect("second-arm binding");
+        assert_eq!(
+            snapshot
+                .reference_spans_at_offset(second_binding, true)
+                .len(),
+            2,
+            "each arm owns a separate lexical binding"
+        );
+    }
+
+    #[test]
+    fn copy_pattern_binding_masks_an_outer_move_symbol() {
+        let source = r#"class Box {}
+enum Number { case Value(int $item); }
+function consume(take Box $item): void {}
+function main(): void
+{
+    Box $item = new Box();
+    consume($item);
+    int $value = match (Number::Value(42)) {
+        Number::Value($item) => $item,
+    };
+}"#;
+        let snapshot = AnalysisSnapshot::analyze("copy-shadow.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        let pattern_offset = source.rfind("Number::Value($item)").unwrap() + "Number::Value(".len();
+        let pattern_hover = snapshot
+            .hover_at_offset(pattern_offset)
+            .expect("Copy pattern binding hover");
+        assert!(pattern_hover.markdown.contains("int $item"));
+        assert_eq!(
+            snapshot
+                .reference_spans_at_offset(pattern_offset, true)
+                .len(),
+            2,
+            "the Copy pattern binding must not resolve to the outer Box"
+        );
+        assert_eq!(
+            snapshot.rename_replacement_at_offset(pattern_offset, "number"),
+            Some("$number".to_string())
+        );
+        let outer_offset = source.find("$item = new Box").expect("outer binding");
+        let outer_hover = snapshot
+            .hover_at_offset(outer_offset)
+            .expect("outer Move binding hover");
+        assert!(outer_hover.markdown.contains("Box $item"));
+        assert_eq!(
+            snapshot.reference_spans_at_offset(outer_offset, true).len(),
+            2,
+            "the moved outer symbol remains independent"
+        );
+    }
+
+    #[test]
+    fn exact_type_match_binding_hovers_with_its_narrowed_type() {
+        let source = r#"class Document {}
+function label(mixed $value): string
+{
+    return match ($value) {
+        Document $document => "document",
+        string $text => $text,
+        default => "other",
+    };
+}"#;
+        let snapshot = AnalysisSnapshot::analyze("types.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        assert!(hover(source, "$document", 0)
+            .markdown
+            .contains("Document $document"));
+        assert!(hover(source, "$text", 0).markdown.contains("string $text"));
+        assert!(hover(source, "Document", 1)
+            .markdown
+            .contains("class Document"));
     }
 
     #[test]

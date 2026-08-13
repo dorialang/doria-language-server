@@ -946,7 +946,6 @@ class DoriaLexer : LexerBase() {
             "get",
             "set",
             "insteadof",
-            "take",
             "try",
             "catch",
             "throw",

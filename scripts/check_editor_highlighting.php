@@ -124,10 +124,6 @@ $plannedKeywords = [
     'throws',
     'try',
     'catch',
-    'finally',
-    'when',
-    'given',
-    'do',
     'fn',
     'get',
     'set',
@@ -202,6 +198,21 @@ $rejectedTypes = [
     'array',
     'object',
     'never',
+];
+
+$stage28GuardForms = [
+    'Option::Some($value) if $value > 0 => $value,',
+    'match (take $loadResult)',
+];
+
+$stage28aControlFlowForms = [
+    'given {',
+    '} if ($prepared) {',
+    '} when ($prepared): string {',
+    '} while ($remaining > 0) {',
+    'do {',
+    '} while ($count < 2);',
+    '} finally {',
 ];
 
 $lspSupportedTypes = [
@@ -1405,7 +1416,7 @@ function check_editor_fixture_diagnostics_are_skipped(): void
 
 function check_fixture(): void
 {
-    global $fixture, $rejectedFixture, $strictComparison, $rejectedKeywords, $groupedLocalForms;
+    global $fixture, $rejectedFixture, $strictComparison, $rejectedKeywords, $groupedLocalForms, $stage28GuardForms, $stage28aControlFlowForms;
 
     $fixtureText = read_text($fixture);
     $requiredSnippets = [
@@ -1489,6 +1500,9 @@ function check_fixture(): void
         '$repository->findById($id)',
         'let $reference = shared new SharedEditorPayload();',
         '$reference->referencedValue->name',
+        'let $score = match ($option)',
+        'Option::Some($value) => 0',
+        'Option::None => 0',
     ];
     foreach ($requiredSnippets as $snippet) {
         require_check(str_contains($fixtureText, $snippet), 'shared editor fixture is missing ' . $snippet);
@@ -1499,6 +1513,22 @@ function check_fixture(): void
             'shared editor fixture is missing grouped local form ' . $snippet,
         );
     }
+    foreach ($stage28GuardForms as $snippet) {
+        require_check(
+            str_contains($fixtureText, $snippet),
+            'shared editor fixture is missing Stage 28 form ' . $snippet,
+        );
+    }
+    foreach ($stage28aControlFlowForms as $snippet) {
+        require_check(
+            str_contains($fixtureText, $snippet),
+            'shared editor fixture is missing Stage 28a control-flow form ' . $snippet,
+        );
+    }
+    require_check(
+        !str_contains($fixtureText, ' where ') && !str_contains($fixtureText, ' when true =>'),
+        'shared editor fixture must not publish where/when aliases for match guards',
+    );
     require_check(
         !str_contains($fixtureText, 'str_starts_with('),
         'shared editor fixture must not publish the removed Doria str_* String surface',

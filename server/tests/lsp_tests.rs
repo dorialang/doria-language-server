@@ -299,7 +299,7 @@ fn preserves_the_compiler_readonly_clear_diagnostic_after_non_ascii_text() {
 }
 
 #[test]
-fn payload_enum_execution_and_match_boundary_come_from_the_compiler() {
+fn payload_enums_and_core_match_execution_come_from_the_compiler() {
     let accepted = diagnostics_for_document(
         "file:///enums.doria",
         r#"enum Status { case Draft; }
@@ -324,10 +324,122 @@ function main(): void
 
     let matching = diagnostics_for_document(
         "file:///match.doria",
-        "enum Status { case Draft; } let $label = match (Status::Draft) { Status::Draft => 1, default => 0, };",
+        "enum Status { case Draft; } let $label = match (Status::Draft) { Status::Draft => 1, };",
     );
-    assert_eq!(matching.len(), 1, "{matching:#?}");
-    assert_eq!(matching[0]["code"], "E0576");
+    assert!(matching.is_empty(), "{matching:#?}");
+
+    let missing = diagnostics_for_document(
+        "file:///missing-match-case.doria",
+        "enum Status { case Draft; case Published; } let $label = match (Status::Draft) { Status::Draft => 1, };",
+    );
+    assert!(missing
+        .iter()
+        .any(|diagnostic| diagnostic["code"] == "E0585"));
+}
+
+#[test]
+fn match_payload_guard_and_ternary_semantics_remain_compiler_owned() {
+    let payload = diagnostics_for_document(
+        "file:///payload-pattern.doria",
+        r#"enum Pair { case Values(int $left, int $right); }
+function main(): void
+{
+    echo "😀";
+    Pair $pair = Pair::Values(1, 2);
+    int $value = match ($pair) { Pair::Values($left) => $left, };
+}
+"#,
+    );
+    assert!(payload
+        .iter()
+        .any(|diagnostic| diagnostic["code"] == "E0590"));
+
+    let guard = diagnostics_for_document(
+        "file:///match-guard.doria",
+        "enum State { case Ready; } function f(State $state, bool $enabled): string { return match ($state) { State::Ready if $enabled => \"ready\", State::Ready => \"disabled\", }; }",
+    );
+    assert!(guard.is_empty(), "{guard:#?}");
+
+    let non_bool_guard = diagnostics_for_document(
+        "file:///match-guard-type.doria",
+        "enum State { case Ready; } function f(State $state): string { return match ($state) { State::Ready if 1 => \"ready\", State::Ready => \"fallback\", }; }",
+    );
+    assert!(non_bool_guard
+        .iter()
+        .any(|diagnostic| diagnostic["code"] == "E0597"));
+
+    let ternary_source =
+        "function f(int $value): string { echo \"😀\"; return $value ? \"yes\" : \"no\"; }";
+    let ternary = diagnostics_for_document("file:///ternary.doria", ternary_source);
+    let diagnostic = ternary
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0595")
+        .unwrap_or_else(|| panic!("missing strict ternary diagnostic: {ternary:#?}"));
+    let expected = byte_offset_to_position(
+        ternary_source,
+        ternary_source.rfind("$value").expect("ternary condition"),
+    );
+    assert_eq!(diagnostic["range"]["start"]["line"], expected.line);
+    assert_eq!(
+        diagnostic["range"]["start"]["character"],
+        expected.character
+    );
+
+    let elvis = diagnostics_for_document(
+        "file:///elvis.doria",
+        "function f(?string $value): string { return $value ?: \"fallback\"; }",
+    );
+    assert_eq!(elvis.len(), 1, "{elvis:#?}");
+    let message = elvis[0]["message"].as_str().expect("Elvis diagnostic");
+    assert!(message.contains("short ternary"));
+    assert!(message.contains("`??`"));
+    assert!(message.contains("full `? :`"));
+}
+
+#[test]
+fn contextual_match_results_use_the_final_compiler_rules_in_every_call_form() {
+    let diagnostics = diagnostics_for_document(
+        "file:///contextual-match.doria",
+        r#"class Sink
+{
+    mixed $property = match (1 == 2) { true => 1, false => "text", };
+
+    function __construct(take mixed $value) {}
+    function accept(mixed $value): void {}
+    static function acceptStatic(mixed $value): void {}
+}
+
+function accept(mixed $value): void {}
+function mixedResult(bool $condition): mixed
+{
+    return match ($condition) { true => 1, false => "text", };
+}
+function nullResult(bool $condition): ?string
+{
+    return match ($condition) { true => null, false => null, };
+}
+
+function main(): void
+{
+    bool $condition = true;
+    mixed $local = match ($condition) { true => 1, false => "text", };
+    writable mixed $assigned = 0;
+    $assigned = match (false) { true => 1, false => "text", };
+    accept(match (false) { true => 1, false => "text", });
+    let $sink = new Sink(match (false) { true => 1, false => "text", });
+    $sink->accept(match (false) { true => 1, false => "text", });
+    Sink::acceptStatic(match (false) { true => 1, false => "text", });
+    mixed $nested = match ($condition) {
+        true => match (false) { true => 1, false => "nested", },
+        false => false,
+    };
+    mixed $ternary = true ? match (false) { true => 1, false => "ternary", } : false;
+    mixed $mixed = mixedResult(true);
+    ?string $nullable = nullResult(false);
+}"#,
+    );
+
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
 }
 
 #[test]
@@ -399,9 +511,9 @@ function main(): void { echo "😀"; Bucket $left = Bucket::Values([1]); Bucket 
         ),
         (
             "match",
-            r#"enum Status { case Draft; }
-function main(): void { echo "😀"; let $label = match (Status::Draft) { Status::Draft => 1, default => 0, }; }"#,
-            "E0576",
+            r#"enum Status { case Draft; case Published; }
+function main(): void { echo "😀"; let $label = match (Status::Draft) { Status::Draft => 1, }; }"#,
+            "E0585",
             "match",
         ),
     ];
@@ -818,6 +930,44 @@ while ($count < 3) {
     );
 
     assert_eq!(diagnostics, Vec::<Value>::new());
+}
+
+#[test]
+fn accepts_stage28a_executable_control_flow_without_lsp_diagnostics() {
+    let diagnostics = diagnostics_for_document(
+        "file:///stage28a.doria",
+        r#"function main(): void
+{
+    let writable $count = 0;
+    given {
+        let $prepared = true;
+        true;
+    } if ($prepared) {
+        echo "prepared";
+    }
+    string $label = when ($count == 0): string {
+        return "zero";
+    } else {
+        return "other";
+    };
+    do {
+        $count++;
+    } while ($count < 2);
+    echo $label;
+}
+"#,
+    );
+    assert_eq!(diagnostics, Vec::<Value>::new());
+}
+
+#[test]
+fn publishes_the_pending_finalizer_diagnostic_without_syntax_noise() {
+    let diagnostics = diagnostics_for_document(
+        "file:///finally.doria",
+        "function main(): void { if (true) {} finally {} }",
+    );
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+    assert_eq!(diagnostics[0]["code"], "E0611");
 }
 
 #[test]
