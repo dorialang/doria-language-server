@@ -250,7 +250,9 @@ private object DoriaSpacing {
                 preserveLineBreaks = false,
             )
         }
-        if (leftText == "}" && rightText in setOf("else", "catch", "finally")) {
+        if ((leftText == "}" || (leftText == ")" && rightText == "finally")) &&
+            rightText in setOf("else", "catch", "finally")
+        ) {
             val newLine = when (rightText) {
                 "else" -> settings.ELSE_ON_NEW_LINE
                 "catch" -> settings.CATCH_ON_NEW_LINE
