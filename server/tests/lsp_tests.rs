@@ -944,15 +944,29 @@ fn accepts_stage28a_executable_control_flow_without_lsp_diagnostics() {
         true;
     } if ($prepared) {
         echo "prepared";
+    } finally {
+        echo "if cleanup";
     }
-    string $label = when ($count == 0): string {
+    string $label = given {
+        let $prefix = "label";
+        true;
+    } when ($count == 0): string {
         return "zero";
     } else {
         return "other";
+    } finally {
+        echo $prefix;
     };
+    while ($count < 1) {
+        $count++;
+    } finally {
+        echo "while cleanup";
+    }
     do {
         $count++;
-    } while ($count < 2);
+    } while ($count < 2) finally {
+        echo "do cleanup";
+    }
     echo $label;
 }
 "#,
@@ -961,13 +975,92 @@ fn accepts_stage28a_executable_control_flow_without_lsp_diagnostics() {
 }
 
 #[test]
-fn publishes_the_pending_finalizer_diagnostic_without_syntax_noise() {
+fn accepts_executable_finalizers_without_syntax_or_semantic_noise() {
     let diagnostics = diagnostics_for_document(
         "file:///finally.doria",
         "function main(): void { if (true) {} finally {} }",
     );
-    assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
-    assert_eq!(diagnostics[0]["code"], "E0611");
+    assert_eq!(diagnostics, Vec::<Value>::new());
+}
+
+#[test]
+fn finalizer_scope_and_transfer_diagnostics_remain_compiler_owned_and_utf16_safe() {
+    for (name, source, transfer) in [
+        (
+            "return",
+            "function leave(): void { if (true) {} finally { echo \"😀\"; return; } }",
+            "return",
+        ),
+        (
+            "break",
+            "function leave(): void { while (true) { if (true) {} finally { echo \"😀\"; break; } break; } }",
+            "break",
+        ),
+        (
+            "continue",
+            "function leave(): void { while (true) { if (true) {} finally { echo \"😀\"; continue; } break; } }",
+            "continue",
+        ),
+    ] {
+        let uri = format!("file:///{name}.doria");
+        let diagnostics = diagnostics_for_document(&uri, source);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic["code"] == "E0612")
+            .unwrap_or_else(|| panic!("missing E0612 for {name}: {diagnostics:#?}"));
+        let transfer_offset = source.find(transfer).expect("escaping transfer");
+        let expected = byte_offset_to_position(source, transfer_offset);
+        assert_eq!(diagnostic["range"]["start"]["line"], expected.line);
+        assert_eq!(
+            diagnostic["range"]["start"]["character"],
+            expected.character
+        );
+        assert!(diagnostic["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("cannot leave a `finally` block")));
+    }
+
+    let contained = diagnostics_for_document(
+        "file:///contained-finalizer-control.doria",
+        r#"function main(): void
+{
+    if (true) {} finally {
+        echo "😀";
+        string $label = when (true): string {
+            return "ready";
+        } else {
+            return "waiting";
+        };
+        while (true) {
+            break;
+        }
+        echo $label;
+    }
+}
+"#,
+    );
+    assert_eq!(contained, Vec::<Value>::new());
+
+    let branch_local = diagnostics_for_document(
+        "file:///branch-local-finalizer.doria",
+        "function main(): void { if (true) { let $branch = 1; } finally { echo $branch; } }",
+    );
+    assert!(branch_local
+        .iter()
+        .any(|diagnostic| diagnostic["code"] == "E0101"));
+
+    let given_local = diagnostics_for_document(
+        "file:///given-local-finalizer.doria",
+        "function main(): void { given { let $prepared = true; } if ($prepared) {} finally { echo $prepared; } echo $prepared; }",
+    );
+    assert_eq!(
+        given_local
+            .iter()
+            .filter(|diagnostic| diagnostic["code"] == "E0101")
+            .count(),
+        1,
+        "the given local is valid through finally and unavailable afterward: {given_local:#?}"
+    );
 }
 
 #[test]

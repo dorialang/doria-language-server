@@ -988,7 +988,7 @@ impl<'a> SnapshotBuilder<'a> {
             finalizer.keyword_span,
             "finally { ... }".to_string(),
             Some(
-                "Accepted control-flow finalizer syntax. Execution currently reports the compiler's pending-finalizer diagnostic."
+                "Runs exactly once when the attached control-flow construct leaves normally or through a structured transfer. Fatal panic bypasses it."
                     .to_string(),
             ),
             SymbolKind::Plain,
@@ -2673,7 +2673,7 @@ function inspect(): void
     }
 
     #[test]
-    fn pending_finally_keeps_ast_hover_and_compiler_diagnostic() {
+    fn executable_finally_keeps_ast_hover_without_a_compiler_diagnostic() {
         let source = r#"function main(): void
 {
     if (true) {
@@ -2684,15 +2684,16 @@ function inspect(): void
 }
 "#;
         let snapshot = AnalysisSnapshot::analyze("finally.doria", source);
-        assert!(snapshot
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.code == "E0611"));
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
         assert!(snapshot
             .hover_at_offset(source.find("finally").unwrap())
             .expect("finally hover")
             .markdown
-            .contains("pending-finalizer diagnostic"));
+            .contains("Runs exactly once"));
     }
 
     #[test]

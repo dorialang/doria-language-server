@@ -1220,7 +1220,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "Runs scoped setup and ordered boolean predicates before an attached `if`, `when`, or `while` condition.",
         ),
         TokenKind::Finally => Some(
-            "Accepted control-flow finalizer syntax. Execution currently reports the compiler's pending-finalizer diagnostic.",
+            "Runs exactly once when the attached control-flow construct leaves normally or through a structured transfer. Fatal panic bypasses it.",
         ),
         TokenKind::Echo => Some("Emits a value through the current backend."),
         TokenKind::New => Some("Constructs an instance of a class."),
@@ -2342,6 +2342,9 @@ function main(): void
         /* 😀 */ true;
     } if ($prepared) {
         echo "{$prepared}";
+        let $branchOnly = true;
+    } /* 😀 */ finally {
+        echo "{$prepared}";
     }
 
     echo "😀"; string $label = given {
@@ -2357,11 +2360,6 @@ function main(): void
         echo $label;
     } while (/* 😀 */ true);
 
-    if (true) {
-        echo "body";
-    } /* 😀 */ finally {
-        echo "cleanup";
-    }
 }
 "#;
         let mut server = Server::default();
@@ -2394,10 +2392,7 @@ function main(): void
             (text.find("$choice): string").unwrap(), "bool $choice"),
             (text.find("return \"selected\"").unwrap(), "Yields a value"),
             (text.find("true);").unwrap(), "do ... while condition: bool"),
-            (
-                text.find("finally").unwrap(),
-                "pending-finalizer diagnostic",
-            ),
+            (text.find("finally").unwrap(), "Runs exactly once"),
         ];
         for (offset, expected) in hover_cases {
             let hover = server
@@ -2422,7 +2417,7 @@ function main(): void
             "context": { "includeDeclaration": true },
         });
         let references = server.references(Some(&reference_params));
-        assert_eq!(references.as_array().map(Vec::len), Some(3));
+        assert_eq!(references.as_array().map(Vec::len), Some(4));
 
         let rename_params = json!({
             "textDocument": { "uri": uri },
@@ -2433,7 +2428,7 @@ function main(): void
         let edits = rename["changes"][uri]
             .as_array()
             .expect("given rename edits");
-        assert_eq!(edits.len(), 3);
+        assert_eq!(edits.len(), 4);
         assert!(edits.iter().all(|edit| edit["newText"] == "$ready"));
 
         let semantic = server.semantic_tokens(Some(&json!({
@@ -2463,15 +2458,13 @@ function main(): void
         }
         assert!(found_prepared, "given local needs a UTF-16 semantic token");
 
-        let diagnostics = diagnostics_for_document(uri, text);
-        let finalizer = diagnostics
-            .iter()
-            .find(|diagnostic| diagnostic["code"] == "E0611")
-            .expect("pending finalizer diagnostic");
-        assert_eq!(
-            finalizer["range"]["start"]["character"],
-            utf16_character(text.find("finally").unwrap())
-        );
+        assert_eq!(diagnostics_for_document(uri, text), Vec::<Value>::new());
+
+        let finalizer_body = text.find("echo \"{$prepared}\";\n    }\n\n").unwrap();
+        assert!(!server
+            .completion(Some(&params_at(finalizer_body)))
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item["label"] == "$branchOnly")));
     }
 
     #[test]

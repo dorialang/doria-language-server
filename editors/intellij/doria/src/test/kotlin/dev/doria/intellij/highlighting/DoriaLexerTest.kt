@@ -125,11 +125,15 @@ class DoriaLexerTest : TestCase() {
         assertFalse(tokens.any { it.text == "when" })
     }
 
-    fun testStage28aControlFlowFoundationsUseKeywordHighlighting() {
+    fun testEveryAcceptedStage28aFinalizerAttachmentUsesKeywordHighlighting() {
         val tokens = lex(
-            "given { let \$ready = true; true; } if (\$ready) {} " +
-                "let \$label = when (true): string { return \"yes\"; } else { return \"no\"; }; " +
-                "do {} while (false); if (true) {} finally {}",
+            "if (true) {} finally {} " +
+                "given { true; } if (true) {} finally {} " +
+                "let \$a = when (true): int { return 1; } else { return 0; } finally {}; " +
+                "let \$b = given { true; } when (true): int { return 1; } else { return 0; } finally {}; " +
+                "while (true) {} finally {} " +
+                "given { true; } while (true) {} finally {} " +
+                "do {} while (false) finally {}",
         )
 
         for (keyword in listOf("given", "if", "when", "return", "else", "do", "while", "finally")) {

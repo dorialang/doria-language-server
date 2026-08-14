@@ -68,6 +68,35 @@ class DoriaFormattingModelBuilderTest : BasePlatformTestCase() {
         )
     }
 
+    fun testDoWhileFinalizerPlacementFollowsFinallySetting() {
+        val common = CodeStyle.getSettings(project).getCommonSettings(DoriaLanguage)
+        common.FINALLY_ON_NEW_LINE = true
+
+        assertFormatted(
+            """
+            do {
+            } while (false) finally {
+            }
+            """.trimIndent(),
+            """
+            do {
+            } while (false)
+            finally {
+            }
+            """.trimIndent(),
+        )
+
+        common.FINALLY_ON_NEW_LINE = false
+        assertFormatted(
+            myFixture.editor.document.text,
+            """
+            do {
+            } while (false) finally {
+            }
+            """.trimIndent(),
+        )
+    }
+
     fun testIndentOptionsDriveReformatting() {
         configureIndentOptions(indentSize = 2, continuationIndentSize = 3, useTabs = false)
 
