@@ -222,7 +222,7 @@ dependencies = [
 [[package]]
 name = "doria-diagnostic-catalogue"
 version = "2026.3.1-canary"
-source = "git+https://github.com/dorialang/doria?rev=9bedbc9c71227f3a77c763da0c4593aeb6d53a89#9bedbc9c71227f3a77c763da0c4593aeb6d53a89"
+source = "git+https://github.com/dorialang/doria?rev=36024ef335364cbeeb3157cf94bb5e63d41a5b1b#36024ef335364cbeeb3157cf94bb5e63d41a5b1b"
 
 [[package]]
 name = "doria-language-server"
@@ -235,7 +235,7 @@ dependencies = [
 [[package]]
 name = "doria-unicode"
 version = "2026.3.1-canary"
-source = "git+https://github.com/dorialang/doria?rev=9bedbc9c71227f3a77c763da0c4593aeb6d53a89#9bedbc9c71227f3a77c763da0c4593aeb6d53a89"
+source = "git+https://github.com/dorialang/doria?rev=36024ef335364cbeeb3157cf94bb5e63d41a5b1b#36024ef335364cbeeb3157cf94bb5e63d41a5b1b"
 dependencies = [
  "icu_casemap",
  "icu_locale_core",
@@ -247,7 +247,7 @@ dependencies = [
 [[package]]
 name = "doriac"
 version = "2026.3.1-canary"
-source = "git+https://github.com/dorialang/doria?rev=9bedbc9c71227f3a77c763da0c4593aeb6d53a89#9bedbc9c71227f3a77c763da0c4593aeb6d53a89"
+source = "git+https://github.com/dorialang/doria?rev=36024ef335364cbeeb3157cf94bb5e63d41a5b1b#36024ef335364cbeeb3157cf94bb5e63d41a5b1b"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",

@@ -455,10 +455,16 @@ impl Server {
     }
 
     fn signature_help(&self, params: Option<&Value>) -> Value {
-        let Some((_uri, document, offset)) = self.uri_document_and_offset(params) else {
+        let Some((uri, document, offset)) = self.uri_document_and_offset(params) else {
             return Value::Null;
         };
-        let Some(help) = document.analysis.signature_help_at_offset(offset) else {
+        let help = document
+            .analysis
+            .signature_help_at_offset(offset)
+            .or_else(|| {
+                AnalysisSnapshot::signature_help_for_incomplete_call(&uri, &document.text, offset)
+            });
+        let Some(help) = help else {
             return Value::Null;
         };
         json!({
@@ -3181,5 +3187,45 @@ function main(): void
             }
         }
         assert!(found_binding, "catch binding needs a UTF-16 semantic token");
+
+        let throws_offset = text.find("throws Failure").expect("throws keyword");
+        let throws_params = params_at(throws_offset);
+        let throws_hover = server
+            .hover(Some(&throws_params))
+            .expect("throws keyword hover");
+        assert!(throws_hover["contents"]["value"]
+            .as_str()
+            .is_some_and(|value| value.contains("throws checked errors")));
+        let mut rename_params = throws_params;
+        rename_params["newName"] = json!("renamed");
+        assert_eq!(server.rename(Some(&rename_params)), Value::Null);
+    }
+
+    #[test]
+    fn signature_help_survives_incomplete_parenthesis_and_comma_triggers() {
+        for (call, active_parameter) in [("lookup(", 0), ("lookup(1,", 1)] {
+            let uri = format!("file:///incomplete-{active_parameter}.doria");
+            let text = format!(
+                "function lookup(int $id, string $name): void {{}}\nfunction main(): void {{\n    {call}\n}}"
+            );
+            let offset = text.rfind(call).expect("incomplete call") + call.len();
+            let position = byte_offset_to_position(&text, offset);
+            let mut server = Server::default();
+            server
+                .documents
+                .insert(uri.clone(), Document::new(&uri, text, Some(1)));
+            let signature = server.signature_help(Some(&json!({
+                "textDocument": { "uri": uri },
+                "position": {
+                    "line": position.line,
+                    "character": position.character,
+                },
+            })));
+            assert_eq!(
+                signature["signatures"][0]["label"],
+                "function lookup(int $id, string $name): void"
+            );
+            assert_eq!(signature["activeParameter"], active_parameter);
+        }
     }
 }

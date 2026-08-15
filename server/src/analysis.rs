@@ -49,6 +49,7 @@ struct Symbol {
     signature: String,
     documentation: Option<String>,
     local_name: Option<String>,
+    parameter_names: Vec<String>,
     kind: SymbolKind,
 }
 
@@ -63,6 +64,7 @@ struct Occurrence {
 enum SymbolKind {
     Plain,
     Variable,
+    Keyword,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,8 +106,14 @@ struct LocalVisibility {
 #[derive(Debug, Clone)]
 struct CallSignatureContext {
     span: Span,
-    arguments: Vec<Span>,
+    arguments: Vec<CallArgumentContext>,
     symbol: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CallArgumentContext {
+    span: Span,
+    parameter: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +149,45 @@ impl AnalysisSnapshot {
 
     pub(crate) fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
+    }
+
+    pub(crate) fn signature_help_for_incomplete_call(
+        path: &str,
+        text: &str,
+        offset: usize,
+    ) -> Option<SignatureHelp> {
+        let prefix = text.get(..offset)?;
+        if !matches!(prefix.trim_end().chars().last(), Some('(' | ',')) {
+            return None;
+        }
+
+        let tokens = doriac::lex_source(path.to_string(), prefix.to_string()).ok()?;
+        let unmatched_parens = tokens
+            .iter()
+            .fold(0_usize, |depth, token| match token.kind {
+                TokenKind::LeftParen => depth + 1,
+                TokenKind::RightParen => depth.saturating_sub(1),
+                _ => depth,
+            });
+        if unmatched_parens == 0 {
+            return None;
+        }
+
+        let suffix = text.get(offset..)?;
+        let trimmed_suffix = suffix.trim_start();
+        let existing_closers = trimmed_suffix
+            .chars()
+            .take_while(|character| *character == ')')
+            .count();
+        let mut insertion = "0".to_string();
+        insertion.push_str(&")".repeat(unmatched_parens.saturating_sub(existing_closers)));
+        if !trimmed_suffix.starts_with(')') && !trimmed_suffix.starts_with(';') {
+            insertion.push(';');
+        }
+
+        let mut recovered = text.to_string();
+        recovered.insert_str(offset, &insertion);
+        Self::analyze(path, &recovered).signature_help_at_offset(offset)
     }
 
     #[cfg(test)]
@@ -333,7 +380,8 @@ impl AnalysisSnapshot {
         let active_parameter = context
             .arguments
             .iter()
-            .position(|argument| offset <= argument.end)
+            .find(|argument| offset <= argument.span.end)
+            .map(|argument| argument.parameter)
             .unwrap_or(context.arguments.len());
         Some(SignatureHelp {
             label: symbol.signature.clone(),
@@ -386,6 +434,7 @@ impl AnalysisSnapshot {
             SymbolKind::Plain => new_name.to_string(),
             SymbolKind::Variable if new_name.starts_with('$') => new_name.to_string(),
             SymbolKind::Variable => format!("${new_name}"),
+            SymbolKind::Keyword => return None,
         })
     }
 
@@ -399,6 +448,9 @@ impl AnalysisSnapshot {
 }
 
 fn semantic_token_type(symbol: &Symbol) -> Option<u32> {
+    if symbol.kind == SymbolKind::Keyword {
+        return Some(4);
+    }
     if symbol.kind == SymbolKind::Variable {
         return Some(0);
     }
@@ -527,6 +579,7 @@ impl<'a> SnapshotBuilder<'a> {
                         phpdoc_before(self.text, function.span.start),
                         SymbolKind::Plain,
                     );
+                    self.record_callable_parameters(symbol, function);
                     self.functions.insert(function.name.clone(), symbol);
                 }
                 _ => {}
@@ -693,6 +746,7 @@ impl<'a> SnapshotBuilder<'a> {
             phpdoc_before(self.text, method.span.start),
             SymbolKind::Plain,
         );
+        self.record_callable_parameters(symbol, method);
         self.methods
             .insert((class_name.to_string(), method.name.clone()), symbol);
     }
@@ -742,6 +796,7 @@ impl<'a> SnapshotBuilder<'a> {
             signature,
             documentation,
             local_name: None,
+            parameter_names: Vec::new(),
             kind,
         });
         self.occurrences.push(Occurrence {
@@ -760,10 +815,39 @@ impl<'a> SnapshotBuilder<'a> {
         });
     }
 
+    fn record_callable_parameters(&mut self, symbol: usize, function: &FunctionDecl) {
+        self.symbols[symbol].parameter_names = function
+            .params
+            .iter()
+            .map(|parameter| parameter.name.clone())
+            .collect();
+    }
+
     fn record_call_signature(&mut self, span: Span, args: &[doriac::ast::Argument], symbol: usize) {
+        let parameter_names = &self.symbols[symbol].parameter_names;
+        let parameter_name_refs = parameter_names
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let argument_names = args
+            .iter()
+            .map(|argument| argument.name.as_ref().map(|name| name.text.as_str()))
+            .collect::<Vec<_>>();
+        let bound = doriac::arg_binding::bind_arguments(
+            &parameter_name_refs,
+            &vec![false; parameter_name_refs.len()],
+            &argument_names,
+        );
         self.call_signatures.push(CallSignatureContext {
             span,
-            arguments: args.iter().map(|argument| argument.span).collect(),
+            arguments: args
+                .iter()
+                .enumerate()
+                .map(|(index, argument)| CallArgumentContext {
+                    span: argument.span,
+                    parameter: bound.arg_to_param[index].unwrap_or(index),
+                })
+                .collect(),
             symbol,
         });
     }
@@ -859,16 +943,12 @@ impl<'a> SnapshotBuilder<'a> {
         let block = &function.body;
         self.push_local_scope(block.span.end);
         if let Some(throws) = &function.throws {
-            let symbol = current_class
-                .and_then(|class| {
-                    self.methods
-                        .get(&(class.to_string(), function.name.clone()))
-                        .copied()
-                })
-                .or_else(|| self.functions.get(&function.name).copied());
-            if let Some(symbol) = symbol {
-                self.record_reference(throws.keyword_span, symbol);
-            }
+            self.add_reference_symbol(
+                throws.keyword_span,
+                "throws checked errors".to_string(),
+                Some("Declares the checked errors that may leave this callable.".to_string()),
+                SymbolKind::Keyword,
+            );
             for entry in &throws.entries {
                 self.record_type_reference(&entry.ty, entry.span);
             }
@@ -3892,6 +3972,7 @@ function inspect(take FirstError $failure): void throws Error
 {
     let $worker = new Worker(1);
     find(1, "record");
+    find(path: "named", id: 4);
     $worker->load(2, "method");
     Worker::open("static");
 
@@ -3959,6 +4040,20 @@ function inspect(take FirstError $failure): void throws Error
             .expect("throw statement hover")
             .markdown
             .contains("Transfers ownership"));
+        let throws_offset = source.find("throws FirstError").expect("throws keyword");
+        let throws_hover = snapshot
+            .hover_at_offset(throws_offset)
+            .expect("throws keyword hover");
+        assert!(throws_hover.markdown.contains("throws checked errors"));
+        assert_eq!(
+            snapshot.rename_replacement_at_offset(throws_offset, "renamed"),
+            None,
+            "throws is a keyword, not a callable reference"
+        );
+        assert!(snapshot
+            .semantic_token_spans()
+            .iter()
+            .any(|(span, token_type)| span.start == throws_offset && *token_type == 4));
 
         let caught = source.find("$caught").expect("catch binding");
         let caught_hover = snapshot
@@ -3988,6 +4083,18 @@ function inspect(take FirstError $failure): void throws Error
                 "\"record\"",
                 "function find(int $id, string $path): string throws FirstError, SecondError",
                 1,
+            ),
+            (
+                "find(path: \"named\", id: 4)",
+                "\"named\"",
+                "function find(int $id, string $path): string throws FirstError, SecondError",
+                1,
+            ),
+            (
+                "find(path: \"named\", id: 4)",
+                "4",
+                "function find(int $id, string $path): string throws FirstError, SecondError",
+                0,
             ),
             (
                 "$worker->load(2, \"method\")",
@@ -4042,5 +4149,36 @@ function handle(): void { try { fail(); } catch (Failure $caught) { echo $caught
             .diagnostics()
             .iter()
             .any(|diagnostic| diagnostic.code == "E0101"));
+    }
+
+    #[test]
+    fn signature_help_recovers_only_advertised_incomplete_call_triggers() {
+        for (call, active_parameter) in [("lookup(", 0), ("lookup(1,", 1)] {
+            let source = format!(
+                "function lookup(int $id, string $name): void {{}}\nfunction main(): void {{\n    {call}\n}}"
+            );
+            let offset = source.rfind(call).expect("incomplete call") + call.len();
+            assert_eq!(
+                AnalysisSnapshot::signature_help_for_incomplete_call(
+                    "incomplete-call.doria",
+                    &source,
+                    offset,
+                ),
+                Some(SignatureHelp {
+                    label: "function lookup(int $id, string $name): void".to_string(),
+                    active_parameter,
+                })
+            );
+        }
+
+        let source = "function main(): void { echo \"not a call\"; }";
+        assert_eq!(
+            AnalysisSnapshot::signature_help_for_incomplete_call(
+                "complete.doria",
+                source,
+                source.len(),
+            ),
+            None
+        );
     }
 }
