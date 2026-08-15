@@ -680,7 +680,7 @@
         },
         {
           "name": "keyword.control.doria",
-          "match": "\\b(?:return|foreach|as|if|else|while|for|break|continue|match|when|given|finally|try|catch|extends|uses|with|default|do)\\b"
+          "match": "\\b(?:return|foreach|as|if|else|while|for|break|continue|match|when|given|extends|uses|with|default|do)\\b"
         },
         {
           "name": "keyword.declaration.enum.doria",
@@ -696,7 +696,7 @@
         },
         {
           "name": "keyword.control.exception.doria",
-          "match": "\\b(?:throw|throws)\\b"
+          "match": "\\b(?:try|catch|finally|throw|throws)\\b"
         },
         {
           "name": "storage.modifier.mutability.doria",
@@ -784,6 +784,10 @@
               "include": "#numbers"
             }
           ]
+        },
+        {
+          "name": "support.type.interface.doria",
+          "match": "\\bError\\b"
         },
         {
           "name": "storage.type.reserved.doria",

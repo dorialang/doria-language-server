@@ -276,6 +276,11 @@ impl Server {
                     send_response(writer, id, hover.unwrap_or(Value::Null))?;
                 }
             }
+            "textDocument/signatureHelp" => {
+                if let Some(id) = id {
+                    send_response(writer, id, self.signature_help(message.get("params")))?;
+                }
+            }
             "textDocument/codeAction" => {
                 if let Some(id) = id {
                     let actions = self.code_actions(message.get("params"));
@@ -447,6 +452,26 @@ impl Server {
         let document = self.documents.get(uri)?;
         let offset = position_to_byte_offset(&document.text, line, character);
         hover_at_offset_with_analysis(&document.text, offset, &document.analysis)
+    }
+
+    fn signature_help(&self, params: Option<&Value>) -> Value {
+        let Some((uri, document, offset)) = self.uri_document_and_offset(params) else {
+            return Value::Null;
+        };
+        let help = document
+            .analysis
+            .signature_help_at_offset(offset)
+            .or_else(|| {
+                AnalysisSnapshot::signature_help_for_incomplete_call(&uri, &document.text, offset)
+            });
+        let Some(help) = help else {
+            return Value::Null;
+        };
+        json!({
+            "signatures": [{ "label": help.label }],
+            "activeSignature": 0,
+            "activeParameter": help.active_parameter,
+        })
     }
 
     fn completion(&self, params: Option<&Value>) -> Value {
@@ -632,6 +657,9 @@ fn initialize_result() -> Value {
                 "triggerCharacters": ["$", ">", ":"]
             },
             "hoverProvider": true,
+            "signatureHelpProvider": {
+                "triggerCharacters": ["(", ","]
+            },
             "referencesProvider": true,
             "renameProvider": true,
             "semanticTokensProvider": {
@@ -728,10 +756,6 @@ fn completion_items() -> Value {
         "open",
         "override",
         "with",
-        "throw",
-        "throws",
-        "try",
-        "catch",
         "fn",
         "get",
         "set",
@@ -830,6 +854,12 @@ fn completion_items() -> Value {
         "kind": 8,
         "detail": "compiler-known Doria interface",
         "documentation": "`interface Displayable` requires an explicit `implements Displayable` declaration and exactly `function toString(): string`. It controls interpolation, echo, concatenation, and `%s`. Other interfaces are not supported by this compiler.",
+    }));
+    items.push(json!({
+        "label": "Error",
+        "kind": 8,
+        "detail": "compiler-known Doria interface",
+        "documentation": "`interface Error` is the compiler-known checked-error contract. A conforming class explicitly declares `implements Error` and exposes an externally accessible readonly `string $message` property.",
     }));
     items.push(json!({
         "label": "toString",
@@ -1191,10 +1221,10 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
     match kind {
         TokenKind::Class => Some("Declares a Doria class."),
         TokenKind::Interface => Some(
-            "Declares an interface. This compiler currently provides only the compiler-known `Displayable` contract.",
+            "Declares an interface. The compiler currently provides the compiler-known `Displayable` and `Error` contracts.",
         ),
         TokenKind::Implements => Some(
-            "Declares nominal conformance. This compiler currently supports only the compiler-known `Displayable` contract.",
+            "Declares nominal conformance to a compiler-known contract such as `Displayable` or `Error`.",
         ),
         TokenKind::Function => Some("Declares a function or method."),
         TokenKind::Let => Some("Declares a local binding with an inferred type."),
@@ -1221,6 +1251,18 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
         ),
         TokenKind::Finally => Some(
             "Runs exactly once when the attached control-flow construct leaves normally or through a structured transfer. Fatal panic bypasses it.",
+        ),
+        TokenKind::Try => Some(
+            "Protects operations with checked effects so source-ordered `catch` clauses can handle them.",
+        ),
+        TokenKind::Catch => Some(
+            "Handles one exact checked-error type from the protected `try` block. `catch (Error)` is the catch-all form.",
+        ),
+        TokenKind::Throw => Some(
+            "Transfers ownership of one explicit `Error` value as a checked effect.",
+        ),
+        TokenKind::Throws => Some(
+            "Declares a callable's source-ordered checked-error effect set.",
         ),
         TokenKind::Echo => Some("Emits a value through the current backend."),
         TokenKind::New => Some("Constructs an instance of a class."),
@@ -1269,6 +1311,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
         TokenKind::Null => Some("The `null` literal: the absent value of any nullable type `?T`. Assign it to a `?T` binding or compare with `== null` / `!= null`; a `!= null` guard narrows `?T` to `T`."),
         TokenKind::Reserved(_) => Some("Reserved for future Doria syntax."),
         TokenKind::Identifier(name) => match name.as_str() {
+            "Error" => Some("`interface Error` is the compiler-known checked-error contract. Conforming classes explicitly declare `implements Error` and expose an externally accessible readonly `string $message` property."),
             "Displayable" => Some("`interface Displayable` is the compiler-known display contract. A class must explicitly declare `implements Displayable` and provide `function toString(): string`. It controls interpolation, echo, concatenation, and `%s`. Other interfaces are not supported by this compiler."),
             "toString" => Some("`function toString(): string` is the exact externally accessible readonly instance method required by `Displayable`."),
             "List" => Some("`List<T>` is the growable, insertion-ordered sequence: `add`, `insertAt`, `removeAt`, `pop`, `contains`, `first`/`last`, and the `count`/`isEmpty` properties (decision 0100). An owned move type."),
@@ -1581,10 +1624,6 @@ mod tests {
             "open",
             "override",
             "with",
-            "throw",
-            "throws",
-            "try",
-            "catch",
             "fn",
             "get",
             "set",
@@ -1612,6 +1651,25 @@ mod tests {
             assert_eq!(completion_item(keyword)["detail"], "Doria keyword");
             assert!(hover_description(&kind).is_some());
         }
+    }
+
+    #[test]
+    fn completions_and_hover_expose_checked_error_foundations() {
+        for (keyword, kind) in [
+            ("try", TokenKind::Try),
+            ("catch", TokenKind::Catch),
+            ("throw", TokenKind::Throw),
+            ("throws", TokenKind::Throws),
+            ("finally", TokenKind::Finally),
+        ] {
+            assert_eq!(completion_item(keyword)["detail"], "Doria keyword");
+            assert!(hover_description(&kind).is_some());
+        }
+        assert_eq!(
+            completion_item("Error")["detail"],
+            "compiler-known Doria interface"
+        );
+        assert!(hover_description(&TokenKind::Identifier("Error".to_string())).is_some());
     }
 
     #[test]
@@ -2952,6 +3010,222 @@ function main(): void
             let edits = rename["changes"][uri].as_array().unwrap();
             assert_eq!(edits.len(), expected_edits);
             assert!(edits.iter().all(|edit| edit["newText"] == replacement));
+        }
+    }
+
+    #[test]
+    fn checked_error_protocol_features_preserve_utf16_ranges_and_source_order() {
+        let uri = "file:///checked-errors.doria";
+        let text = r#"class Failure implements Error
+{
+    function __construct(string $message) {}
+}
+
+class Service
+{
+    function __construct(int $id) throws Failure {}
+    function load(int $id, string $path): string throws Failure { return $path; }
+    static function open(string $path): string throws Failure { return $path; }
+}
+
+function lookup(int $id, string $path): string throws Failure
+{
+    return $path;
+}
+
+function fail(take Failure $failure): void throws Failure
+{
+    echo "😀"; throw $failure;
+}
+
+function main(): void
+{
+    try {
+        let $service = new Service(1);
+        lookup(2, "free");
+        $service->load(3, "method");
+        Service::open("static");
+        fail(new Failure("failure"));
+    } catch (/* 😀 */ Failure $caught) {
+        echo $caught->message;
+    }
+}
+"#;
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document::new(uri, text.to_string(), Some(1)),
+        );
+
+        let params_at = |offset: usize| {
+            let position = byte_offset_to_position(text, offset);
+            json!({
+                "textDocument": { "uri": uri },
+                "position": {
+                    "line": position.line,
+                    "character": position.character,
+                },
+            })
+        };
+
+        let catch_binding = text.find("$caught").expect("catch binding");
+        let binding_position = byte_offset_to_position(text, catch_binding);
+        let line_start = text[..catch_binding]
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
+        assert_ne!(
+            binding_position.character as usize,
+            catch_binding - line_start,
+            "fixture must distinguish UTF-16 columns from byte columns"
+        );
+
+        let hover = server
+            .hover(Some(&params_at(catch_binding)))
+            .expect("catch binding hover");
+        assert!(hover["contents"]["value"]
+            .as_str()
+            .is_some_and(|value| value.contains("Readonly owned")));
+        assert_eq!(
+            hover["range"]["start"]["character"],
+            binding_position.character
+        );
+
+        let references = server.references(Some(&json!({
+            "textDocument": { "uri": uri },
+            "position": {
+                "line": binding_position.line,
+                "character": binding_position.character,
+            },
+            "context": { "includeDeclaration": true },
+        })));
+        assert_eq!(references.as_array().map(Vec::len), Some(2));
+
+        let rename = server.rename(Some(&json!({
+            "textDocument": { "uri": uri },
+            "position": {
+                "line": binding_position.line,
+                "character": binding_position.character,
+            },
+            "newName": "handled",
+        })));
+        let edits = rename["changes"][uri]
+            .as_array()
+            .expect("catch rename edits");
+        assert_eq!(edits.len(), 2);
+        assert!(edits.iter().all(|edit| edit["newText"] == "$handled"));
+        assert_eq!(
+            edits[0]["range"]["start"]["character"],
+            binding_position.character
+        );
+
+        let signatures = [
+            (
+                "new Service(1)",
+                "1",
+                "function Service::__construct(int $id) throws Failure",
+                0,
+            ),
+            (
+                "lookup(2, \"free\")",
+                "\"free\"",
+                "function lookup(int $id, string $path): string throws Failure",
+                1,
+            ),
+            (
+                "$service->load(3, \"method\")",
+                "\"method\"",
+                "function Service::load(int $id, string $path): string throws Failure",
+                1,
+            ),
+            (
+                "Service::open(\"static\")",
+                "\"static\"",
+                "static function Service::open(string $path): string throws Failure",
+                0,
+            ),
+        ];
+        for (call, argument, expected, active_parameter) in signatures {
+            let call_start = text
+                .find(call)
+                .unwrap_or_else(|| panic!("missing `{call}`"));
+            let offset = call_start + call.find(argument).expect("argument in call");
+            let signature = server.signature_help(Some(&params_at(offset)));
+            assert_eq!(signature["signatures"][0]["label"], expected);
+            assert_eq!(signature["activeParameter"], active_parameter);
+        }
+
+        let throw_offset = text.find("throw $failure").expect("throw statement");
+        let throw_hover = server
+            .hover(Some(&params_at(throw_offset)))
+            .expect("throw hover");
+        assert!(throw_hover["contents"]["value"]
+            .as_str()
+            .is_some_and(|value| value.contains("Transfers ownership")));
+
+        let semantic = server.semantic_tokens(Some(&json!({
+            "textDocument": { "uri": uri },
+        })));
+        let data = semantic["data"].as_array().expect("semantic token data");
+        let mut line = 0_u64;
+        let mut character = 0_u64;
+        let mut found_binding = false;
+        for token in data.chunks_exact(5) {
+            let delta_line = token[0].as_u64().unwrap();
+            let delta_start = token[1].as_u64().unwrap();
+            line += delta_line;
+            character = if delta_line == 0 {
+                character + delta_start
+            } else {
+                delta_start
+            };
+            if line == binding_position.line as u64
+                && character == binding_position.character as u64
+            {
+                assert_eq!(token[2], "$caught".encode_utf16().count());
+                assert_eq!(token[3], 0);
+                found_binding = true;
+            }
+        }
+        assert!(found_binding, "catch binding needs a UTF-16 semantic token");
+
+        let throws_offset = text.find("throws Failure").expect("throws keyword");
+        let throws_params = params_at(throws_offset);
+        let throws_hover = server
+            .hover(Some(&throws_params))
+            .expect("throws keyword hover");
+        assert!(throws_hover["contents"]["value"]
+            .as_str()
+            .is_some_and(|value| value.contains("throws checked errors")));
+        let mut rename_params = throws_params;
+        rename_params["newName"] = json!("renamed");
+        assert_eq!(server.rename(Some(&rename_params)), Value::Null);
+    }
+
+    #[test]
+    fn signature_help_survives_incomplete_parenthesis_and_comma_triggers() {
+        for (call, active_parameter) in [("lookup(", 0), ("lookup(1,", 1)] {
+            let uri = format!("file:///incomplete-{active_parameter}.doria");
+            let text = format!(
+                "function lookup(int $id, string $name): void {{}}\nfunction main(): void {{\n    {call}\n}}"
+            );
+            let offset = text.rfind(call).expect("incomplete call") + call.len();
+            let position = byte_offset_to_position(&text, offset);
+            let mut server = Server::default();
+            server
+                .documents
+                .insert(uri.clone(), Document::new(&uri, text, Some(1)));
+            let signature = server.signature_help(Some(&json!({
+                "textDocument": { "uri": uri },
+                "position": {
+                    "line": position.line,
+                    "character": position.character,
+                },
+            })));
+            assert_eq!(
+                signature["signatures"][0]["label"],
+                "function lookup(int $id, string $name): void"
+            );
+            assert_eq!(signature["activeParameter"], active_parameter);
         }
     }
 }
