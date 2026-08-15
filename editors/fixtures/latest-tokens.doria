@@ -363,7 +363,21 @@ FixtureDocument $loaded = match (take $loadResult) {
     FixtureLoadResult::Missing => new FixtureDocument(),
 };
 
-// Planned/future: checked errors.
+// Checked errors: explicit Error conformance, source-ordered effects, and handlers.
+class UserNotFound implements Error
+{
+    function __construct(string $message)
+    {
+    }
+}
+
+class DatabaseError implements Error
+{
+    function __construct(string $message)
+    {
+    }
+}
+
 function loadUser(int $id): User throws UserNotFound, DatabaseError
 {
     if ($id < 1) {
@@ -376,7 +390,9 @@ function loadUser(int $id): User throws UserNotFound, DatabaseError
 try {
     loadUser(42);
 } catch (UserNotFound $e) {
-    echo "missing";
+    echo $e->message;
+} catch (DatabaseError) {
+    echo "storage";
 } finally {
     echo "done";
 }

@@ -16,8 +16,12 @@ test("scopes every accepted Stage 28a finalizer attachment without inventing els
   const control = grammar.repository.keywords.patterns.find(
     ({ name }) => name === "keyword.control.doria"
   );
+  const exception = grammar.repository.keywords.patterns.find(
+    ({ name }) => name === "keyword.control.exception.doria"
+  );
 
   assert.ok(control);
+  assert.ok(exception);
   for (const keyword of [
     "if",
     "else",
@@ -25,11 +29,11 @@ test("scopes every accepted Stage 28a finalizer attachment without inventing els
     "return",
     "when",
     "given",
-    "finally",
     "do"
   ]) {
     assert.match(keyword, new RegExp(control.match));
   }
+  assert.match("finally", new RegExp(exception.match));
   assert.doesNotMatch("elseif", new RegExp(control.match));
 
   const acceptedAttachments = [
@@ -44,9 +48,27 @@ test("scopes every accepted Stage 28a finalizer attachment without inventing els
   for (const source of acceptedAttachments) {
     assert.match(source, /\bfinally\b/);
     for (const keyword of source.match(/[A-Za-z]+/g) || []) {
-      if (["if", "else", "while", "return", "when", "given", "finally", "do"].includes(keyword)) {
+      if (["if", "else", "while", "return", "when", "given", "do"].includes(keyword)) {
         assert.match(keyword, new RegExp(control.match));
       }
+      if (keyword === "finally") assert.match(keyword, new RegExp(exception.match));
     }
   }
+});
+
+test("scopes checked-error grammar as executable syntax", () => {
+  const exception = grammar.repository.keywords.patterns.find(
+    ({ name }) => name === "keyword.control.exception.doria"
+  );
+  const errorType = grammar.repository.types.patterns.find(
+    ({ name }) => name === "support.type.interface.doria"
+  );
+
+  assert.ok(exception);
+  for (const keyword of ["try", "catch", "throw", "throws", "finally"]) {
+    assert.match(keyword, new RegExp(exception.match));
+  }
+  assert.ok(errorType);
+  assert.match("Error", new RegExp(errorType.match));
+  assert.doesNotMatch("StorageError", new RegExp(errorType.match));
 });

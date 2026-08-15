@@ -145,6 +145,20 @@ class DoriaLexerTest : TestCase() {
         assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
     }
 
+    fun testCheckedErrorSyntaxUsesExecutableKeywordAndTypeHighlighting() {
+        val tokens = lex(
+            "class Failure implements Error {} " +
+                "function fail(): void throws Failure { throw new Failure(); } " +
+                "function handle(): void { try { fail(); } catch (Failure \$error) {} finally {} }",
+        )
+
+        for (keyword in listOf("try", "catch", "throw", "throws", "finally")) {
+            assertEquals(DoriaTokenTypes.KEYWORD, tokens.first { it.text == keyword }.type)
+        }
+        assertEquals(DoriaTokenTypes.TYPE_NAME, tokens.first { it.text == "Error" }.type)
+        assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
+    }
+
     private fun lex(source: String): List<Token> {
         val lexer = DoriaLexer()
         lexer.start(source)

@@ -19,8 +19,8 @@ editors, and Playground aligned on one diagnostic meaning.
 Current editor support includes:
 
 - VS Code language registration, TextMate highlighting, editor configuration,
-  diagnostics, completion, hover, fixits through `doria-lsp`, and Run and Debug
-  launch profiles that use Baton for projects.
+  diagnostics, completion, hover, signature help, fixits through `doria-lsp`,
+  and Run and Debug launch profiles that use Baton for projects.
 - IntelliJ Platform support for RustRover, IntelliJ IDEA, PhpStorm, and compatible JetBrains IDEs, with local syntax highlighting and optional LSP integration.
 - Shared accepted and rejected-syntax fixtures used to keep both highlighters aligned.
 
@@ -157,7 +157,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow, [docs/archi
 
 Semantic hover uses compiler-resolved symbols for same-file classes, enums and enum
 cases, free functions, instance methods, and static methods. It displays signatures
-and attached PHPDoc consistently in VS Code and JetBrains IDEs. See
+and attached PHPDoc consistently in VS Code and JetBrains IDEs. Signature help uses
+the same callable records and includes source-ordered checked-error effects. See
 [docs/semantic-hover.md](docs/semantic-hover.md) for the behavior contract and
 planned workspace-wide extensions.
 

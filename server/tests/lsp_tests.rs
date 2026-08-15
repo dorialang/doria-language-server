@@ -1098,3 +1098,130 @@ class Child extends Vendor\Base implements Vendor\Contracts\Printable {}
             .any(|diagnostic| diagnostic["code"] == code));
     }
 }
+
+#[test]
+fn checked_error_diagnostics_keep_compiler_fixes_and_utf16_ranges() {
+    let error_class = r#"class Failure implements Error
+{
+    function __construct(string $message) {}
+}
+"#;
+
+    for (source, code, fix_title) in [
+        (
+            format!("{error_class}function fail(): void throws /* 😀 */ Failure, Failure {{}}"),
+            "E0620",
+            "Remove Duplicate Throws Entry",
+        ),
+        (
+            format!("{error_class}function fail(): void throws /* 😀 */ Error, Failure {{}}"),
+            "E0621",
+            "Remove Redundant Throws Entry",
+        ),
+    ] {
+        let uri = format!("file:///{code}.doria");
+        let diagnostics = diagnostics_for_document(&uri, &source);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic["code"] == code)
+            .unwrap_or_else(|| panic!("missing {code}: {diagnostics:#?}"));
+        let entry = source.rfind("Failure").expect("last throws entry");
+        let expected = byte_offset_to_position(&source, entry);
+        assert_eq!(diagnostic["range"]["start"]["line"], expected.line);
+        assert_eq!(
+            diagnostic["range"]["start"]["character"], expected.character,
+            "{code} must preserve UTF-16 columns after the emoji"
+        );
+        assert_eq!(diagnostic["data"]["fixes"][0]["title"], fix_title);
+        assert_eq!(
+            diagnostic["data"]["fixes"][0]["applicability"],
+            "machineApplicable"
+        );
+
+        let actions = code_actions_for_document(&uri, &source);
+        let action = actions
+            .iter()
+            .find(|action| action["title"] == fix_title)
+            .unwrap_or_else(|| panic!("missing {fix_title}: {actions:#?}"));
+        assert_eq!(action["isPreferred"], true);
+        assert_eq!(action["edit"]["changes"][&uri][0]["newText"], "");
+    }
+
+    let other_error = r#"class OtherError implements Error
+{
+    function __construct(string $message) {}
+}
+"#;
+    let unreachable = format!(
+        r#"{error_class}{other_error}
+function fail(): void throws Failure {{ throw new Failure("x"); }}
+function handle(): void
+{{
+    try {{ fail(); }} catch (/* 😀 */ OtherError $caught) {{ echo $caught->message; }}
+}}
+"#
+    );
+    let diagnostics = diagnostics_for_document("file:///unreachable-catch.doria", &unreachable);
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0629")
+        .unwrap_or_else(|| panic!("missing unreachable-catch diagnostic: {diagnostics:#?}"));
+    let catch_type = unreachable.find("OtherError $caught").expect("catch type");
+    let expected = byte_offset_to_position(&unreachable, catch_type);
+    assert_eq!(diagnostic["range"]["start"]["line"], expected.line);
+    assert_eq!(
+        diagnostic["range"]["start"]["character"],
+        expected.character
+    );
+
+    let moved = format!(
+        r#"{error_class}
+function relay(take Failure $failure): void
+{{
+    echo "😀"; try {{ throw $failure; }} catch (Failure) {{}}
+    echo $failure->message;
+}}
+"#
+    );
+    let diagnostics = diagnostics_for_document("file:///moved-error.doria", &moved);
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic["code"] == "E0470"));
+
+    let uncovered = format!(
+        r#"{error_class}
+function fail(): void throws Failure {{ throw new Failure("x"); }}
+function caller(): void {{ echo "😀"; fail(); }}
+"#
+    );
+    let diagnostics = diagnostics_for_document("file:///uncovered-error.doria", &uncovered);
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0631")
+        .unwrap_or_else(|| panic!("missing catch-or-declare diagnostic: {diagnostics:#?}"));
+    assert!(diagnostic["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("catch each error or add these exact types")));
+
+    let finalizer = format!(
+        r#"{error_class}
+function fail(): void throws Failure {{ throw new Failure("x"); }}
+function cleanup(): void throws Failure
+{{
+    echo "😀"; try {{}} finally {{ fail(); }}
+}}
+"#
+    );
+    let diagnostics = diagnostics_for_document("file:///finally-error.doria", &finalizer);
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0632")
+        .unwrap_or_else(|| panic!("missing finalizer diagnostic: {diagnostics:#?}"));
+    let finally_offset = finalizer.rfind("finally").expect("finally keyword");
+    let expected = byte_offset_to_position(&finalizer, finally_offset);
+    assert_eq!(diagnostic["range"]["start"]["line"], expected.line);
+    assert_eq!(
+        diagnostic["range"]["start"]["character"],
+        expected.character
+    );
+}

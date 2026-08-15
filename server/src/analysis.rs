@@ -3,15 +3,15 @@ use std::collections::{HashMap, HashSet};
 use doriac::ast::{
     Block, ClassDecl, ClassMember, ControlFlowFinally, DoWhileStmt, ElseBranch, EnumDecl, Expr,
     ForIncrement, ForInitializer, FunctionDecl, GivenPrelude, IfStmt, Item, MatchMode, MatchOrigin,
-    MatchPattern, MemberAccess, Param, Program, StaticQualifier, Stmt, VarDecl, WhenExpression,
-    WhileStmt,
+    MatchPattern, MemberAccess, Param, Program, StaticQualifier, Stmt, TryStmt, VarDecl,
+    WhenExpression, WhileStmt,
 };
 use doriac::diagnostics::Diagnostic;
 use doriac::enums::{EnumBackingType, EnumBackingValue};
 use doriac::lexer::{Token, TokenKind};
 use doriac::semantics::{CallableTarget, EnumSemanticInfo, SemanticInfo};
 use doriac::source::Span;
-use doriac::types::{ResolvedType, SharedHandleKind};
+use doriac::types::{ResolvedType, SharedHandleKind, TypeRef};
 
 use crate::string_surface::{string_companion_method, string_property};
 
@@ -33,6 +33,7 @@ pub(crate) struct AnalysisSnapshot {
     enum_case_completions: HashMap<String, Vec<SemanticCompletion>>,
     enum_member_completions: HashMap<String, Vec<SemanticCompletion>>,
     local_visibilities: Vec<LocalVisibility>,
+    call_signatures: Vec<CallSignatureContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +99,19 @@ struct LocalVisibility {
     start: usize,
     end: usize,
     depth: usize,
+}
+
+#[derive(Debug, Clone)]
+struct CallSignatureContext {
+    span: Span,
+    arguments: Vec<Span>,
+    symbol: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SignatureHelp {
+    pub(crate) label: String,
+    pub(crate) active_parameter: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -309,6 +323,24 @@ impl AnalysisSnapshot {
         completions
     }
 
+    pub(crate) fn signature_help_at_offset(&self, offset: usize) -> Option<SignatureHelp> {
+        let context = self
+            .call_signatures
+            .iter()
+            .filter(|context| context.span.start <= offset && offset <= context.span.end)
+            .min_by_key(|context| context.span.end.saturating_sub(context.span.start))?;
+        let symbol = self.symbols.get(context.symbol)?;
+        let active_parameter = context
+            .arguments
+            .iter()
+            .position(|argument| offset <= argument.end)
+            .unwrap_or(context.arguments.len());
+        Some(SignatureHelp {
+            label: symbol.signature.clone(),
+            active_parameter,
+        })
+    }
+
     pub(crate) fn reference_spans_at_offset(
         &self,
         offset: usize,
@@ -401,6 +433,7 @@ struct SnapshotBuilder<'a> {
     symbols: Vec<Symbol>,
     occurrences: Vec<Occurrence>,
     classes: HashMap<String, usize>,
+    error_classes: HashSet<String>,
     enums: HashMap<String, usize>,
     enum_cases: HashMap<(String, String), usize>,
     class_parents: HashMap<String, String>,
@@ -414,6 +447,7 @@ struct SnapshotBuilder<'a> {
     local_scopes: Vec<HashMap<String, usize>>,
     local_scope_ends: Vec<usize>,
     local_visibilities: Vec<LocalVisibility>,
+    call_signatures: Vec<CallSignatureContext>,
     when_depth: usize,
 }
 
@@ -432,6 +466,7 @@ impl<'a> SnapshotBuilder<'a> {
             symbols: Vec::new(),
             occurrences: Vec::new(),
             classes: HashMap::new(),
+            error_classes: HashSet::new(),
             enums: HashMap::new(),
             enum_cases: HashMap::new(),
             class_parents: HashMap::new(),
@@ -445,6 +480,7 @@ impl<'a> SnapshotBuilder<'a> {
             local_scopes: Vec::new(),
             local_scope_ends: Vec::new(),
             local_visibilities: Vec::new(),
+            call_signatures: Vec::new(),
             when_depth: 0,
         }
     }
@@ -463,6 +499,7 @@ impl<'a> SnapshotBuilder<'a> {
             enum_case_completions: self.enum_case_completions,
             enum_member_completions: self.enum_member_completions,
             local_visibilities: self.local_visibilities,
+            call_signatures: self.call_signatures,
         }
     }
 
@@ -570,10 +607,22 @@ impl<'a> SnapshotBuilder<'a> {
 
     fn collect_class(&mut self, class: &ClassDecl) {
         let selection_span = self.declaration_name_span(class.span, &class.name, TokenKind::Class);
+        let conforms_to_error = class
+            .implements
+            .iter()
+            .any(|interface| interface == "Error");
+        let mut documentation = phpdoc_before(self.text, class.span.start);
+        if conforms_to_error {
+            append_documentation(
+                &mut documentation,
+                "Explicitly conforms to the compiler-known `Error` interface. Its externally accessible readonly `string $message` property describes the checked error.",
+            );
+            self.error_classes.insert(class.name.clone());
+        }
         let symbol = self.add_declaration_symbol(
             selection_span,
             class_signature(class),
-            phpdoc_before(self.text, class.span.start),
+            documentation,
             SymbolKind::Plain,
         );
         self.classes.insert(class.name.clone(), symbol);
@@ -602,6 +651,17 @@ impl<'a> SnapshotBuilder<'a> {
                         });
                 }
                 ClassMember::Property(property) => {
+                    if conforms_to_error && property.name == "message" {
+                        let selection_span =
+                            find_variable_span(self.tokens, property.span, &property.name)
+                                .unwrap_or(property.span);
+                        self.add_declaration_symbol(
+                            selection_span,
+                            format!("{} $message", property.ty),
+                            Some("Required externally accessible readonly message for the compiler-known `Error` contract.".to_string()),
+                            SymbolKind::Variable,
+                        );
+                    }
                     self.class_members
                         .entry(class.name.clone())
                         .or_default()
@@ -700,6 +760,14 @@ impl<'a> SnapshotBuilder<'a> {
         });
     }
 
+    fn record_call_signature(&mut self, span: Span, args: &[doriac::ast::Argument], symbol: usize) {
+        self.call_signatures.push(CallSignatureContext {
+            span,
+            arguments: args.iter().map(|argument| argument.span).collect(),
+            symbol,
+        });
+    }
+
     fn declaration_name_span(
         &self,
         declaration_span: Span,
@@ -724,6 +792,15 @@ impl<'a> SnapshotBuilder<'a> {
         for item in &program.items {
             match item {
                 Item::Class(class) => {
+                    if class
+                        .implements
+                        .iter()
+                        .any(|interface| interface == "Error")
+                    {
+                        if let Some(span) = find_identifier_span(self.tokens, class.span, "Error") {
+                            self.add_error_type_reference(span);
+                        }
+                    }
                     for member in &class.members {
                         if let ClassMember::Method(method) = member {
                             self.visit_function_body(
@@ -781,8 +858,23 @@ impl<'a> SnapshotBuilder<'a> {
     ) {
         let block = &function.body;
         self.push_local_scope(block.span.end);
+        if let Some(throws) = &function.throws {
+            let symbol = current_class
+                .and_then(|class| {
+                    self.methods
+                        .get(&(class.to_string(), function.name.clone()))
+                        .copied()
+                })
+                .or_else(|| self.functions.get(&function.name).copied());
+            if let Some(symbol) = symbol {
+                self.record_reference(throws.keyword_span, symbol);
+            }
+            for entry in &throws.entries {
+                self.record_type_reference(&entry.ty, entry.span);
+            }
+        }
         for parameter in &function.params {
-            self.declare_parameter(parameter, block.span.start);
+            self.declare_parameter(parameter, block.span.start, current_class);
         }
         for statement in &block.statements {
             self.visit_stmt(statement, current_class, parent_class);
@@ -838,6 +930,21 @@ impl<'a> SnapshotBuilder<'a> {
                     self.visit_expr(expr, current_class, parent_class);
                 }
             }
+            Stmt::Throw(statement) => {
+                self.add_reference_symbol(
+                    statement.keyword_span,
+                    "throw Error;".to_string(),
+                    Some(
+                        "Transfers ownership of one explicit `Error` value to the current callable's checked-error effect."
+                            .to_string(),
+                    ),
+                    SymbolKind::Plain,
+                );
+                self.visit_expr(&statement.expr, current_class, parent_class);
+            }
+            Stmt::Try(try_statement) => {
+                self.visit_try_statement(try_statement, current_class, parent_class)
+            }
             Stmt::If(if_statement) => {
                 self.visit_if_statement(if_statement, current_class, parent_class)
             }
@@ -883,6 +990,75 @@ impl<'a> SnapshotBuilder<'a> {
             }
             Stmt::Expr { expr, .. } => self.visit_expr(expr, current_class, parent_class),
             _ => {}
+        }
+    }
+
+    fn visit_try_statement(
+        &mut self,
+        statement: &TryStmt,
+        current_class: Option<&str>,
+        parent_class: Option<&str>,
+    ) {
+        self.add_reference_symbol(
+            statement.keyword_span,
+            "try { ... } catch (...) { ... }".to_string(),
+            Some(
+                "Protects operations with checked effects. Source-ordered catches subtract only errors from the protected block."
+                    .to_string(),
+            ),
+            SymbolKind::Plain,
+        );
+        self.visit_block(&statement.body, current_class, parent_class);
+
+        for catch in &statement.catches {
+            self.add_reference_symbol(
+                catch.keyword_span,
+                format!("catch ({}) {{ ... }}", catch.ty),
+                Some(
+                    "Handles this exact checked-error type from the protected block. `catch (Error)` is the catch-all form."
+                        .to_string(),
+                ),
+                SymbolKind::Plain,
+            );
+            self.record_type_reference(&catch.ty, catch.ty_span);
+            self.push_local_scope(catch.body.span.end);
+            if let Some(binding) = &catch.binding {
+                let ty = self
+                    .semantic_info
+                    .and_then(|info| {
+                        info.catch_error_types
+                            .get(&(catch.span.start, catch.span.end))
+                    })
+                    .map(display_resolved_type)
+                    .unwrap_or_else(|| catch.ty.to_string());
+                self.declare_local_binding_with_documentation(
+                    &binding.name,
+                    binding.span,
+                    format!("{ty} ${}", binding.name),
+                    catch.body.span.start,
+                    Some(
+                        "Readonly owned checked-error value available only inside this catch body."
+                            .to_string(),
+                    ),
+                );
+            }
+            for statement in &catch.body.statements {
+                self.visit_stmt(statement, current_class, parent_class);
+            }
+            self.pop_local_scope();
+        }
+
+        if let Some(finalizer) = &statement.finally {
+            self.add_reference_symbol(
+                finalizer.keyword_span,
+                "finally { ... }".to_string(),
+                Some(
+                    "Runs once after the protected block or selected catch. Checked errors may not escape this finalizer."
+                        .to_string(),
+                ),
+                SymbolKind::Plain,
+            );
+            self.visit_block(&finalizer.body, current_class, parent_class);
         }
     }
 
@@ -1028,14 +1204,27 @@ impl<'a> SnapshotBuilder<'a> {
         }
     }
 
-    fn declare_parameter(&mut self, parameter: &Param, visibility_start: usize) {
+    fn declare_parameter(
+        &mut self,
+        parameter: &Param,
+        visibility_start: usize,
+        current_class: Option<&str>,
+    ) {
         let selection_span = find_variable_span(self.tokens, parameter.span, &parameter.name)
             .unwrap_or(parameter.span);
-        self.declare_local_binding(
+        let documentation = (parameter.name == "message"
+            && parameter.promoted_access.is_some()
+            && current_class.is_some_and(|class| self.error_classes.contains(class)))
+        .then(|| {
+            "Promoted externally accessible readonly message required by the compiler-known `Error` contract."
+                .to_string()
+        });
+        self.declare_local_binding_with_documentation(
             &parameter.name,
             selection_span,
             parameter_signature(parameter),
             visibility_start,
+            documentation,
         );
     }
 
@@ -1176,6 +1365,7 @@ impl<'a> SnapshotBuilder<'a> {
                         if let Some(method_span) = method_span {
                             self.record_reference(method_span, symbol);
                         }
+                        self.record_call_signature(*span, args, symbol);
                     }
                 }
             }
@@ -1194,6 +1384,7 @@ impl<'a> SnapshotBuilder<'a> {
                     if let Some(name_span) = find_identifier_span(self.tokens, *span, name) {
                         self.record_reference(name_span, symbol);
                     }
+                    self.record_call_signature(*span, args, symbol);
                 }
             }
             Expr::StaticCall {
@@ -1247,6 +1438,7 @@ impl<'a> SnapshotBuilder<'a> {
                         {
                             self.record_reference(method_span, symbol);
                         }
+                        self.record_call_signature(*span, args, symbol);
                     }
                 }
             }
@@ -1265,6 +1457,9 @@ impl<'a> SnapshotBuilder<'a> {
                     {
                         self.record_reference(name_span, symbol);
                     }
+                }
+                if let Some(symbol) = self.resolve_method(&class_type.name, "__construct") {
+                    self.record_call_signature(*span, args, symbol);
                 }
             }
             Expr::PropertyAccess {
@@ -1582,10 +1777,14 @@ impl<'a> SnapshotBuilder<'a> {
         }
     }
 
-    fn record_match_type_reference(&mut self, ty: &doriac::types::TypeRef, span: Span) {
+    fn record_type_reference(&mut self, ty: &TypeRef, span: Span) {
         let Some(type_span) = find_identifier_span(self.tokens, span, &ty.name) else {
             return;
         };
+        if ty.name == "Error" {
+            self.add_error_type_reference(type_span);
+            return;
+        }
         if let Some(symbol) = self
             .enums
             .get(&ty.name)
@@ -1594,6 +1793,22 @@ impl<'a> SnapshotBuilder<'a> {
         {
             self.record_reference(type_span, symbol);
         }
+    }
+
+    fn record_match_type_reference(&mut self, ty: &TypeRef, span: Span) {
+        self.record_type_reference(ty, span);
+    }
+
+    fn add_error_type_reference(&mut self, span: Span) {
+        self.add_reference_symbol(
+            span,
+            "interface Error\n{\n    string $message;\n}".to_string(),
+            Some(
+                "Compiler-known checked-error contract. Conforming classes explicitly declare `implements Error` and expose an externally accessible readonly `string $message` property."
+                    .to_string(),
+            ),
+            SymbolKind::Plain,
+        );
     }
 
     fn resolve_method(&self, class_name: &str, method: &str) -> Option<usize> {
@@ -2094,6 +2309,16 @@ fn enum_documentation(info: &EnumSemanticInfo) -> String {
     format!("Nominal {ownership} enum. Each value records one declared case and that case's data.")
 }
 
+fn append_documentation(documentation: &mut Option<String>, addition: &str) {
+    match documentation {
+        Some(documentation) => {
+            documentation.push_str("\n\n");
+            documentation.push_str(addition);
+        }
+        None => *documentation = Some(addition.to_string()),
+    }
+}
+
 fn display_resolved_type(ty: &ResolvedType) -> String {
     match ty {
         ResolvedType::Void => "void".to_string(),
@@ -2104,6 +2329,7 @@ fn display_resolved_type(ty: &ResolvedType) -> String {
         ResolvedType::Bool => "bool".to_string(),
         ResolvedType::Null => "null".to_string(),
         ResolvedType::Mixed => "mixed".to_string(),
+        ResolvedType::Error => "Error".to_string(),
         ResolvedType::TypeParameter(name) => name.clone(),
         ResolvedType::Nullable(inner) => format!("?{}", display_resolved_type(inner)),
         ResolvedType::Enum(enum_type) => enum_type.name.clone(),
@@ -2182,8 +2408,23 @@ fn function_signature(function: &FunctionDecl, container: Option<&str>) -> Strin
         .as_ref()
         .map(|return_type| format!(": {return_type}"))
         .unwrap_or_default();
+    let throws = function
+        .throws
+        .as_ref()
+        .map(|clause| {
+            format!(
+                " throws {}",
+                clause
+                    .entries
+                    .iter()
+                    .map(|entry| entry.ty.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .unwrap_or_default();
 
-    format!("{prefix}function {name}{type_parameters}({parameters}){return_type}")
+    format!("{prefix}function {name}{type_parameters}({parameters}){return_type}{throws}")
 }
 
 fn parameter_signature(parameter: &Param) -> String {
@@ -3608,5 +3849,198 @@ function main(): void
         assert!(hover
             .markdown
             .contains("does not change either ownership count"));
+    }
+
+    #[test]
+    fn checked_error_symbols_and_signatures_share_compiler_semantic_identity() {
+        let source = r#"class FirstError implements Error
+{
+    function __construct(string $message) {}
+}
+
+class SecondError implements Error
+{
+    string $message = "second";
+}
+
+class Worker
+{
+    function __construct(int $id) throws FirstError {}
+
+    function load(int $id, string $path): string throws FirstError, SecondError
+    {
+        return $path;
+    }
+
+    static function open(string $path): string throws SecondError
+    {
+        return $path;
+    }
+}
+
+function find(int $id, string $path): string throws FirstError, SecondError
+{
+    return $path;
+}
+
+function fail(take FirstError $failure): void throws FirstError
+{
+    throw $failure;
+}
+
+function inspect(take FirstError $failure): void throws Error
+{
+    let $worker = new Worker(1);
+    find(1, "record");
+    $worker->load(2, "method");
+    Worker::open("static");
+
+    try {
+        fail($failure);
+    } catch (FirstError $caught) {
+        echo $caught->message;
+    }
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("checked-errors.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+
+        let error_contract = snapshot
+            .hover_at_offset(
+                source
+                    .find("implements Error")
+                    .expect("Error contract reference")
+                    + "implements ".len(),
+            )
+            .expect("Error contract hover");
+        assert!(error_contract.markdown.contains("interface Error"));
+        assert!(error_contract.markdown.contains("string $message"));
+
+        let class = snapshot
+            .hover_at_offset(source.find("FirstError").expect("Error class declaration"))
+            .expect("Error class hover");
+        assert!(class.markdown.contains("class FirstError implements Error"));
+        assert!(class.markdown.contains("Explicitly conforms"));
+
+        let promoted_message = snapshot
+            .hover_at_offset(source.find("$message").expect("promoted message"))
+            .expect("promoted message hover");
+        assert!(promoted_message.markdown.contains("string $message"));
+        assert!(promoted_message.markdown.contains("Error` contract"));
+
+        for (needle, occurrence, expected) in [
+            (
+                "find",
+                0,
+                "function find(int $id, string $path): string throws FirstError, SecondError",
+            ),
+            (
+                "load",
+                0,
+                "function Worker::load(int $id, string $path): string throws FirstError, SecondError",
+            ),
+            (
+                "__construct",
+                1,
+                "function Worker::__construct(int $id) throws FirstError",
+            ),
+        ] {
+            assert!(hover(source, needle, occurrence)
+                .markdown
+                .contains(expected));
+        }
+        let throw_offset = source.find("throw $failure").expect("throw statement");
+        assert!(snapshot
+            .hover_at_offset(throw_offset)
+            .expect("throw statement hover")
+            .markdown
+            .contains("Transfers ownership"));
+
+        let caught = source.find("$caught").expect("catch binding");
+        let caught_hover = snapshot
+            .hover_at_offset(caught)
+            .expect("catch binding hover");
+        assert!(caught_hover.markdown.contains("FirstError $caught"));
+        assert!(caught_hover.markdown.contains("Readonly owned"));
+        assert_eq!(snapshot.reference_spans_at_offset(caught, true).len(), 2);
+        assert_eq!(
+            snapshot.rename_replacement_at_offset(caught, "handled"),
+            Some("$handled".to_string())
+        );
+        assert!(snapshot
+            .semantic_token_spans()
+            .iter()
+            .any(|(span, token_type)| span.start == caught && *token_type == 0));
+
+        let call_expectations = [
+            (
+                "new Worker(1)",
+                "1",
+                "function Worker::__construct(int $id) throws FirstError",
+                0,
+            ),
+            (
+                "find(1, \"record\")",
+                "\"record\"",
+                "function find(int $id, string $path): string throws FirstError, SecondError",
+                1,
+            ),
+            (
+                "$worker->load(2, \"method\")",
+                "\"method\"",
+                "function Worker::load(int $id, string $path): string throws FirstError, SecondError",
+                1,
+            ),
+            (
+                "Worker::open(\"static\")",
+                "\"static\"",
+                "static function Worker::open(string $path): string throws SecondError",
+                0,
+            ),
+        ];
+        for (call, argument, label, active_parameter) in call_expectations {
+            let call_start = source
+                .find(call)
+                .unwrap_or_else(|| panic!("missing `{call}`"));
+            let offset = call_start + call.find(argument).expect("argument in call");
+            assert_eq!(
+                snapshot.signature_help_at_offset(offset),
+                Some(SignatureHelp {
+                    label: label.to_string(),
+                    active_parameter,
+                })
+            );
+        }
+
+        let omitted = AnalysisSnapshot::analyze(
+            "omitted-catch.doria",
+            r#"class Failure implements Error { function __construct(string $message) {} }
+function fail(): void throws Failure { throw new Failure("x"); }
+function handle(): void { try { fail(); } catch (Failure) {} }"#,
+        );
+        assert!(
+            omitted.diagnostics().is_empty(),
+            "{:#?}",
+            omitted.diagnostics()
+        );
+        assert!(omitted
+            .symbols
+            .iter()
+            .all(|symbol| symbol.local_name.as_deref() != Some("caught")));
+
+        let leaked = AnalysisSnapshot::analyze(
+            "catch-scope.doria",
+            r#"class Failure implements Error { function __construct(string $message) {} }
+function fail(): void throws Failure { throw new Failure("x"); }
+function handle(): void { try { fail(); } catch (Failure $caught) { echo $caught->message; } echo $caught->message; }"#,
+        );
+        assert!(leaked
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0101"));
     }
 }

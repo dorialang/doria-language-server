@@ -120,10 +120,6 @@ $plannedKeywords = [
     'override',
     'with',
     'take',
-    'throw',
-    'throws',
-    'try',
-    'catch',
     'fn',
     'get',
     'set',
@@ -1266,6 +1262,20 @@ function check_lsp_completion_vocabulary(): void
         'LSP completion reserved type list could not be found'
     );
     $lspReservedTypeList = $reservedMatches[1];
+    require_check(
+        preg_match('/let planned_keywords = \[(.*?)\];/s', $lspText, $plannedMatches) === 1,
+        'LSP planned keyword list could not be found'
+    );
+    foreach (['try', 'catch', 'throw', 'throws'] as $keyword) {
+        require_check(
+            !str_contains($plannedMatches[1], chr(34) . $keyword . chr(34)),
+            "LSP must classify {$keyword} as implemented checked-error syntax"
+        );
+    }
+    require_check(
+        str_contains($lspText, '"label": "Error"'),
+        'LSP completion is missing the compiler-known Error interface'
+    );
 
     sort($lspSupportedTypes);
     foreach ($lspSupportedTypes as $type) {

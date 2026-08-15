@@ -38,6 +38,14 @@ the generic callable signature rather than documentation alone.
 The server never guesses a symbol from spelling alone. Ambiguous or unresolved
 identifiers return no semantic hover.
 
+## Signature help
+
+`textDocument/signatureHelp` uses the same compiler-resolved callable records as
+hover. Free functions, instance methods, static methods, and constructors show
+parameter and return types together with any declared `throws` entries in source
+order. The server does not reconstruct or alphabetize the compiler's checked-error
+effects.
+
 ## PHPDoc presentation
 
 Doria documentation comments use PHPDoc syntax:
@@ -66,6 +74,6 @@ snapshot from `doriac` parser and semantic-analysis results, maps byte spans to 
 positions, caches the snapshot by document version, and renders protocol Markdown.
 It does not infer a parallel Doria type system.
 
-Workspace indexing, imported declarations, inheritance across files, signature help,
-definition navigation, references, and rename build on the same symbol/occurrence
-snapshot rather than adding client-specific resolution rules.
+Workspace indexing, imported declarations, inheritance across files, definition
+navigation, references, and rename build on the same symbol/occurrence snapshot
+rather than adding client-specific resolution rules.
