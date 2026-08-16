@@ -3050,6 +3050,17 @@ function main(): void
         echo $caught->message;
     }
 }
+
+function relay(take Failure $failure): void throws Failure
+{
+    try {
+        throw $failure;
+    } catch (/* 😀 */ Failure $relayError) {
+        echo "😀"; throw $relayError;
+    } /* 😀 */ finally {
+        echo "done";
+    }
+}
 "#;
         let mut server = Server::default();
         server.documents.insert(
@@ -3161,6 +3172,28 @@ function main(): void
         assert!(throw_hover["contents"]["value"]
             .as_str()
             .is_some_and(|value| value.contains("Transfers ownership")));
+
+        for (needle, expected_text) in [
+            ("throw $relayError", "Transfers ownership"),
+            ("finally {", "Runs once"),
+        ] {
+            let offset = text.rfind(needle).expect("checked-error keyword");
+            let position = byte_offset_to_position(text, offset);
+            let line_start = text[..offset].rfind('\n').map_or(0, |index| index + 1);
+            assert_ne!(
+                position.character as usize,
+                offset - line_start,
+                "fixture must distinguish UTF-16 columns before `{needle}`"
+            );
+            let hover = server
+                .hover(Some(&params_at(offset)))
+                .unwrap_or_else(|| panic!("missing hover for `{needle}`"));
+            assert_eq!(hover["range"]["start"]["line"], position.line);
+            assert_eq!(hover["range"]["start"]["character"], position.character);
+            assert!(hover["contents"]["value"]
+                .as_str()
+                .is_some_and(|value| value.contains(expected_text)));
+        }
 
         let semantic = server.semantic_tokens(Some(&json!({
             "textDocument": { "uri": uri },

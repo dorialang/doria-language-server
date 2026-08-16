@@ -299,6 +299,53 @@ fn preserves_the_compiler_readonly_clear_diagnostic_after_non_ascii_text() {
 }
 
 #[test]
+fn checked_error_execution_boundaries_remain_compiler_owned() {
+    let handled = diagnostics_for_document(
+        "file:///handled-errors.doria",
+        r#"class Failure implements Error
+{
+    function __construct(string $message) {}
+}
+
+function fail(): void throws Failure
+{
+    throw new Failure("handled");
+}
+
+function main(): void
+{
+    try {
+        fail();
+    } catch (Failure $error) {
+        echo $error->message;
+    }
+}
+"#,
+    );
+    assert!(handled.is_empty(), "{handled:#?}");
+
+    let escaping = diagnostics_for_document(
+        "file:///escaping-error.doria",
+        r#"class Failure implements Error
+{
+    function __construct(string $message) {}
+}
+
+function main(): void throws Failure
+{
+    throw new Failure("escaping");
+}
+"#,
+    );
+    assert!(
+        escaping
+            .iter()
+            .all(|diagnostic| diagnostic["code"] != "B2902"),
+        "document analysis must not fabricate the backend-only Slice 3 boundary: {escaping:#?}"
+    );
+}
+
+#[test]
 fn payload_enums_and_core_match_execution_come_from_the_compiler() {
     let accepted = diagnostics_for_document(
         "file:///enums.doria",
@@ -1105,6 +1152,7 @@ fn checked_error_diagnostics_keep_compiler_fixes_and_utf16_ranges() {
 {
     function __construct(string $message) {}
 }
+
 "#;
 
     for (source, code, fix_title) in [
