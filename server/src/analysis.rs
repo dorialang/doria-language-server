@@ -489,6 +489,7 @@ struct SnapshotBuilder<'a> {
     enum_cases: HashMap<(String, String), usize>,
     class_parents: HashMap<String, String>,
     class_members: HashMap<String, Vec<ClassMemberCompletion>>,
+    class_property_symbols: HashMap<(String, String), usize>,
     enum_case_completions: HashMap<String, Vec<SemanticCompletion>>,
     enum_member_completions: HashMap<String, Vec<SemanticCompletion>>,
     methods: HashMap<(String, String), usize>,
@@ -522,6 +523,7 @@ impl<'a> SnapshotBuilder<'a> {
             enum_cases: HashMap::new(),
             class_parents: HashMap::new(),
             class_members: HashMap::new(),
+            class_property_symbols: HashMap::new(),
             enum_case_completions: HashMap::new(),
             enum_member_completions: HashMap::new(),
             methods: HashMap::new(),
@@ -538,6 +540,7 @@ impl<'a> SnapshotBuilder<'a> {
 
     fn build(mut self, program: &Program) -> AnalysisSnapshot {
         self.collect_declarations(program);
+        self.collect_semantic_only_declarations();
         self.collect_references(program);
         AnalysisSnapshot {
             diagnostics: self.diagnostics,
@@ -582,6 +585,110 @@ impl<'a> SnapshotBuilder<'a> {
                     self.functions.insert(function.name.clone(), symbol);
                 }
                 _ => {}
+            }
+        }
+    }
+
+    fn collect_semantic_only_declarations(&mut self) {
+        let Some(info) = self.semantic_info else {
+            return;
+        };
+        let enums = info
+            .enums
+            .iter()
+            .filter(|info| !self.enums.contains_key(&info.name))
+            .cloned()
+            .collect::<Vec<_>>();
+        let classes = info
+            .classes
+            .iter()
+            .filter(|info| !self.classes.contains_key(&info.declaration_name))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for info in enums {
+            let symbol = self.add_metadata_symbol(
+                format!("enum {}", info.name),
+                Some(enum_documentation(&info)),
+                SymbolKind::Plain,
+            );
+            self.enums.insert(info.name.clone(), symbol);
+
+            let mut completions = Vec::new();
+            for case in &info.cases {
+                let signature = enum_case_signature(&info.name, &case.name, Some(case));
+                let documentation = enum_case_documentation(Some(&info), Some(case));
+                let case_symbol = self.add_metadata_symbol(
+                    signature.clone(),
+                    documentation.clone(),
+                    SymbolKind::Plain,
+                );
+                self.enum_cases
+                    .insert((info.name.clone(), case.name.clone()), case_symbol);
+                completions.push(SemanticCompletion {
+                    label: case.name.clone(),
+                    kind: 20,
+                    detail: signature,
+                    documentation,
+                });
+            }
+            self.enum_case_completions
+                .insert(info.name.clone(), completions);
+
+            if let Some(backing_type) = info.backing_type {
+                let backing = enum_backing_name(backing_type).to_string();
+                self.enum_member_completions.insert(
+                    info.name,
+                    vec![SemanticCompletion {
+                        label: "value".to_string(),
+                        kind: 10,
+                        detail: format!("{backing} $value"),
+                        documentation: Some(
+                            "Readonly backing value associated with this enum case.".to_string(),
+                        ),
+                    }],
+                );
+            }
+        }
+
+        for info in classes {
+            let class_name = info.declaration_name;
+            let symbol = self.add_metadata_symbol(
+                format!("class {class_name}"),
+                Some("Compiler-known Doria class supplied by semantic analysis.".to_string()),
+                SymbolKind::Plain,
+            );
+            self.classes.insert(class_name.clone(), symbol);
+
+            for property in info.properties {
+                let detail = format!("{} ${}", display_resolved_type(&property.ty), property.name);
+                let mutability = if property.writable {
+                    "writable"
+                } else {
+                    "readonly"
+                };
+                let documentation = Some(format!("Compiler-known {mutability} Doria property."));
+                let property_symbol = self.add_metadata_symbol(
+                    detail.clone(),
+                    documentation.clone(),
+                    SymbolKind::Variable,
+                );
+                self.class_property_symbols
+                    .insert((class_name.clone(), property.name.clone()), property_symbol);
+                self.class_members
+                    .entry(class_name.clone())
+                    .or_default()
+                    .push(ClassMemberCompletion {
+                        completion: SemanticCompletion {
+                            label: property.name,
+                            kind: 10,
+                            detail,
+                            documentation,
+                        },
+                        writable: false,
+                        internal: false,
+                        is_static: false,
+                    });
             }
         }
     }
@@ -703,17 +810,22 @@ impl<'a> SnapshotBuilder<'a> {
                         });
                 }
                 ClassMember::Property(property) => {
-                    if conforms_to_error && property.name == "message" {
-                        let selection_span =
-                            find_variable_span(self.tokens, property.span, &property.name)
-                                .unwrap_or(property.span);
-                        self.add_declaration_symbol(
-                            selection_span,
-                            format!("{} $message", property.ty),
-                            Some("Required externally accessible readonly message for the compiler-known `Error` contract.".to_string()),
-                            SymbolKind::Variable,
-                        );
-                    }
+                    let selection_span =
+                        find_variable_span(self.tokens, property.span, &property.name)
+                            .unwrap_or(property.span);
+                    let documentation = if conforms_to_error && property.name == "message" {
+                        Some("Required externally accessible readonly message for the compiler-known `Error` contract.".to_string())
+                    } else {
+                        phpdoc_before(self.text, property.span.start)
+                    };
+                    let property_symbol = self.add_declaration_symbol(
+                        selection_span,
+                        format!("{} ${}", property.ty, property.name),
+                        documentation.clone(),
+                        SymbolKind::Variable,
+                    );
+                    self.class_property_symbols
+                        .insert((class.name.clone(), property.name.clone()), property_symbol);
                     self.class_members
                         .entry(class.name.clone())
                         .or_default()
@@ -722,7 +834,7 @@ impl<'a> SnapshotBuilder<'a> {
                                 label: property.name.clone(),
                                 kind: 10,
                                 detail: format!("{} ${}", property.ty, property.name),
-                                documentation: phpdoc_before(self.text, property.span.start),
+                                documentation,
                             },
                             // Property completion represents a read. Mutability matters only
                             // when the property is used as an assignment place.
@@ -764,6 +876,23 @@ impl<'a> SnapshotBuilder<'a> {
             kind,
             OccurrenceRole::Declaration,
         )
+    }
+
+    fn add_metadata_symbol(
+        &mut self,
+        signature: String,
+        documentation: Option<String>,
+        kind: SymbolKind,
+    ) -> usize {
+        let symbol = self.symbols.len();
+        self.symbols.push(Symbol {
+            signature,
+            documentation,
+            local_name: None,
+            parameter_names: Vec::new(),
+            kind,
+        });
+        symbol
     }
 
     fn add_reference_symbol(
@@ -1600,6 +1729,13 @@ impl<'a> SnapshotBuilder<'a> {
                     }
                     return;
                 }
+                if let (Some(class_name), Some(property_span)) =
+                    (receiver.and_then(member_receiver_class_name), property_span)
+                {
+                    if let Some(symbol) = self.resolve_property(class_name, property) {
+                        self.record_reference(property_span, symbol);
+                    }
+                }
                 let is_string = self
                     .semantic_info
                     .and_then(|info| info.expression_type(object.span()))
@@ -1900,6 +2036,24 @@ impl<'a> SnapshotBuilder<'a> {
             if let Some(symbol) = self
                 .methods
                 .get(&(class_name.to_string(), method.to_string()))
+            {
+                return Some(*symbol);
+            }
+            current = self.class_parents.get(class_name).map(String::as_str);
+        }
+        None
+    }
+
+    fn resolve_property(&self, class_name: &str, property: &str) -> Option<usize> {
+        let mut current = Some(class_name);
+        let mut visited = HashSet::new();
+        while let Some(class_name) = current {
+            if !visited.insert(class_name) {
+                break;
+            }
+            if let Some(symbol) = self
+                .class_property_symbols
+                .get(&(class_name.to_string(), property.to_string()))
             {
                 return Some(*symbol);
             }
@@ -2314,6 +2468,22 @@ fn non_nullable_type(ty: &ResolvedType) -> &ResolvedType {
     match ty {
         ResolvedType::Nullable(inner) => inner,
         ty => ty,
+    }
+}
+
+fn member_receiver_class_name(ty: &ResolvedType) -> Option<&str> {
+    match non_nullable_type(ty) {
+        ResolvedType::Class(class) => Some(&class.name),
+        ResolvedType::SharedHandle(
+            SharedHandleKind::SharedReference
+            | SharedHandleKind::ReadonlySharedReferenceAccess
+            | SharedHandleKind::WritableSharedReferenceAccess,
+            payload,
+        ) => match non_nullable_type(payload) {
+            ResolvedType::Class(class) => Some(&class.name),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -2775,6 +2945,80 @@ function main(): void throws Doria\Std\Io\IoError
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].label, "value");
         assert_eq!(members[0].detail, "int $value");
+    }
+
+    #[test]
+    fn compiler_known_semantic_declarations_drive_member_completion_and_hover() {
+        let source = r#"function inspect(Doria\Std\Io\IoError $error): void
+{
+    let $emoji = "😀";
+    Doria\Std\Io\IoErrorReason $reason = $error->reason;
+    Doria\Std\Io\IoOperation $operation = Doria\Std\Io\IoOperation::Read;
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("compiler-known.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+
+        let property_offset = source.rfind("reason").expect("I/O error property");
+        let members = snapshot
+            .member_completions_at_offset(property_offset)
+            .expect("compiler-known class member completion context");
+        let details = members
+            .into_iter()
+            .map(|completion| (completion.label, completion.detail))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            details.get("message").map(String::as_str),
+            Some("string $message")
+        );
+        assert_eq!(
+            details.get("operation").map(String::as_str),
+            Some("Doria\\Std\\Io\\IoOperation $operation")
+        );
+        assert_eq!(
+            details.get("target").map(String::as_str),
+            Some("Doria\\Std\\Io\\IoTarget $target")
+        );
+        assert_eq!(
+            details.get("reason").map(String::as_str),
+            Some("Doria\\Std\\Io\\IoErrorReason $reason")
+        );
+        assert_eq!(
+            details.get("systemCode").map(String::as_str),
+            Some("?int $systemCode")
+        );
+        assert!(snapshot
+            .hover_at_offset(property_offset)
+            .expect("compiler-known property hover")
+            .markdown
+            .contains("Doria\\Std\\Io\\IoErrorReason $reason"));
+
+        let case_offset = source.rfind("Read").expect("I/O operation case");
+        let cases = snapshot
+            .static_completions_at_offset(case_offset)
+            .expect("compiler-known enum case completion context")
+            .into_iter()
+            .map(|completion| completion.label)
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            cases,
+            HashSet::from([
+                "Open".to_string(),
+                "Read".to_string(),
+                "Write".to_string(),
+                "Append".to_string(),
+                "Flush".to_string(),
+            ])
+        );
+        assert!(snapshot
+            .hover_at_offset(case_offset)
+            .expect("compiler-known enum case hover")
+            .markdown
+            .contains("Doria\\Std\\Io\\IoOperation::Read: Doria\\Std\\Io\\IoOperation"));
     }
 
     #[test]
