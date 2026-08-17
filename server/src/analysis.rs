@@ -131,17 +131,16 @@ pub(crate) struct LocalCompletion {
 impl AnalysisSnapshot {
     pub(crate) fn analyze(path: &str, text: &str) -> Self {
         let tokens = doriac::lex_source(path.to_string(), text.to_string()).unwrap_or_default();
-        let program = match doriac::parse_source(path.to_string(), text.to_string()) {
-            Ok(program) => program,
-            Err(diagnostics) => {
-                return Self {
-                    diagnostics,
-                    ..Self::default()
-                };
-            }
-        };
-
-        let analysis = doriac::semantics::analyze_program_for_ide_with_source(&program, Some(text));
+        let (program, analysis) =
+            match doriac::analyze_source_for_ide(path.to_string(), text.to_string()) {
+                Ok(analysis) => analysis,
+                Err(diagnostics) => {
+                    return Self {
+                        diagnostics,
+                        ..Self::default()
+                    };
+                }
+            };
 
         SnapshotBuilder::new(text, &tokens, Some(&analysis.info), analysis.diagnostics)
             .build(&program)
@@ -2715,7 +2714,7 @@ enum Shape { case Circle(float $radius); }
 class Document {}
 enum LoadResult { case Loaded(Document $document); }
 
-function main(): void
+function main(): void throws Doria\Std\Io\IoError
 {
     Status $status = Status::Draft;
     Priority $priority = Priority::High;
@@ -2839,7 +2838,7 @@ function main(): void
 
         let leaked = AnalysisSnapshot::analyze(
             "leaked.doria",
-            "enum Result { case Value(string $text); } function main(): void { Result $r = Result::Value(\"ok\"); string $v = match ($r) { Result::Value($inside) => $inside, }; echo $inside; }",
+            "enum Result { case Value(string $text); } function main(): void throws Doria\\Std\\Io\\IoError { Result $r = Result::Value(\"ok\"); string $v = match ($r) { Result::Value($inside) => $inside, }; echo $inside; }",
         );
         assert!(leaked
             .diagnostics()
@@ -2849,7 +2848,7 @@ function main(): void
 
     #[test]
     fn control_flow_foundations_share_semantic_scope_hover_and_rename_identity() {
-        let source = r#"function main(): void
+        let source = r#"function main(): void throws Doria\Std\Io\IoError
 {
     echo "😀"; given {
         /* 😀 */ let $prepared = true;
@@ -2998,9 +2997,9 @@ function inspect(): void
         let source = r#"function main(): void
 {
     if (true) {
-        echo "body";
+        let $body = "body";
     } /* 😀 */ finally {
-        echo "cleanup";
+        let $cleanup = "cleanup";
     }
 }
 "#;
@@ -3025,7 +3024,7 @@ function inspect(): void
     function isReady(): bool { return true; }
 }
 enum LoadResult { case Loaded(Document $document); case Missing; }
-function main(): void
+function main(): void throws Doria\Std\Io\IoError
 {
     echo "😀";
     LoadResult $result = LoadResult::Loaded(new Document("ready"));
@@ -3404,7 +3403,7 @@ function main(): void
 
     #[test]
     fn string_intrinsic_hovers_use_the_canonical_surface() {
-        let source = r#"function main(): void
+        let source = r#"function main(): void throws Doria\Std\Io\IoError
 {
     string $text = "Straße";
     int $length = $text->length;
@@ -3566,7 +3565,7 @@ function main(): void
 
     #[test]
     fn decision_0113_hovers_cover_slice_three_and_in_place_clear() {
-        let source = r#"function main(): void
+        let source = r#"function main(): void throws Doria\Std\Io\IoError
 {
     echo "😀";
     writable List<int> $list = [1];
@@ -3660,7 +3659,7 @@ function main(): void
 
     #[test]
     fn grouped_locals_have_independent_symbols_hovers_completions_and_references() {
-        let source = r#"function main(): void
+        let source = r#"function main(): void throws Doria\Std\Io\IoError
 {
     let writable $left, $right = 10;
     int $minimum, $maximum = 5;
@@ -3712,7 +3711,7 @@ function main(): void
 
     #[test]
     fn grouped_local_scope_and_shadowing_keep_symbols_distinct() {
-        let source = r#"function main(): void
+        let source = r#"function main(): void throws Doria\Std\Io\IoError
 {
     let $value, $peer = 1;
     {
@@ -3743,7 +3742,7 @@ function main(): void
     }
 }
 
-function greet(string $name): void
+function greet(string $name): void throws Doria\Std\Io\IoError
 {
     echo $name;
 }
@@ -3903,7 +3902,7 @@ function main(): void
     string $referencedValue = "payload";
 }
 
-function main(): void
+function main(): void throws Doria\Std\Io\IoError
 {
     let $counter = shared new Counter();
     echo $counter->referencedValue->referencedValue;

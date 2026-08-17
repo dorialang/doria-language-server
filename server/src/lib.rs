@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 use serde_json::{json, Value};
 
+use doriac::builtins::Builtin;
 use doriac::diagnostics::{
     prepare_diagnostics, Diagnostic, DiagnosticFix, DiagnosticSeverity, DiagnosticSource,
     FixApplicability, LabelRole,
@@ -25,8 +26,22 @@ pub struct LspPosition {
 
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-const READ_LINE_SIGNATURE: &str = "read_line(string $prompt = \"\"): ?string";
-const READ_LINE_DOCUMENTATION: &str = "`read_line(string $prompt = \"\"): ?string` writes the prompt exactly with no added newline, flushes stdout before reading one UTF-8 line, returns `null` only at EOF, and returns `\"\"` for a blank line.";
+const BUILTINS: &[Builtin] = &[
+    Builtin::Panic,
+    Builtin::ReadLine,
+    Builtin::Sprintf,
+    Builtin::Printf,
+    Builtin::ReadFile,
+    Builtin::WriteFile,
+    Builtin::AppendFile,
+    Builtin::WriteStderr,
+    Builtin::ReadFileBytes,
+    Builtin::WriteFileBytes,
+    Builtin::AppendFileBytes,
+    Builtin::ReadStdinBytes,
+    Builtin::WriteStdoutBytes,
+    Builtin::WriteStderrBytes,
+];
 
 pub fn toolchain_version() -> &'static str {
     doriac::TOOLCHAIN_VERSION
@@ -867,50 +882,25 @@ fn completion_items() -> Value {
         "detail": "function toString(): string",
         "documentation": "The exact readonly instance method required by the compiler-known `Displayable` contract.",
     }));
-    items.push(json!({
-        "label": "panic",
-        "kind": 3,
-        "detail": "Doria built-in function",
-        "documentation": "Terminates execution with a fatal panic, Doria stack trace, and status 101.",
+    items.extend(BUILTINS.iter().copied().map(|builtin| {
+        json!({
+            "label": builtin.name(),
+            "kind": 3,
+            "detail": builtin.signature(),
+            "documentation": builtin_documentation(builtin),
+        })
     }));
     items.extend(
-        [
-            ("read_line", READ_LINE_SIGNATURE, READ_LINE_DOCUMENTATION),
-            (
-                "sprintf",
-                "sprintf(string $format, ...): string",
-                "Formats values with a compile-time-checked literal format string.",
-            ),
-            (
-                "printf",
-                "printf(string $format, ...): void",
-                "Writes a compile-time-checked format with no added newline and returns void.",
-            ),
-            (
-                "read_file",
-                "read_file(string $path): string",
-                "Reads a complete UTF-8 text file or panics on failure.",
-            ),
-            (
-                "write_file",
-                "write_file(string $path, string $contents): void",
-                "Creates or truncates a UTF-8 text file and writes exact bytes.",
-            ),
-            (
-                "write_stderr",
-                "write_stderr(string $value): void",
-                "Writes exact UTF-8 bytes to stderr without adding a newline.",
-            ),
-        ]
-        .into_iter()
-        .map(|(label, detail, documentation)| {
-            json!({
-                "label": label,
-                "kind": 3,
-                "detail": detail,
-                "documentation": documentation,
-            })
-        }),
+        doriac::compiler_known_io::CANONICAL_TYPES
+            .into_iter()
+            .map(|name| {
+                json!({
+                    "label": name,
+                    "kind": 25,
+                    "detail": "compiler-known Doria standard-library type",
+                    "documentation": compiler_known_io_documentation(name),
+                })
+            }),
     );
     items.extend(integer_conversions.into_iter().map(|(label, target)| {
         json!({
@@ -1074,7 +1064,17 @@ fn hover_at_offset_with_analysis(
             && offset < token.span.end
     })?;
     let token = &tokens[token_index];
+    if let Some((description, span)) = compiler_known_io_hover_at(&tokens, token_index) {
+        return Some(json!({
+            "contents": {
+                "kind": "markdown",
+                "value": description,
+            },
+            "range": span_to_range(text, span),
+        }));
+    }
     let description = string_companion_hover_at(&tokens, token_index)
+        .or_else(|| compiler_builtin_hover_at(&tokens, token_index))
         .or_else(|| integer_conversion_hover_at(&tokens, token_index).map(ToOwned::to_owned))
         .or_else(|| builtin_method_hover_at(&tokens, token_index))
         .or_else(|| hover_description(&token.kind).map(ToOwned::to_owned))?;
@@ -1086,6 +1086,130 @@ fn hover_at_offset_with_analysis(
         },
         "range": span_to_range(text, token.span),
     }))
+}
+
+fn compiler_builtin_hover_at(tokens: &[Token], token_index: usize) -> Option<String> {
+    let TokenKind::Identifier(name) = &tokens.get(token_index)?.kind else {
+        return None;
+    };
+    let builtin = Builtin::from_name(name)?;
+    Some(format!(
+        "```doria\n{}\n```\n\n{}",
+        builtin.signature(),
+        builtin_documentation(builtin)
+    ))
+}
+
+fn compiler_known_io_hover_at(tokens: &[Token], token_index: usize) -> Option<(String, Span)> {
+    if token_index < 6 {
+        return None;
+    }
+    let segment = &tokens[token_index - 6..=token_index];
+    let [Token {
+        kind: TokenKind::Identifier(root),
+        ..
+    }, Token {
+        kind: TokenKind::Backslash,
+        ..
+    }, Token {
+        kind: TokenKind::Identifier(standard),
+        ..
+    }, Token {
+        kind: TokenKind::Backslash,
+        ..
+    }, Token {
+        kind: TokenKind::Identifier(io),
+        ..
+    }, Token {
+        kind: TokenKind::Backslash,
+        ..
+    }, Token {
+        kind: TokenKind::Identifier(name),
+        ..
+    }] = segment
+    else {
+        return None;
+    };
+    if root != "Doria" || standard != "Std" || io != "Io" {
+        return None;
+    }
+    let qualified = format!("Doria\\Std\\Io\\{name}");
+    let documentation = compiler_known_io_documentation(&qualified)?;
+    Some((
+        format!("```doria\n{qualified}\n```\n\n{documentation}"),
+        Span::new(segment[0].span.start, segment[6].span.end),
+    ))
+}
+
+fn compiler_known_io_documentation(name: &str) -> Option<&'static str> {
+    match name {
+        doriac::compiler_known_io::IO_OPERATION => Some(
+            "Compiler-known I/O operation enum with `Open`, `Read`, `Write`, `Append`, and `Flush` cases.",
+        ),
+        doriac::compiler_known_io::IO_TARGET => Some(
+            "Compiler-known I/O target enum with `File(string $path)`, `StandardInput`, `StandardOutput`, and `StandardError` cases.",
+        ),
+        doriac::compiler_known_io::IO_ERROR_REASON => Some(
+            "Compiler-known I/O reason enum with stable portable categories; host-specific codes remain in `IoError::$systemCode`.",
+        ),
+        doriac::compiler_known_io::UTF8_INPUT_SOURCE => Some(
+            "Compiler-known UTF-8 input-source enum with `File(string $path)` and `StandardInput` cases.",
+        ),
+        doriac::compiler_known_io::IO_ERROR => Some(
+            "Compiler-known checked `Error` carrying readonly `message`, `operation`, `target`, `reason`, and nullable `systemCode` properties.",
+        ),
+        doriac::compiler_known_io::INVALID_UTF8_ERROR => Some(
+            "Compiler-known checked `Error` carrying readonly `message`, `source`, `validByteCount`, and nullable `invalidByteCount` properties.",
+        ),
+        _ => None,
+    }
+}
+
+fn builtin_documentation(builtin: Builtin) -> &'static str {
+    match builtin {
+        Builtin::Panic => {
+            "Terminates execution with a fatal panic, Doria stack trace, and status 101. Panics are not checked errors and are not catchable."
+        }
+        Builtin::ReadLine => {
+            "Writes and flushes the prompt, then reads one UTF-8 line. Returns `null` only at EOF and `\"\"` for a blank line. I/O and invalid UTF-8 failures are checked errors."
+        }
+        Builtin::Sprintf => {
+            "Formats values with a compile-time-checked literal format string without performing I/O."
+        }
+        Builtin::Printf => {
+            "Writes a compile-time-checked format with no added newline. Output failure is a checked I/O error."
+        }
+        Builtin::ReadFile => {
+            "Reads a complete UTF-8 text file. I/O and invalid UTF-8 failures are distinct checked errors."
+        }
+        Builtin::WriteFile => {
+            "Creates or truncates a UTF-8 text file and writes exact bytes. Failure is a checked I/O error."
+        }
+        Builtin::AppendFile => {
+            "Creates or appends exact UTF-8 bytes. Failure is a checked I/O error."
+        }
+        Builtin::WriteStderr => {
+            "Writes exact UTF-8 bytes to stderr without adding a newline. Failure is a checked I/O error."
+        }
+        Builtin::ReadFileBytes => {
+            "Reads a whole file as raw bytes without UTF-8 validation. Failure is a checked I/O error."
+        }
+        Builtin::WriteFileBytes => {
+            "Creates or truncates a file with exact bytes. Failure is a checked I/O error."
+        }
+        Builtin::AppendFileBytes => {
+            "Creates or appends exact bytes. Failure is a checked I/O error."
+        }
+        Builtin::ReadStdinBytes => {
+            "Reads all standard input as raw bytes, returning empty `Bytes` at EOF. Failure is a checked I/O error."
+        }
+        Builtin::WriteStdoutBytes => {
+            "Writes exact bytes to standard output. Failure is a checked I/O error."
+        }
+        Builtin::WriteStderrBytes => {
+            "Writes exact bytes to standard error. Failure is a checked I/O error."
+        }
+    }
 }
 
 fn string_companion_hover_at(tokens: &[Token], token_index: usize) -> Option<String> {
@@ -1264,7 +1388,9 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
         TokenKind::Throws => Some(
             "Declares a callable's source-ordered checked-error effect set.",
         ),
-        TokenKind::Echo => Some("Emits a value through the current backend."),
+        TokenKind::Echo => Some(
+            "`echo value;` writes the displayed value and has the checked `Doria\\Std\\Io\\IoError` effect.",
+        ),
         TokenKind::New => Some("Constructs an instance of a class."),
         TokenKind::Foreach => Some("Iterates over a list or dictionary value."),
         TokenKind::As => Some("Separates a `foreach` iterable from its binding."),
@@ -1310,6 +1436,9 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
         TokenKind::True | TokenKind::False => Some("Boolean literal."),
         TokenKind::Null => Some("The `null` literal: the absent value of any nullable type `?T`. Assign it to a `?T` binding or compare with `== null` / `!= null`; a `!= null` guard narrows `?T` to `T`."),
         TokenKind::Reserved(_) => Some("Reserved for future Doria syntax."),
+        TokenKind::Identifier(name) if Builtin::from_name(name).is_some() => {
+            Builtin::from_name(name).map(builtin_documentation)
+        }
         TokenKind::Identifier(name) => match name.as_str() {
             "Error" => Some("`interface Error` is the compiler-known checked-error contract. Conforming classes explicitly declare `implements Error` and expose an externally accessible readonly `string $message` property."),
             "Displayable" => Some("`interface Displayable` is the compiler-known display contract. A class must explicitly declare `implements Displayable` and provide `function toString(): string`. It controls interpolation, echo, concatenation, and `%s`. Other interfaces are not supported by this compiler."),
@@ -1329,23 +1458,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "resource" => Some("Reserved for future PHP interop; not a usable core type."),
             companion @ ("Int" | "Int8" | "Int16" | "Int32" | "Int64" | "UInt8"
             | "UInt16" | "UInt32" | "UInt64") => integer_conversion_description(companion),
-            "panic" => Some(
-                "Built-in fatal runtime function: `panic(\"message\");`. Panics are not catchable and exit with status 101.",
-            ),
-            "read_line" => Some(READ_LINE_DOCUMENTATION),
-            "sprintf" => Some("`sprintf(string $format, ...): string` uses a compile-time-checked literal format string."),
-            "printf" => Some("`printf(string $format, ...): void` uses the same checked formatter as `sprintf`, adds no newline, and returns void."),
-            "read_file" => Some("`read_file(string $path): string` reads complete UTF-8 text and panics on failure."),
-            "write_file" => Some("`write_file(string $path, string $contents): void` creates or truncates a UTF-8 text file and writes exact bytes."),
-            "write_stderr" => Some("`write_stderr(string $value): void` writes exact bytes to stderr without adding a newline."),
             "Bytes" => Some("`Bytes` is the owned, mutable byte-buffer move type: `Bytes::fromArray` / `->toArray` (copying), the `length` property, byte indexing with in-place writes, and byte-wise equality. It converts to and from `uint8[]` only explicitly."),
-            "append_file" => Some("`append_file(string $path, string $contents): void` creates or appends exact UTF-8 bytes; `write_file` stays truncate-only (decision 0091)."),
-            "read_file_bytes" => Some("`read_file_bytes(string $path): Bytes` reads a whole file as raw bytes, with no UTF-8 validation or newline normalization."),
-            "write_file_bytes" => Some("`write_file_bytes(string $path, Bytes $contents): void` creates or truncates a file with exact bytes."),
-            "append_file_bytes" => Some("`append_file_bytes(string $path, Bytes $contents): void` creates or appends exact bytes."),
-            "read_stdin_bytes" => Some("`read_stdin_bytes(): Bytes` reads all of stdin as raw bytes (empty on EOF), with no UTF-8 validation (decision 0101)."),
-            "write_stdout_bytes" => Some("`write_stdout_bytes(Bytes $contents): void` writes exact bytes to stdout, with no newline or console translation (decision 0101)."),
-            "write_stderr_bytes" => Some("`write_stderr_bytes(Bytes $contents): void` writes exact bytes to stderr, with no newline or console translation (decision 0101)."),
             _ => None,
         },
         TokenKind::Variable(_) => Some("Doria variable. Variables must be declared before use."),
@@ -1390,14 +1503,17 @@ fn diagnostic_to_lsp(uri: &str, text: &str, diagnostic: &Diagnostic) -> Value {
         "fixes": diagnostic.fixes.iter().map(|fix| json!({
             "title": fix.title,
             "applicability": fix.applicability.as_str(),
-            "edits": fix.edits.iter().map(|edit| json!({
-                "uri": diagnostic_source_uri(uri, &edit.source),
-                "range": span_to_range(
-                    if matches!(&edit.source, DiagnosticSource::Current) { text } else { "" },
-                    edit.span,
-                ),
-                "newText": edit.replacement,
-            })).collect::<Vec<_>>(),
+            "edits": fix.edits.iter().filter_map(|edit| {
+                let edit_uri = diagnostic_source_uri(uri, &edit.source)?;
+                Some(json!({
+                    "uri": edit_uri,
+                    "range": span_to_range(
+                        if matches!(&edit.source, DiagnosticSource::Current) { text } else { "" },
+                        edit.span,
+                    ),
+                    "newText": edit.replacement,
+                }))
+            }).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
     });
     if let Some(fix) = diagnostic
@@ -1422,17 +1538,18 @@ fn diagnostic_to_lsp(uri: &str, text: &str, diagnostic: &Diagnostic) -> Value {
         .labels
         .iter()
         .filter(|label| label.role == LabelRole::Secondary)
-        .map(|label| {
-            json!({
+        .filter_map(|label| {
+            let related_uri = diagnostic_source_uri(uri, &label.source)?;
+            Some(json!({
                 "location": {
-                    "uri": diagnostic_source_uri(uri, &label.source),
+                    "uri": related_uri,
                     "range": span_to_range(
                         if matches!(&label.source, DiagnosticSource::Current) { text } else { "" },
                         label.span,
                     ),
                 },
                 "message": label.message,
-            })
+            }))
         })
         .collect::<Vec<_>>();
     if !related.is_empty() {
@@ -1449,11 +1566,12 @@ fn lsp_severity(severity: DiagnosticSeverity) -> u8 {
     }
 }
 
-fn diagnostic_source_uri(current_uri: &str, source: &DiagnosticSource) -> String {
+fn diagnostic_source_uri(current_uri: &str, source: &DiagnosticSource) -> Option<String> {
     match source {
-        DiagnosticSource::Current => current_uri.to_string(),
-        DiagnosticSource::Path(path) if path.contains("://") => path.clone(),
-        DiagnosticSource::Path(path) => format!("file://{path}"),
+        DiagnosticSource::Current => Some(current_uri.to_string()),
+        DiagnosticSource::Path(path) if path.contains("://") => Some(path.clone()),
+        DiagnosticSource::Path(path) => Some(format!("file://{path}")),
+        DiagnosticSource::Unavailable => None,
     }
 }
 
@@ -1821,13 +1939,13 @@ function main(): void
         // Stage 23b (decision 0099) adds `main(List<string> $args)` alongside
         // the parameterless forms. None of them may be marked as invalid code.
         for source in [
-            r#"function main(List<string> $args): int
+            r#"function main(List<string> $args): int throws Doria\Std\Io\IoError
 {
     printf("count=%d\n", $args->count);
     return 0;
 }
 "#,
-            r#"function main(List<string> $args): void
+            r#"function main(List<string> $args): void throws Doria\Std\Io\IoError
 {
     foreach ($args as $argument) {
         echo $argument;
@@ -1856,7 +1974,7 @@ function main(): void
     fn sequence_fill_literals_are_not_reported_as_editor_errors() {
         let diagnostics = diagnostics_for_document(
             "test.doria",
-            r#"function main(List<string> $args): void
+            r#"function main(List<string> $args): void throws Doria\Std\Io\IoError
 {
     bool[] $flags = [true; $args->count];
     let $counts = [0; $args->count];
@@ -2341,59 +2459,108 @@ function main(): void
     fn completion_and_hover_expose_panic_as_a_builtin_function() {
         assert_eq!(
             completion_detail("panic").as_deref(),
-            Some("Doria built-in function")
+            Some(Builtin::Panic.signature())
         );
-        let hover = hover_description(&TokenKind::Identifier("panic".to_string()))
-            .expect("panic should have hover text");
+        let source = "panic(\"boom\");";
+        let hover = hover_at_offset(source, 1).expect("panic should have hover text")["contents"]
+            ["value"]
+            .as_str()
+            .expect("panic hover should be markdown")
+            .to_string();
+        assert!(hover.contains(Builtin::Panic.signature()));
         assert!(hover.contains("status 101"));
         assert!(hover.contains("not catchable"));
     }
 
     #[test]
-    fn completions_and_hover_expose_stage17_builtins() {
-        for (name, signature, required_hover) in [
-            ("read_line", READ_LINE_SIGNATURE, "only at EOF"),
-            (
-                "sprintf",
-                "sprintf(string $format, ...): string",
-                "literal format",
-            ),
-            (
-                "printf",
-                "printf(string $format, ...): void",
-                "adds no newline",
-            ),
-            ("read_file", "read_file(string $path): string", "UTF-8"),
-            (
-                "write_file",
-                "write_file(string $path, string $contents): void",
-                "UTF-8",
-            ),
-            (
-                "write_stderr",
-                "write_stderr(string $value): void",
-                "without adding a newline",
-            ),
+    fn completions_and_hover_expose_compiler_owned_builtin_contracts() {
+        for (builtin, required_hover) in [
+            (Builtin::ReadLine, "only at EOF"),
+            (Builtin::Sprintf, "literal format"),
+            (Builtin::Printf, "checked I/O error"),
+            (Builtin::ReadFile, "invalid UTF-8"),
+            (Builtin::WriteFile, "checked I/O error"),
+            (Builtin::AppendFile, "checked I/O error"),
+            (Builtin::WriteStderr, "without adding a newline"),
+            (Builtin::ReadFileBytes, "without UTF-8 validation"),
+            (Builtin::WriteFileBytes, "checked I/O error"),
+            (Builtin::AppendFileBytes, "checked I/O error"),
+            (Builtin::ReadStdinBytes, "empty `Bytes` at EOF"),
+            (Builtin::WriteStdoutBytes, "standard output"),
+            (Builtin::WriteStderrBytes, "standard error"),
         ] {
-            assert_eq!(completion_detail(name).as_deref(), Some(signature));
-            let hover = hover_description(&TokenKind::Identifier(name.to_string()))
-                .expect("Stage 17 builtin should have hover text");
-            assert!(hover.contains(required_hover), "{name}: {hover}");
+            assert_eq!(
+                completion_detail(builtin.name()).as_deref(),
+                Some(builtin.signature())
+            );
+            let source = format!("{}();", builtin.name());
+            let hover = hover_at_offset(&source, 1)
+                .expect("compiler-owned builtin should have hover text")["contents"]["value"]
+                .as_str()
+                .expect("builtin hover should be markdown")
+                .to_string();
+            assert!(hover.contains(builtin.signature()));
+            assert!(
+                hover.contains(required_hover),
+                "{}: {hover}",
+                builtin.name()
+            );
         }
         assert!(!completion_labels().contains(&"print".to_string()));
     }
 
     #[test]
+    fn compiler_known_io_types_have_qualified_utf16_safe_hovers_only() {
+        let labels = completion_labels();
+        for qualified in doriac::compiler_known_io::CANONICAL_TYPES {
+            assert!(labels.contains(&qualified.to_string()), "{qualified}");
+        }
+
+        let source = "let $emoji = \"😀\"; Doria\\Std\\Io\\IoError $error;";
+        let qualified = doriac::compiler_known_io::IO_ERROR;
+        let start = source.find(qualified).expect("qualified I/O type");
+        let hover = hover_at_offset(source, start + qualified.len() - 1)
+            .expect("qualified I/O type should hover");
+        let markdown = hover["contents"]["value"]
+            .as_str()
+            .expect("qualified I/O hover should be markdown");
+        assert!(markdown.contains(qualified));
+        assert!(markdown.contains("readonly `message`"));
+        assert_eq!(
+            hover["range"]["start"]["character"],
+            byte_offset_to_position(source, start).character
+        );
+        assert_eq!(
+            hover["range"]["end"]["character"],
+            byte_offset_to_position(source, start + qualified.len()).character
+        );
+
+        let short = "IoError $error;";
+        assert!(hover_at_offset(short, 1).is_none());
+        assert!(!labels.contains(&"IoError".to_string()));
+    }
+
+    #[test]
+    fn echo_hover_names_its_checked_io_effect() {
+        let hover = hover_description(&TokenKind::Echo).expect("echo hover");
+        assert!(hover.contains(doriac::compiler_known_io::IO_ERROR));
+    }
+
+    #[test]
     fn read_line_hover_shows_the_prompt_parameter() {
-        let hover = hover_description(&TokenKind::Identifier("read_line".to_string()))
-            .expect("read_line should have hover text");
+        let source = "read_line();";
+        let hover = hover_at_offset(source, 1).expect("read_line should have hover text")
+            ["contents"]["value"]
+            .as_str()
+            .expect("read_line hover should be markdown")
+            .to_string();
         assert!(hover.contains("string $prompt"));
     }
 
     #[test]
     fn control_flow_protocol_ranges_remain_utf16_safe() {
         let uri = "file:///control-flow-utf16.doria";
-        let text = r#"function main(): void
+        let text = r#"function main(): void throws Doria\Std\Io\IoError
 {
     echo "😀"; given {
         /* 😀 */ let $prepared = true;
@@ -2402,7 +2569,7 @@ function main(): void
         echo "{$prepared}";
         let $branchOnly = true;
     } /* 😀 */ finally {
-        echo "{$prepared}";
+        let $cleanup = $prepared;
     }
 
     echo "😀"; string $label = given {
@@ -2518,7 +2685,7 @@ function main(): void
 
         assert_eq!(diagnostics_for_document(uri, text), Vec::<Value>::new());
 
-        let finalizer_body = text.find("echo \"{$prepared}\";\n    }\n\n").unwrap();
+        let finalizer_body = text.find("let $cleanup = $prepared;").unwrap();
         assert!(!server
             .completion(Some(&params_at(finalizer_body)))
             .as_array()
@@ -2527,8 +2694,12 @@ function main(): void
 
     #[test]
     fn read_line_hover_shows_the_empty_string_default() {
-        let hover = hover_description(&TokenKind::Identifier("read_line".to_string()))
-            .expect("read_line should have hover text");
+        let source = "read_line();";
+        let hover = hover_at_offset(source, 1).expect("read_line should have hover text")
+            ["contents"]["value"]
+            .as_str()
+            .expect("read_line hover should be markdown")
+            .to_string();
         assert!(hover.contains("$prompt = \"\""));
     }
 
@@ -2742,7 +2913,7 @@ function main(): void
     fn match_binding_lsp_features_share_utf16_safe_symbol_identity() {
         let uri = "file:///match-bindings.doria";
         let text = r#"enum Result { case Value(string $text); case Missing; }
-function main(): void
+function main(): void throws Doria\Std\Io\IoError
 {
     Result $result = Result::Value("ok");
     string $label = match ($result) {
@@ -2850,7 +3021,7 @@ function main(): void
         LoadResult::Loaded($document) => $document,
         LoadResult::Missing => new Document("fallback"),
     };
-    echo "😀"; LoadResult $again = $result;
+    let $emoji = "😀"; LoadResult $again = $result;
 }"#;
         let diagnostics = diagnostics_for_document(uri, text);
         let moved = diagnostics
