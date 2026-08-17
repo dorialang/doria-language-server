@@ -61,7 +61,7 @@ $count = 1;
 fn grouped_local_declarations_use_compiler_diagnostics_without_false_positives() {
     let accepted = diagnostics_for_document(
         "file:///grouped.doria",
-        r#"function main(): void
+        r#"function main(): void throws Doria\Std\Io\IoError
 {
     let $left, $right = 1;
     let writable $red, $blue = 2;
@@ -92,7 +92,7 @@ fn grouped_local_declarations_use_compiler_diagnostics_without_false_positives()
 fn accepts_zero_argument_read_line_without_false_diagnostics() {
     let diagnostics = diagnostics_for_document(
         "file:///input.doria",
-        "function main(): void { let $line = read_line(); }",
+        "function main(): void throws Doria\\Std\\Io\\IoError, Doria\\Std\\Io\\InvalidUtf8Error { let $line = read_line(); }",
     );
     assert!(diagnostics.is_empty(), "{diagnostics:#?}");
 }
@@ -101,9 +101,119 @@ fn accepts_zero_argument_read_line_without_false_diagnostics() {
 fn accepts_prompted_read_line_without_false_diagnostics() {
     let diagnostics = diagnostics_for_document(
         "file:///input.doria",
-        "function main(): void { let $line = read_line(\"Name: \"); }",
+        "function main(): void throws Doria\\Std\\Io\\IoError, Doria\\Std\\Io\\InvalidUtf8Error { let $line = read_line(\"Name: \"); }",
     );
     assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn publishes_canonical_checked_io_effect_diagnostics() {
+    let echo = diagnostics_for_document(
+        "file:///unchecked-echo.doria",
+        "function main(): void { echo \"value\"; }",
+    );
+    let echo_diagnostic = echo
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0631")
+        .unwrap_or_else(|| panic!("missing uncovered echo effect: {echo:#?}"));
+    assert!(echo_diagnostic["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("Doria\\Std\\Io\\IoError")));
+
+    let input = diagnostics_for_document(
+        "file:///unchecked-input.doria",
+        "function main(): void { let $line = read_line(); }",
+    );
+    let input_diagnostic = input
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0631")
+        .unwrap_or_else(|| panic!("missing uncovered input effects: {input:#?}"));
+    let message = input_diagnostic["message"]
+        .as_str()
+        .expect("input diagnostic message");
+    assert!(message.contains("Doria\\Std\\Io\\IoError"));
+    assert!(message.contains("Doria\\Std\\Io\\InvalidUtf8Error"));
+}
+
+#[test]
+fn publishes_lifecycle_and_finalizer_io_effect_diagnostics() {
+    let destructor = diagnostics_for_document(
+        "file:///destructor-output.doria",
+        r#"class Log
+{
+    function __destruct() { echo "drop"; }
+}
+"#,
+    );
+    let destructor_diagnostic = destructor
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0631")
+        .unwrap_or_else(|| panic!("missing destructor checked-effect diagnostic: {destructor:#?}"));
+    let message = destructor_diagnostic["message"]
+        .as_str()
+        .expect("destructor diagnostic message");
+    assert!(message.contains("Destructors Cannot Throw Checked Errors"));
+    assert!(message.contains("Doria\\Std\\Io\\IoError"));
+
+    let finalizer = diagnostics_for_document(
+        "file:///finalizer-output.doria",
+        r#"function main(): void throws Doria\Std\Io\IoError
+{
+    if (true) {} finally { echo "cleanup"; }
+}
+"#,
+    );
+    let finalizer_diagnostic = finalizer
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0632")
+        .unwrap_or_else(|| panic!("missing finalizer checked-effect diagnostic: {finalizer:#?}"));
+    assert!(finalizer_diagnostic["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("Doria\\Std\\Io\\IoError")));
+}
+
+#[test]
+fn accepts_only_the_canonical_compiler_known_io_type_identities() {
+    let diagnostics = diagnostics_for_document(
+        "file:///canonical-io-types.doria",
+        r#"function inspect(
+    Doria\Std\Io\IoOperation $operation,
+    Doria\Std\Io\IoTarget $target,
+    Doria\Std\Io\IoErrorReason $reason,
+    Doria\Std\Io\Utf8InputSource $source,
+    Doria\Std\Io\IoError $io,
+    Doria\Std\Io\InvalidUtf8Error $utf8
+): void throws Doria\Std\Io\IoError, Doria\Std\Io\InvalidUtf8Error
+{
+}
+"#,
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+
+    let short = diagnostics_for_document(
+        "file:///short-io-type.doria",
+        "function inspect(IoError $error): void {}",
+    );
+    assert!(
+        short.iter().any(|diagnostic| diagnostic["code"] == "E0401"),
+        "short aliases must remain unknown: {short:#?}"
+    );
+}
+
+#[test]
+fn runtime_io_outcomes_are_not_published_as_live_diagnostics() {
+    let diagnostics = diagnostics_for_document(
+        "file:///runtime-only-io.doria",
+        r#"function main(): void throws Doria\Std\Io\IoError
+{
+    echo "value";
+}
+"#,
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    assert!(diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic["code"] != "R1000"));
 }
 
 #[test]
@@ -120,6 +230,23 @@ fn publishes_the_compiler_diagnostic_for_a_non_string_prompt() {
         .as_str()
         .expect("diagnostic message")
         .contains("expects `string`"));
+}
+
+#[test]
+fn io_diagnostic_ranges_remain_utf16_safe_after_non_ascii_text() {
+    let source = "function main(): void { let $emoji = \"😀\"; let $line = read_line(1); }";
+    let diagnostics = diagnostics_for_document("file:///input-utf16.doria", source);
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0453")
+        .unwrap_or_else(|| panic!("missing prompt-type diagnostic: {diagnostics:#?}"));
+    let argument = source.find("read_line(1)").expect("read_line call") + "read_line(".len();
+    let expected = byte_offset_to_position(source, argument);
+    assert_eq!(diagnostic["range"]["start"]["line"], expected.line);
+    assert_eq!(
+        diagnostic["range"]["start"]["character"], expected.character,
+        "compiler byte spans must be converted to UTF-16 positions"
+    );
 }
 
 #[test]
@@ -250,7 +377,7 @@ fn exposes_collection_diagnostic_fixes_as_utf16_safe_code_actions() {
 
 #[test]
 fn accepts_the_complete_decision_0113_surface_after_non_ascii_text() {
-    let source = r#"function main(): void
+    let source = r#"function main(): void throws Doria\Std\Io\IoError
 {
     echo "😀";
     writable List<int> $list = [1];
@@ -284,7 +411,7 @@ fn accepts_the_complete_decision_0113_surface_after_non_ascii_text() {
 #[test]
 fn preserves_the_compiler_readonly_clear_diagnostic_after_non_ascii_text() {
     let source =
-        "function main(): void { echo \"😀\"; List<int> $values = [1]; $values->clear(); }";
+        "function main(): void { let $emoji = \"😀\"; List<int> $values = [1]; $values->clear(); }";
     let diagnostics = diagnostics_for_document("file:///readonly-clear.doria", source);
     let diagnostic = diagnostics
         .iter()
@@ -312,7 +439,7 @@ function fail(): void throws Failure
     throw new Failure("handled");
 }
 
-function main(): void
+function main(): void throws Doria\Std\Io\IoError
 {
     try {
         fail();
@@ -352,7 +479,7 @@ fn payload_enums_and_core_match_execution_come_from_the_compiler() {
         r#"enum Status { case Draft; }
 enum Priority: int { case High = 2; }
 enum Transport: string { case Rail = "rail"; }
-function main(): void
+    function main(): void throws Doria\Std\Io\IoError
 {
     Status $status = Status::Draft;
     Priority $priority = Priority::High;
@@ -416,7 +543,7 @@ function main(): void
         .any(|diagnostic| diagnostic["code"] == "E0597"));
 
     let ternary_source =
-        "function f(int $value): string { echo \"😀\"; return $value ? \"yes\" : \"no\"; }";
+        "function f(int $value): string { let $emoji = \"😀\"; return $value ? \"yes\" : \"no\"; }";
     let ternary = diagnostics_for_document("file:///ternary.doria", ternary_source);
     let diagnostic = ternary
         .iter()
@@ -493,7 +620,7 @@ function main(): void
 fn enum_case_fixes_remain_machine_applicable_and_utf16_safe() {
     let uri = "file:///enum-fixes.doria";
     let source = r#"enum Status { case Draft; }
-function main(): void { echo "😀"; Status $status = Status::Draft(); }
+function main(): void { let $emoji = "😀"; Status $status = Status::Draft(); }
 "#;
     let diagnostics = diagnostics_for_document(uri, source);
     assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
@@ -524,20 +651,20 @@ fn payload_enum_diagnostics_keep_compiler_codes_and_utf16_ranges() {
         (
             "construction",
             r#"enum Shape { case Circle(float $radius); }
-function main(): void { echo "😀"; Shape $shape = Shape::Circle("wide"); }"#,
+function main(): void { let $emoji = "😀"; Shape $shape = Shape::Circle("wide"); }"#,
             "E0408",
             "\"wide\"",
         ),
         (
             "named argument",
             r#"enum Coordinate { case Point(int $x, int $y); }
-function main(): void { echo "😀"; let $point = Coordinate::Point(z: 1, y: 2); }"#,
+function main(): void { let $emoji = "😀"; let $point = Coordinate::Point(z: 1, y: 2); }"#,
             "E0516",
             "z:",
         ),
         (
             "recursive layout",
-            r#"echo "😀"; enum Node { case Next(Node $next); }"#,
+            r#"let $emoji = "😀"; enum Node { case Next(Node $next); }"#,
             "E0581",
             "Node $next",
         ),
@@ -545,21 +672,21 @@ function main(): void { echo "😀"; let $point = Coordinate::Point(z: 1, y: 2);
             "move",
             r#"class Document {}
 enum LoadResult { case Loaded(Document $document); }
-function main(): void { echo "😀"; Document $document = new Document(); LoadResult $result = LoadResult::Loaded($document); let $again = $document; }"#,
+function main(): void { let $emoji = "😀"; Document $document = new Document(); LoadResult $result = LoadResult::Loaded($document); let $again = $document; }"#,
             "E0470",
             "$document; }",
         ),
         (
             "equality",
             r#"enum Bucket { case Values(List<int> $values); }
-function main(): void { echo "😀"; Bucket $left = Bucket::Values([1]); Bucket $right = Bucket::Values([1]); bool $same = $left == $right; }"#,
+function main(): void { let $emoji = "😀"; Bucket $left = Bucket::Values([1]); Bucket $right = Bucket::Values([1]); bool $same = $left == $right; }"#,
             "E0584",
             "$left ==",
         ),
         (
             "match",
             r#"enum Status { case Draft; case Published; }
-function main(): void { echo "😀"; let $label = match (Status::Draft) { Status::Draft => 1, }; }"#,
+function main(): void { let $emoji = "😀"; let $label = match (Status::Draft) { Status::Draft => 1, }; }"#,
             "E0585",
             "match",
         ),
@@ -679,7 +806,7 @@ class Counter
 fn executable_string_surface_has_no_false_diagnostics() {
     let diagnostics = diagnostics_for_document(
         "file:///strings.doria",
-        r#"function main(): void
+        r#"function main(): void throws Doria\Std\Io\IoError
 {
     string $text = String::trim("  Straße 👍🏾  ");
     int $characters = $text->length;
@@ -697,7 +824,7 @@ fn executable_string_surface_has_no_false_diagnostics() {
 
 #[test]
 fn string_diagnostics_keep_utf16_positions_after_emoji() {
-    let source = r#"function main(): void { echo "😀"; String::contains("text", 1); }"#;
+    let source = r#"function main(): void { let $emoji = "😀"; String::contains("text", 1); }"#;
     let diagnostics = diagnostics_for_document("file:///strings.doria", source);
     let diagnostic = diagnostics
         .iter()
@@ -723,7 +850,7 @@ class Node
     function __construct(string $name) {}
 }
 
-function inspect(SharedReference<Node> $node): void
+function inspect(SharedReference<Node> $node): void throws Doria\Std\Io\IoError
 {
     echo $node->name;
 }
@@ -736,7 +863,7 @@ function choose(
     return $left ?? $right;
 }
 
-function main(): void
+function main(): void throws Doria\Std\Io\IoError
 {
     let $root = shared new Node("root");
     let $weak = $root->createWeakReference();
@@ -767,7 +894,7 @@ function update(WritableSharedReference<Counter> $counter): void
     $write->value++;
 }
 
-function main(): void
+function main(): void throws Doria\Std\Io\IoError
 {
     let $counter = new WritableSharedReference(new Counter());
     let $second = $counter->share();
@@ -795,7 +922,7 @@ class Counter
     writable int $value = 0;
 }
 
-function main(): void
+function main(): void throws Doria\Std\Io\IoError
 {
     let $counter = new WritableSharedReference(new Counter());
 
@@ -880,7 +1007,7 @@ fn shared_operation_diagnostics_preserve_utf16_ranges_after_emoji() {
     let source = r#"class Counter {}
 function main(): void
 {
-    echo "😀";
+    let $emoji = "😀";
     let $counter = new WritableSharedReference(new Counter());
     let $moved = $counter;
     let $bad = $counter->share();
@@ -959,7 +1086,9 @@ fn accepts_stage22_is_narrowing_without_lsp_diagnostics() {
 fn accepts_control_flow_without_lsp_diagnostics() {
     let diagnostics = diagnostics_for_document(
         "file:///control_flow.doria",
-        r#"let writable $count = 0;
+        r#"function main(): void throws Doria\Std\Io\IoError
+{
+let writable $count = 0;
 
 while ($count < 3) {
     if ($count == 0) {
@@ -973,6 +1102,7 @@ while ($count < 3) {
     echo "\n";
     $count += 1;
 }
+}
 "#,
     );
 
@@ -983,7 +1113,7 @@ while ($count < 3) {
 fn accepts_stage28a_executable_control_flow_without_lsp_diagnostics() {
     let diagnostics = diagnostics_for_document(
         "file:///stage28a.doria",
-        r#"function main(): void
+        r#"function main(): void throws Doria\Std\Io\IoError
 {
     let writable $count = 0;
     given {
@@ -992,7 +1122,7 @@ fn accepts_stage28a_executable_control_flow_without_lsp_diagnostics() {
     } if ($prepared) {
         echo "prepared";
     } finally {
-        echo "if cleanup";
+        let $ifCleanup = "if cleanup";
     }
     string $label = given {
         let $prefix = "label";
@@ -1002,17 +1132,17 @@ fn accepts_stage28a_executable_control_flow_without_lsp_diagnostics() {
     } else {
         return "other";
     } finally {
-        echo $prefix;
+        let $whenCleanup = $prefix;
     };
     while ($count < 1) {
         $count++;
     } finally {
-        echo "while cleanup";
+        let $whileCleanup = "while cleanup";
     }
     do {
         $count++;
     } while ($count < 2) finally {
-        echo "do cleanup";
+        let $doCleanup = "do cleanup";
     }
     echo $label;
 }
@@ -1035,17 +1165,17 @@ fn finalizer_scope_and_transfer_diagnostics_remain_compiler_owned_and_utf16_safe
     for (name, source, transfer) in [
         (
             "return",
-            "function leave(): void { if (true) {} finally { echo \"😀\"; return; } }",
+            "function leave(): void { if (true) {} finally { let $emoji = \"😀\"; return; } }",
             "return",
         ),
         (
             "break",
-            "function leave(): void { while (true) { if (true) {} finally { echo \"😀\"; break; } break; } }",
+            "function leave(): void { while (true) { if (true) {} finally { let $emoji = \"😀\"; break; } break; } }",
             "break",
         ),
         (
             "continue",
-            "function leave(): void { while (true) { if (true) {} finally { echo \"😀\"; continue; } break; } }",
+            "function leave(): void { while (true) { if (true) {} finally { let $emoji = \"😀\"; continue; } break; } }",
             "continue",
         ),
     ] {
@@ -1072,7 +1202,7 @@ fn finalizer_scope_and_transfer_diagnostics_remain_compiler_owned_and_utf16_safe
         r#"function main(): void
 {
     if (true) {} finally {
-        echo "😀";
+        let $emoji = "😀";
         string $label = when (true): string {
             return "ready";
         } else {
@@ -1081,7 +1211,7 @@ fn finalizer_scope_and_transfer_diagnostics_remain_compiler_owned_and_utf16_safe
         while (true) {
             break;
         }
-        echo $label;
+        let $copy = $label;
     }
 }
 "#,
@@ -1090,7 +1220,7 @@ fn finalizer_scope_and_transfer_diagnostics_remain_compiler_owned_and_utf16_safe
 
     let branch_local = diagnostics_for_document(
         "file:///branch-local-finalizer.doria",
-        "function main(): void { if (true) { let $branch = 1; } finally { echo $branch; } }",
+        "function main(): void { if (true) { let $branch = 1; } finally { let $copy = $branch; } }",
     );
     assert!(branch_local
         .iter()
@@ -1098,7 +1228,7 @@ fn finalizer_scope_and_transfer_diagnostics_remain_compiler_owned_and_utf16_safe
 
     let given_local = diagnostics_for_document(
         "file:///given-local-finalizer.doria",
-        "function main(): void { given { let $prepared = true; } if ($prepared) {} finally { echo $prepared; } echo $prepared; }",
+        "function main(): void { given { let $prepared = true; } if ($prepared) {} finally { let $inside = $prepared; } let $outside = $prepared; }",
     );
     assert_eq!(
         given_local
@@ -1205,7 +1335,7 @@ fn checked_error_diagnostics_keep_compiler_fixes_and_utf16_ranges() {
 function fail(): void throws Failure {{ throw new Failure("x"); }}
 function handle(): void
 {{
-    try {{ fail(); }} catch (/* 😀 */ OtherError $caught) {{ echo $caught->message; }}
+    try {{ fail(); }} catch (/* 😀 */ OtherError $caught) {{ let $message = $caught->message; }}
 }}
 "#
     );
@@ -1224,7 +1354,7 @@ function handle(): void
 
     let moved = format!(
         r#"{error_class}
-function relay(take Failure $failure): void
+function relay(take Failure $failure): void throws Doria\Std\Io\IoError
 {{
     echo "😀"; try {{ throw $failure; }} catch (Failure) {{}}
     echo $failure->message;
@@ -1239,7 +1369,7 @@ function relay(take Failure $failure): void
     let uncovered = format!(
         r#"{error_class}
 function fail(): void throws Failure {{ throw new Failure("x"); }}
-function caller(): void {{ echo "😀"; fail(); }}
+function caller(): void throws Doria\Std\Io\IoError {{ echo "😀"; fail(); }}
 "#
     );
     let diagnostics = diagnostics_for_document("file:///uncovered-error.doria", &uncovered);
@@ -1254,7 +1384,7 @@ function caller(): void {{ echo "😀"; fail(); }}
     let finalizer = format!(
         r#"{error_class}
 function fail(): void throws Failure {{ throw new Failure("x"); }}
-function cleanup(): void throws Failure
+function cleanup(): void throws Failure, Doria\Std\Io\IoError
 {{
     echo "😀"; try {{}} finally {{ fail(); }}
 }}

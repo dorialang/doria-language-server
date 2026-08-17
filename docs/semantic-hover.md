@@ -35,6 +35,16 @@ generic arguments and exact return type; for example, `WeakReference<Theme>::acq
 returns `?SharedReference<Theme>`. In incomplete code, the lexical fallback still shows
 the generic callable signature rather than documentation alone.
 
+Compiler-known built-ins use signatures and checked-error effects exported by `doriac`.
+The six Stage 29 I/O types are completed and hovered only by their canonical qualified
+identities under `Doria\Std\Io`; short aliases such as `IoError` are neither guessed nor
+offered. Because these declarations are compiler-known rather than source-backed, the
+server provides their contract documentation without inventing a definition location.
+
+Live diagnostics include uncovered checked effects such as `Doria\Std\Io\IoError` and
+`Doria\Std\Io\InvalidUtf8Error`. `R1000` remains a runtime outcome for an error that
+escapes the entry point, so it is not published as an editor diagnostic.
+
 The server never guesses a symbol from spelling alone. Ambiguous or unresolved
 identifiers return no semantic hover.
 
