@@ -4,6 +4,52 @@ use doria_language_server::{
     byte_offset_to_position, code_actions_for_document, diagnostics_for_document,
     position_to_byte_offset,
 };
+use doriac::diagnostics::LabelRole;
+
+fn assert_stage_30_closure_boundary(name: &str, source: &str) {
+    doriac::parse_source(name, source).expect("accepted closure grammar must parse");
+    let compiler_diagnostics =
+        doriac::check_source(name, source).expect_err("closure semantics remain a boundary");
+    assert_eq!(
+        compiler_diagnostics.len(),
+        1,
+        "compiler diagnostic cascade for {name}: {compiler_diagnostics:#?}"
+    );
+    let compiler_diagnostic = &compiler_diagnostics[0];
+    assert_eq!(compiler_diagnostic.code, "E0641");
+    let compiler_span = compiler_diagnostic
+        .labels
+        .iter()
+        .find(|label| label.role == LabelRole::Primary)
+        .map_or(compiler_diagnostic.span, |label| label.span);
+
+    let uri = format!("file:///{name}");
+    let diagnostics = diagnostics_for_document(&uri, source);
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "LSP diagnostic cascade for {name}: {diagnostics:#?}"
+    );
+    let diagnostic = &diagnostics[0];
+    assert_eq!(diagnostic["code"], "E0641");
+    assert_eq!(diagnostic["data"]["kind"], "unsupportedDevelopmentSurface");
+    assert_eq!(diagnostic["data"]["developmentOnly"], true);
+    assert!(diagnostic["message"]
+        .as_str()
+        .is_some_and(|message| message.starts_with("Closure Semantics Await Stage 30")));
+    let expected_start = byte_offset_to_position(source, compiler_span.start);
+    let expected_end = byte_offset_to_position(source, compiler_span.end);
+    assert_eq!(diagnostic["range"]["start"]["line"], expected_start.line);
+    assert_eq!(
+        diagnostic["range"]["start"]["character"],
+        expected_start.character
+    );
+    assert_eq!(diagnostic["range"]["end"]["line"], expected_end.line);
+    assert_eq!(
+        diagnostic["range"]["end"]["character"],
+        expected_end.character
+    );
+}
 
 #[test]
 fn maps_byte_offsets_to_utf16_lsp_positions() {
@@ -55,6 +101,86 @@ $count = 1;
         .as_str()
         .expect("message should be string")
         .contains("Cannot Write to Readonly Binding"));
+}
+
+#[test]
+fn publishes_one_structured_boundary_for_every_accepted_closure_form() {
+    let cases = [
+        (
+            "arrow.doria",
+            "let $double = fn(int $value) => $value * 2; let $after = 1;",
+        ),
+        (
+            "readonly-capture.doria",
+            "let $minimum = 70; let $passes = fn(int $score) with ($minimum) => $score >= $minimum;",
+        ),
+        (
+            "block.doria",
+            "let $positive = function (int $value): bool { return $value > 0; };",
+        ),
+        (
+            "block-capture.doria",
+            "let $minimum = 70; let $passes = function (int $score): bool with ($minimum) { return $score >= $minimum; };",
+        ),
+        (
+            "function-type.doria",
+            "function accept(function(int): int $callback): void {}",
+        ),
+        (
+            "nested.doria",
+            "let $nested = fn(int $outer) => fn(int $inner) => $outer + $inner;",
+        ),
+        (
+            "argument.doria",
+            "function consume(mixed $value): void {} consume(fn(string $label) => $label);",
+        ),
+    ];
+
+    for (name, source) in cases {
+        assert_stage_30_closure_boundary(name, source);
+    }
+}
+
+#[test]
+fn closure_boundary_suppresses_body_cascades_and_stays_off_following_source() {
+    let source = "let $closure = fn(int $value) => $missing + $value; let $after = 1;";
+    assert_stage_30_closure_boundary("closure-body-boundary.doria", source);
+
+    let diagnostic = diagnostics_for_document("file:///closure-body-boundary.doria", source)
+        .into_iter()
+        .next()
+        .expect("closure boundary");
+    let after = byte_offset_to_position(source, source.find("let $after").unwrap());
+    assert!(
+        diagnostic["range"]["end"]["character"].as_u64().unwrap() < after.character as u64,
+        "the closure diagnostic must not extend into the following statement: {diagnostic:#?}"
+    );
+}
+
+#[test]
+fn malformed_capture_forms_remain_parser_diagnostics_not_stage_30_boundaries() {
+    let cases = [
+        "let $closure = fn(int $value) use ($outside) => $value;",
+        "let $closure = fn(int $value) with () => $value;",
+        "let $closure = fn(int $value) with (&$outside) => $value;",
+        "let $closure = fn(int $value) with (readonly $outside) => $value;",
+    ];
+
+    for (index, source) in cases.into_iter().enumerate() {
+        let name = format!("malformed-closure-{index}.doria");
+        doriac::parse_source(&name, source).expect_err("malformed closure must not parse");
+        let diagnostics = diagnostics_for_document(&format!("file:///{name}"), source);
+        assert!(
+            !diagnostics.is_empty(),
+            "missing parser diagnostic for {source}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic["code"] != "E0641"),
+            "malformed syntax was misreported as the semantic boundary: {diagnostics:#?}"
+        );
+    }
 }
 
 #[test]

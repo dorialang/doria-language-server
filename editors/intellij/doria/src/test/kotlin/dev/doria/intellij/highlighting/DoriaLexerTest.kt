@@ -159,6 +159,61 @@ class DoriaLexerTest : TestCase() {
         assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
     }
 
+    fun testAcceptedClosureGrammarUsesAlignedKeywordModifierAndVariableTokens() {
+        val tokens = lex(
+            "let \$minimum = 70; " +
+                "let writable \$count = 0; " +
+                "let \$arrow = fn(int \$value) with (\$minimum) => \$value; " +
+                "let \$block = function (int \$value): bool with (writable \$count, take \$message) { return true; }; " +
+                "function transform(function(int): string \$mapper): function(string): int {}",
+        )
+
+        assertEquals(DoriaTokenTypes.KEYWORD, tokens.first { it.text == "fn" }.type)
+        for (token in tokens.filter { it.text == "with" }) {
+            assertEquals(DoriaTokenTypes.KEYWORD, token.type)
+        }
+        for (modifier in listOf("writable", "take")) {
+            for (token in tokens.filter { it.text == modifier }) {
+                assertEquals(DoriaTokenTypes.MODIFIER, token.type)
+            }
+        }
+        for (capture in listOf("\$minimum", "\$count", "\$message")) {
+            assertEquals(DoriaTokenTypes.VARIABLE, tokens.last { it.text == capture }.type)
+        }
+        for (token in tokens.filter { it.text == "function" }) {
+            assertEquals(DoriaTokenTypes.KEYWORD, token.type)
+        }
+        assertEquals(
+            DoriaTokenTypes.FUNCTION_DECLARATION,
+            tokens.first { it.text == "transform" }.type,
+        )
+        assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
+    }
+
+    fun testClosureKeywordsRespectIdentifierStringAndCommentBoundaries() {
+        val tokens = lex("fnord withdraw functionality; \"fn with\"; // fn with\n")
+
+        for (identifier in listOf("fnord", "withdraw", "functionality")) {
+            assertEquals(DoriaTokenTypes.IDENTIFIER, tokens.first { it.text == identifier }.type)
+        }
+        assertEquals(DoriaTokenTypes.STRING, tokens.first { it.text == "\"fn with\"" }.type)
+        assertEquals(DoriaTokenTypes.COMMENT, tokens.first { it.text.startsWith("//") }.type)
+        assertFalse(tokens.any { it.text == "fn" || it.text == "with" })
+    }
+
+    fun testMalformedClosureCaptureFormsRemainInvalid() {
+        for (source in listOf(
+            "let \$f = fn(int \$value) use (\$outside) => \$value;",
+            "let \$f = fn(int \$value) with () => \$value;",
+            "let \$f = fn(int \$value) with (&\$outside) => \$value;",
+            "let \$f = fn(int \$value) with (writable &\$outside) => \$value;",
+            "let \$f = fn(int \$value) with (readonly \$outside) => \$value;",
+        )) {
+            val tokens = lex(source)
+            assertTrue(source, tokens.any { it.type == DoriaTokenTypes.INVALID })
+        }
+    }
+
     private fun lex(source: String): List<Token> {
         val lexer = DoriaLexer()
         lexer.start(source)

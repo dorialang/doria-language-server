@@ -397,14 +397,31 @@ try {
     echo "done";
 }
 
-// Planned/future: closure capture uses with, not PHP closure use.
-let $adder = function (int $x): int with ($base) {
-    return $x + $base;
+// Pre-Stage-30 Closure Grammar: accepted syntax; semantics and execution land in Stage 30.
+let $double = fn(int $value) => $value * 2;
+
+let $minimum = 70;
+let $passes = fn(int $score) with ($minimum) =>
+    $score >= $minimum;
+
+let writable $count = 0;
+let $next = function (): int with (writable $count) {
+    $count += 1;
+    return $count;
 };
 
-let $mover = function (): void with (take $resource) {
-    echo "taken";
+let $message = createMessage();
+let $reader = function (): string with (take $message) {
+    return $message->body;
 };
+
+function transform(
+    function(int): string $mapper,
+    function(): void $done,
+): function(string): int
+{
+    return fn(string $value) => 1;
+}
 
 // Planned/future: async and await.
 async function fetchUser(int $id): User

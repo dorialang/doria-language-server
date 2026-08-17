@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 $root = dirname(__DIR__);
 
+$cargoManifest = $root . '/Cargo.toml';
+$readme = $root . '/README.md';
 $vscodePackage = $root . '/editors/vscode/doria/package.json';
 $vscodeGrammar = $root . '/editors/vscode/doria/syntaxes/doria.tmLanguage.json';
 $vscodeLanguageConfiguration = $root . '/editors/vscode/doria/language-configuration.json';
@@ -36,6 +38,7 @@ $intellijCreateClassAction = $root . '/editors/intellij/doria/src/main/kotlin/de
 $doriaLogo = $root . '/res/images/doria-app-icon-warm.svg';
 $releaseWorkflow = $root . '/.github/workflows/release.yml';
 $lspServer = $root . '/server/src/lib.rs';
+$lspTests = $root . '/server/tests/lsp_tests.rs';
 $fixture = $root . '/editors/fixtures/latest-tokens.doria';
 $rejectedFixture = $root . '/editors/fixtures/rejected-syntax.doria';
 
@@ -118,9 +121,6 @@ $plannedKeywords = [
     'extern',
     'open',
     'override',
-    'with',
-    'take',
-    'fn',
     'get',
     'set',
     'insteadof',
@@ -1442,8 +1442,8 @@ function check_fixture(): void
         'ParserLimits::next;',
         'ParserLimits::MAX_DEPTH',
         'uses HasSlug, TracksChanges;',
-        'with ($base)',
-        'with (take $resource)',
+        'with ($minimum)',
+        'with (take $message)',
         'open class Model',
         'override function save',
         'throws StorageError',
@@ -1615,6 +1615,132 @@ function check_fixture(): void
     }
 }
 
+function check_pre_stage30_closure_alignment(): void
+{
+    global $cargoManifest, $readme, $vscodeGrammar, $intellijLexer, $intellijLexerTest;
+    global $lspServer, $lspTests, $fixture, $rejectedFixture;
+
+    $compilerCommit = '726e43163591a73c03b0955de88bdba29852cea6';
+    require_check(
+        preg_match(
+            '/doriac\s*=\s*\{[^}]*\brev\s*=\s*"' . $compilerCommit . '"/',
+            read_text($cargoManifest),
+        ) === 1,
+        "root doriac dependency must pin compiler commit {$compilerCommit}",
+    );
+
+    $fixtureText = read_text($fixture);
+    $acceptedFacts = [
+        'arrow closure' => '/\bfn\s*\([^)]*\$[A-Za-z_][A-Za-z0-9_]*\)\s*=>/',
+        'anonymous block closure' => '/\bfunction\s*\([^)]*\)\s*:\s*[^\{]+\{/',
+        'readonly capture' => '/\bwith\s*\(\s*\$[A-Za-z_][A-Za-z0-9_]*\s*\)/',
+        'writable capture' => '/\bwith\s*\([^)]*\bwritable\s+\$[A-Za-z_][A-Za-z0-9_]*/',
+        'taking capture' => '/\bwith\s*\([^)]*\btake\s+\$[A-Za-z_][A-Za-z0-9_]*/',
+        'function type' => '/\bfunction\s*\([^$)]*\)\s*:\s*\??[A-Za-z_][A-Za-z0-9_]*/',
+    ];
+    foreach ($acceptedFacts as $fact => $pattern) {
+        require_check(
+            preg_match($pattern, $fixtureText) === 1,
+            "shared accepted fixture must cover {$fact}",
+        );
+    }
+    require_check(
+        str_contains($fixtureText, 'Pre-Stage-30 Closure Grammar') &&
+            !str_contains($fixtureText, 'Planned/future: closure'),
+        'shared fixture must describe closure grammar as accepted without claiming Stage 30 execution',
+    );
+
+    $rejectedText = read_text($rejectedFixture);
+    foreach ([
+        'PHP closure use' => '/\buse\s*\(\s*\$[A-Za-z_]/',
+        'empty capture list' => '/\bwith\s*\(\s*\)/',
+        'reference capture' => '/\bwith\s*\([^)]*&\s*\$[A-Za-z_]/',
+        'readonly capture modifier' => '/\bwith\s*\([^)]*\breadonly\s+\$[A-Za-z_]/',
+    ] as $fact => $pattern) {
+        require_check(
+            preg_match($pattern, $rejectedText) === 1,
+            "shared rejected fixture must cover {$fact}",
+        );
+    }
+    $acceptedCaptureList = '/\bwith\s*\(\s*(?:(?:writable|take)\s+)?\$[A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*(?:(?:writable|take)\s+)?\$[A-Za-z_][A-Za-z0-9_]*)*\s*\)/';
+    require_check(
+        preg_match($acceptedCaptureList, $rejectedText) !== 1,
+        'shared rejected fixture must not contain an accepted capture list',
+    );
+
+    $grammar = load_json($vscodeGrammar);
+    $grammarText = json_encode($grammar, JSON_THROW_ON_ERROR);
+    foreach ([
+        'keyword.declaration.function.arrow.doria',
+        'keyword.declaration.function.anonymous.doria',
+        'storage.type.function.doria',
+        'keyword.control.closure.capture.doria',
+        'storage.modifier.ownership.capture.doria',
+        'variable.other.capture.doria',
+        'keyword.operator.closure.arrow.doria',
+        'invalid.illegal.closure.capture.doria',
+    ] as $scope) {
+        require_check(str_contains($grammarText, $scope), "VS Code closure grammar is missing {$scope}");
+    }
+    $reservedPattern = any_match(
+        $grammar['repository']['keywords']['patterns'] ?? [],
+        static fn (array $pattern): bool =>
+            ($pattern['name'] ?? null) === 'keyword.other.reserved.doria' &&
+            !regex_matches((string) ($pattern['match'] ?? ''), 'fn') &&
+            !regex_matches((string) ($pattern['match'] ?? ''), 'with'),
+    );
+    require_check($reservedPattern, 'VS Code must not classify fn or with as reserved vocabulary');
+    foreach (['fnord', 'withdraw', 'functionality'] as $identifier) {
+        require_check(
+            !regex_matches('\\b(?:fn|with|function)\\b', $identifier),
+            "closure keyword boundaries must preserve identifier {$identifier}",
+        );
+    }
+
+    $lexerText = read_text($intellijLexer);
+    $lexerTestText = read_text($intellijLexerTest);
+    require_check(
+        str_contains($lexerText, '"fn"') &&
+            str_contains($lexerText, '"with"') &&
+            str_contains($lexerText, 'withTokenType()') &&
+            str_contains($lexerText, 'hasInvalidClosureCaptureClause()'),
+        'IntelliJ lexer must recognize accepted fn/with and reject malformed capture clauses contextually',
+    );
+    foreach ([
+        'testAcceptedClosureGrammarUsesAlignedKeywordModifierAndVariableTokens',
+        'testClosureKeywordsRespectIdentifierStringAndCommentBoundaries',
+        'testMalformedClosureCaptureFormsRemainInvalid',
+    ] as $test) {
+        require_check(str_contains($lexerTestText, $test), "IntelliJ closure coverage is missing {$test}");
+    }
+
+    $lspText = read_text($lspServer);
+    $lspTestText = read_text($lspTests);
+    require_check(
+        str_contains($lspText, '"developmentOnly": diagnostic.development_only') &&
+            str_contains($lspText, 'Doria arrow-closure keyword') &&
+            str_contains($lspText, 'Doria closure-capture keyword'),
+        'LSP must preserve development metadata and describe accepted closure grammar',
+    );
+    foreach ([
+        'publishes_one_structured_boundary_for_every_accepted_closure_form',
+        'closure_boundary_suppresses_body_cascades_and_stays_off_following_source',
+        'malformed_capture_forms_remain_parser_diagnostics_not_stage_30_boundaries',
+        'unsupportedDevelopmentSurface',
+        'developmentOnly',
+    ] as $coverage) {
+        require_check(str_contains($lspTestText, $coverage), "LSP closure coverage is missing {$coverage}");
+    }
+
+    $readmeText = read_text($readme);
+    require_check(
+        str_contains($readmeText, 'Pre-Stage-30 closure grammar') &&
+            str_contains($readmeText, 'E0641') &&
+            str_contains($readmeText, 'semantics and execution remain pending Stage 30'),
+        'README must state the accepted grammar and pending Stage 30 semantic boundary',
+    );
+}
+
 function main(): int
 {
     check_vscode_package();
@@ -1627,6 +1753,7 @@ function main(): int
     check_lsp_completion_vocabulary();
     check_editor_fixture_diagnostics_are_skipped();
     check_fixture();
+    check_pre_stage30_closure_alignment();
     echo "Doria editor highlighting checks passed.\n";
     return 0;
 }
