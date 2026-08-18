@@ -14,12 +14,16 @@ const grammar = JSON.parse(
 
 const closures = grammar.repository.closures.patterns;
 const invalid = grammar.repository.invalid.patterns;
+const capture = grammar.repository.closureCaptureList;
 
 function patternWithScope(scope) {
   return closures.find(
     (pattern) =>
       pattern.name === scope ||
       Object.values(pattern.beginCaptures || {}).some(
+        (capture) => capture.name === scope
+      ) ||
+      Object.values(pattern.endCaptures || {}).some(
         (capture) => capture.name === scope
       )
   );
@@ -29,7 +33,6 @@ test("scopes every accepted pre-Stage-30 closure form", () => {
   const arrow = patternWithScope("keyword.declaration.function.arrow.doria");
   const block = patternWithScope("keyword.declaration.function.anonymous.doria");
   const functionType = patternWithScope("storage.type.function.doria");
-  const capture = patternWithScope("keyword.control.closure.capture.doria");
 
   assert.ok(arrow);
   assert.ok(block);
@@ -39,6 +42,19 @@ test("scopes every accepted pre-Stage-30 closure form", () => {
   assert.match(
     "function (int $value): bool {",
     new RegExp(block.begin)
+  );
+  assert.match(
+    "function (int $value): Doria\\Std\\Io\\IoError {",
+    new RegExp(block.begin)
+  );
+  assert.match(
+    "function (function(int): string $callback): bool {",
+    new RegExp(block.begin)
+  );
+  assert.doesNotMatch(
+    "function(int): bool $callback): void {",
+    new RegExp(block.begin),
+    "a nested function type must not become an anonymous closure because a later body exists"
   );
   assert.match("function(int): int", new RegExp(functionType.begin));
   assert.match("function(function(int): string): bool", new RegExp(functionType.begin));
@@ -62,16 +78,33 @@ test("scopes every accepted pre-Stage-30 closure form", () => {
     )
   );
   assert.ok(
+    capture.patterns.some((pattern) => pattern.include === "#comments"),
+    "capture comments must stay comments rather than becoming capture syntax"
+  );
+  assert.ok(
     functionType.patterns.some((pattern) => pattern.include === "#closures"),
     "nested function types must reuse the bounded function-type presentation"
   );
-  assert.ok(patternWithScope("keyword.operator.closure.arrow.doria"));
+  assert.equal(arrow.end, "(=>)");
+  assert.equal(
+    arrow.endCaptures["1"].name,
+    "keyword.operator.closure.arrow.doria"
+  );
+  assert.ok(
+    arrow.patterns.some((pattern) => pattern.include === "#closureCaptureList")
+  );
+  assert.equal(
+    closures.some(
+      (pattern) => pattern.name === "keyword.operator.closure.arrow.doria"
+    ),
+    false,
+    "match and when arrows must not receive the closure-arrow scope"
+  );
 });
 
 test("does not classify nearby identifiers or prose as closure keywords", () => {
   const arrow = patternWithScope("keyword.declaration.function.arrow.doria");
   const functionType = patternWithScope("storage.type.function.doria");
-  const capture = patternWithScope("keyword.control.closure.capture.doria");
   const reserved = grammar.repository.keywords.patterns.find(
     (pattern) => pattern.name === "keyword.other.reserved.doria"
   );
@@ -90,22 +123,37 @@ test("does not classify nearby identifiers or prose as closure keywords", () => 
   assert.doesNotMatch("with", new RegExp(reserved.match));
 });
 
-test("keeps malformed capture syntax rejected", () => {
+test("leaves malformed capture diagnostics to the compiler without reading comments as syntax", () => {
   const invalidMatches = invalid
     .map((pattern) => pattern.match)
     .filter(Boolean)
     .map((pattern) => new RegExp(pattern));
 
+  assert.ok(
+    invalidMatches.some((pattern) =>
+      pattern.test("fn(int $value) use ($outside) => $value")
+    ),
+    "legacy PHP closure use remains visibly rejected"
+  );
+
   for (const source of [
-    "fn(int $value) use ($outside) => $value",
     "fn(int $value) with () => $value",
     "fn(int $value) with (&$outside) => $value",
     "fn(int $value) with (writable &$outside) => $value",
     "fn(int $value) with (readonly $outside) => $value",
+    "fn(int $value) with ($outside /* readonly & */) => $value",
   ]) {
-    assert.ok(
+    assert.equal(
       invalidMatches.some((pattern) => pattern.test(source)),
-      `expected rejected closure presentation for ${source}`
+      false,
+      `compiler-owned capture validation must not use raw editor matching for ${source}`
     );
   }
+
+  assert.equal(
+    invalid.some(
+      (pattern) => pattern.name === "invalid.illegal.closure.capture.doria"
+    ),
+    false
+  );
 });

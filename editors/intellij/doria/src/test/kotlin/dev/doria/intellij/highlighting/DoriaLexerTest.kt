@@ -201,17 +201,28 @@ class DoriaLexerTest : TestCase() {
         assertFalse(tokens.any { it.text == "fn" || it.text == "with" })
     }
 
-    fun testMalformedClosureCaptureFormsRemainInvalid() {
+    fun testCompilerOwnsMalformedCaptureDiagnosticsWithoutCommentFalsePositives() {
         for (source in listOf(
-            "let \$f = fn(int \$value) use (\$outside) => \$value;",
             "let \$f = fn(int \$value) with () => \$value;",
             "let \$f = fn(int \$value) with (&\$outside) => \$value;",
             "let \$f = fn(int \$value) with (writable &\$outside) => \$value;",
             "let \$f = fn(int \$value) with (readonly \$outside) => \$value;",
+            "let \$f = fn(int \$value) with (\$outside /* readonly & */) => \$value;",
         )) {
             val tokens = lex(source)
-            assertTrue(source, tokens.any { it.type == DoriaTokenTypes.INVALID })
+            assertFalse(source, tokens.any { it.type == DoriaTokenTypes.INVALID })
         }
+
+        val commentTokens = lex(
+            "let \$f = fn(int \$value) with (\$outside /* readonly & */) => \$value;",
+        )
+        assertEquals(
+            DoriaTokenTypes.COMMENT,
+            commentTokens.first { it.text.startsWith("/*") }.type,
+        )
+
+        val legacyUse = lex("let \$f = fn(int \$value) use (\$outside) => \$value;")
+        assertEquals(DoriaTokenTypes.INVALID, legacyUse.first { it.text == "use" }.type)
     }
 
     private fun lex(source: String): List<Token> {

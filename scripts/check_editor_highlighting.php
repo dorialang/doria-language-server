@@ -1620,7 +1620,7 @@ function check_pre_stage30_closure_alignment(): void
     global $cargoManifest, $readme, $vscodeGrammar, $intellijLexer, $intellijLexerTest;
     global $lspServer, $lspTests, $fixture, $rejectedFixture;
 
-    $compilerCommit = '726e43163591a73c03b0955de88bdba29852cea6';
+    $compilerCommit = '2ddf396cd5e0a22ee1fb31d9f88f664df8ff6cc6';
     require_check(
         preg_match(
             '/doriac\s*=\s*\{[^}]*\brev\s*=\s*"' . $compilerCommit . '"/',
@@ -1678,10 +1678,56 @@ function check_pre_stage30_closure_alignment(): void
         'storage.modifier.ownership.capture.doria',
         'variable.other.capture.doria',
         'keyword.operator.closure.arrow.doria',
-        'invalid.illegal.closure.capture.doria',
     ] as $scope) {
         require_check(str_contains($grammarText, $scope), "VS Code closure grammar is missing {$scope}");
     }
+    require_check(
+        !str_contains($grammarText, 'invalid.illegal.closure.capture.doria'),
+        'VS Code must leave malformed closure-capture diagnostics to the compiler',
+    );
+    $closurePatterns = $grammar['repository']['closures']['patterns'] ?? [];
+    $arrowPattern = null;
+    $blockPattern = null;
+    foreach ($closurePatterns as $pattern) {
+        if (($pattern['beginCaptures']['1']['name'] ?? null) === 'keyword.declaration.function.arrow.doria') {
+            $arrowPattern = $pattern;
+        }
+        if (($pattern['beginCaptures']['1']['name'] ?? null) === 'keyword.declaration.function.anonymous.doria') {
+            $blockPattern = $pattern;
+        }
+    }
+    require_check(
+        is_array($arrowPattern) &&
+            ($arrowPattern['end'] ?? null) === '(=>)' &&
+            ($arrowPattern['endCaptures']['1']['name'] ?? null) === 'keyword.operator.closure.arrow.doria' &&
+            any_match(
+                $arrowPattern['patterns'] ?? [],
+                static fn (array $pattern): bool => ($pattern['include'] ?? null) === '#closureCaptureList',
+            ),
+        'VS Code closure arrows must be scoped only by the bounded fn construct',
+    );
+    require_check(
+        any_match(
+            $grammar['repository']['closureCaptureList']['patterns'] ?? [],
+            static fn (array $pattern): bool => ($pattern['include'] ?? null) === '#comments',
+        ),
+        'VS Code capture lists must tokenize comments before capture syntax',
+    );
+    require_check(
+        !any_match(
+            $closurePatterns,
+            static fn (array $pattern): bool =>
+                ($pattern['name'] ?? null) === 'keyword.operator.closure.arrow.doria',
+        ),
+        'VS Code must not expose an unconditional root closure-arrow matcher',
+    );
+    require_check(
+        is_array($blockPattern) && regex_matches(
+            (string) ($blockPattern['begin'] ?? ''),
+            'function (int $value): Doria\\Std\\Io\\IoError {',
+        ),
+        'VS Code anonymous closures must recognize namespace-qualified return types',
+    );
     $reservedPattern = any_match(
         $grammar['repository']['keywords']['patterns'] ?? [],
         static fn (array $pattern): bool =>
@@ -1702,14 +1748,14 @@ function check_pre_stage30_closure_alignment(): void
     require_check(
         str_contains($lexerText, '"fn"') &&
             str_contains($lexerText, '"with"') &&
-            str_contains($lexerText, 'withTokenType()') &&
-            str_contains($lexerText, 'hasInvalidClosureCaptureClause()'),
-        'IntelliJ lexer must recognize accepted fn/with and reject malformed capture clauses contextually',
+            !str_contains($lexerText, 'withTokenType()') &&
+            !str_contains($lexerText, 'hasInvalidClosureCaptureClause()'),
+        'IntelliJ must recognize fn/with while leaving capture diagnostics to the compiler',
     );
     foreach ([
         'testAcceptedClosureGrammarUsesAlignedKeywordModifierAndVariableTokens',
         'testClosureKeywordsRespectIdentifierStringAndCommentBoundaries',
-        'testMalformedClosureCaptureFormsRemainInvalid',
+        'testCompilerOwnsMalformedCaptureDiagnosticsWithoutCommentFalsePositives',
     ] as $test) {
         require_check(str_contains($lexerTestText, $test), "IntelliJ closure coverage is missing {$test}");
     }

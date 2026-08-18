@@ -161,14 +161,6 @@
           "match": "\\b(?:goto|require|require_once|include_once|print|instanceof)\\b|\\buse\\b(?=\\s*\\()"
         },
         {
-          "name": "invalid.illegal.closure.capture.doria",
-          "match": "\\bwith\\s*\\(\\s*\\)"
-        },
-        {
-          "name": "invalid.illegal.closure.capture.doria",
-          "match": "\\bwith\\s*\\([^)]*(?:&|\\breadonly\\b)[^)]*\\)"
-        },
-        {
           "match": "(::)(\\s*)(\\$)(?=[A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": {
@@ -373,10 +365,10 @@
               "name": "punctuation.definition.parameters.begin.doria"
             }
           },
-          "end": "(\\))(?=\\s*(?:with\\b|=>))",
+          "end": "(=>)",
           "endCaptures": {
             "1": {
-              "name": "punctuation.definition.parameters.end.doria"
+              "name": "keyword.operator.closure.arrow.doria"
             }
           },
           "patterns": [
@@ -389,6 +381,13 @@
               "match": "\\$[A-Za-z_][A-Za-z0-9_]*"
             },
             {
+              "name": "punctuation.definition.parameters.end.doria",
+              "match": "\\)(?=\\s*(?:with\\b|=>))"
+            },
+            {
+              "include": "#closureCaptureList"
+            },
+            {
               "include": "#types"
             },
             {
@@ -398,7 +397,7 @@
         },
         {
           "name": "meta.function.anonymous.doria",
-          "begin": "\\b(function)\\s*(\\()(?=[^{};]*\\)\\s*:\\s*\\??[A-Za-z_][A-Za-z0-9_]*(?:<[^>]+>)?(?:\\[\\])*(?:\\s+with\\s*\\([^()]+\\))?\\s*\\{)",
+          "begin": "\\b(function)\\s*(\\()(?=(?:[^(){};]+|\\((?:[^(){};]+|\\([^(){};]*\\))*\\))*\\)\\s*:\\s*\\??[A-Za-z_][A-Za-z0-9_]*(?:\\\\[A-Za-z_][A-Za-z0-9_]*)*(?:<[^>]+>)?(?:\\[\\])*(?:\\s+with\\s*\\([^()]+\\))?\\s*\\{)",
           "beginCaptures": {
             "1": {
               "name": "keyword.declaration.function.anonymous.doria"
@@ -460,39 +459,41 @@
           ]
         },
         {
-          "name": "meta.closure.capture-list.doria",
-          "begin": "\\b(with)\\s*(\\()",
-          "beginCaptures": {
-            "1": {
-              "name": "keyword.control.closure.capture.doria"
-            },
-            "2": {
-              "name": "punctuation.definition.parameters.begin.doria"
-            }
-          },
-          "end": "(\\))",
-          "endCaptures": {
-            "1": {
-              "name": "punctuation.definition.parameters.end.doria"
-            }
-          },
-          "patterns": [
-            {
-              "name": "storage.modifier.ownership.capture.doria",
-              "match": "\\b(?:writable|take)\\b"
-            },
-            {
-              "name": "variable.other.capture.doria",
-              "match": "\\$[A-Za-z_][A-Za-z0-9_]*"
-            },
-            {
-              "include": "#punctuation"
-            }
-          ]
+          "include": "#closureCaptureList"
+        }
+      ]
+    },
+    "closureCaptureList": {
+      "name": "meta.closure.capture-list.doria",
+      "begin": "\\b(with)\\s*(\\()",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.control.closure.capture.doria"
+        },
+        "2": {
+          "name": "punctuation.definition.parameters.begin.doria"
+        }
+      },
+      "end": "(\\))",
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.definition.parameters.end.doria"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comments"
         },
         {
-          "name": "keyword.operator.closure.arrow.doria",
-          "match": "=>"
+          "name": "storage.modifier.ownership.capture.doria",
+          "match": "\\b(?:writable|take)\\b"
+        },
+        {
+          "name": "variable.other.capture.doria",
+          "match": "\\$[A-Za-z_][A-Za-z0-9_]*"
+        },
+        {
+          "include": "#punctuation"
         }
       ]
     },

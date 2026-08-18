@@ -448,8 +448,6 @@ class DoriaLexer : LexerBase() {
 
             "uses" -> usesTokenType()
 
-            "with" -> withTokenType()
-
             "as" -> if (isImportUseLine()) DoriaTokenTypes.IMPORT_ALIAS_KEYWORD else DoriaTokenTypes.KEYWORD
 
             else -> contextualIdentifierTokenType(text)
@@ -510,33 +508,6 @@ class DoriaLexer : LexerBase() {
     private fun usesTokenType(): IElementType = when {
         isTraitUsesLine() -> DoriaTokenTypes.TRAIT_USES_KEYWORD
         else -> DoriaTokenTypes.KEYWORD
-    }
-
-    private fun withTokenType(): IElementType =
-        if (hasInvalidClosureCaptureClause()) DoriaTokenTypes.INVALID else DoriaTokenTypes.KEYWORD
-
-    private fun hasInvalidClosureCaptureClause(): Boolean {
-        var cursor = tokenEnd
-        while (cursor < endOffset && buffer[cursor].isWhitespace()) {
-            cursor++
-        }
-        if (cursor >= endOffset || buffer[cursor] != '(') {
-            return false
-        }
-
-        val open = cursor
-        cursor++
-        while (cursor < endOffset && buffer[cursor] != ')') {
-            cursor++
-        }
-        if (cursor >= endOffset) {
-            return false
-        }
-
-        val captures = buffer.subSequence(open + 1, cursor).toString()
-        return captures.isBlank() ||
-            '&' in captures ||
-            INVALID_READONLY_CAPTURE.containsMatchIn(captures)
     }
 
     private fun scanSymbol() {
@@ -1055,9 +1026,6 @@ class DoriaLexer : LexerBase() {
 
         private val LEGACY_CLOSURE_USE_LINE =
             Regex(".*\\)\\s+use\\s*\\(.*")
-
-        private val INVALID_READONLY_CAPTURE =
-            Regex("(?:^|[,\\s])readonly\\b")
 
         private val IMPORT_USE_LINE =
             Regex("^use\\s+[A-Za-z_][A-Za-z0-9_]*(?:\\\\[A-Za-z_][A-Za-z0-9_]*)+(?:\\s+as\\s+[A-Za-z_][A-Za-z0-9_]*)?\\s*;?\\s*(?://.*)?$")
