@@ -770,8 +770,6 @@ fn completion_items() -> Value {
         "extern",
         "open",
         "override",
-        "with",
-        "fn",
         "get",
         "set",
         "insteadof",
@@ -831,9 +829,20 @@ fn completion_items() -> Value {
             "kind": 14,
             "detail": if planned { "planned Doria keyword" } else { "Doria keyword" },
         });
-        if planned {
-            item["documentation"] =
-                json!("Accepted planned Doria syntax; compiler support lands in a later stage.");
+        match keyword {
+            "fn" => {
+                item["detail"] = json!("Doria arrow-closure keyword");
+                item["documentation"] = json!("Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. Closure semantics and execution land in Stage 30.");
+            }
+            "with" => {
+                item["detail"] = json!("Doria closure-capture keyword");
+                item["documentation"] = json!("Introduces an explicit closure capture list. A bare capture is readonly, `writable` takes an exclusive writable borrow, and `take` transfers ownership. Capture checking lands in Stage 30.");
+            }
+            _ if planned => {
+                item["documentation"] =
+                    json!("Accepted planned Doria syntax; compiler support lands in a later stage.");
+            }
+            _ => {}
         }
         item
     }));
@@ -1350,7 +1359,15 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
         TokenKind::Implements => Some(
             "Declares nominal conformance to a compiler-known contract such as `Displayable` or `Error`.",
         ),
-        TokenKind::Function => Some("Declares a function or method."),
+        TokenKind::Function => Some(
+            "Declares a named function or method, an anonymous block closure, or the accepted `function(T): R` function type according to context. Function-type parameters are written without names; callable compatibility and closure execution land in Stage 30.",
+        ),
+        TokenKind::Fn => Some(
+            "Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. Closure semantics and execution land in Stage 30.",
+        ),
+        TokenKind::With => Some(
+            "Introduces an explicit closure capture list. A bare capture is readonly, `writable` takes an exclusive writable borrow, and `take` transfers ownership. Capture checking lands in Stage 30.",
+        ),
         TokenKind::Let => Some("Declares a local binding with an inferred type."),
         TokenKind::Take => Some(
             "Gives ownership of a move-type argument to this parameter. Call sites remain unmarked.",
@@ -1499,6 +1516,7 @@ fn diagnostic_to_lsp(uri: &str, text: &str, diagnostic: &Diagnostic) -> Value {
     });
     value["data"] = json!({
         "kind": diagnostic.kind.as_str(),
+        "developmentOnly": diagnostic.development_only,
         "causeId": diagnostic.cause_id,
         "fixes": diagnostic.fixes.iter().map(|fix| json!({
             "title": fix.title,
@@ -1741,8 +1759,6 @@ mod tests {
             "extern",
             "open",
             "override",
-            "with",
-            "fn",
             "get",
             "set",
             "insteadof",
@@ -1754,6 +1770,37 @@ mod tests {
             assert_eq!(
                 item["documentation"],
                 "Accepted planned Doria syntax; compiler support lands in a later stage."
+            );
+        }
+    }
+
+    #[test]
+    fn completion_and_hover_describe_the_accepted_closure_grammar_boundary() {
+        let arrow = completion_item("fn");
+        assert_eq!(arrow["detail"], "Doria arrow-closure keyword");
+        assert!(arrow["documentation"]
+            .as_str()
+            .is_some_and(|text| text.contains("Closure semantics and execution land in Stage 30")));
+
+        let capture = completion_item("with");
+        assert_eq!(capture["detail"], "Doria closure-capture keyword");
+        assert!(capture["documentation"]
+            .as_str()
+            .is_some_and(|text| text.contains("`take` transfers ownership")));
+
+        let source = "let $minimum = 70; let $f = fn(int $value) with ($minimum) => $value; function accept(function(int): int $callback): void {}";
+        for (needle, expected) in [
+            ("fn", "Declares an arrow closure"),
+            ("with", "Introduces an explicit closure capture list"),
+            ("function(int)", "accepted `function(T): R` function type"),
+        ] {
+            let offset = source.find(needle).expect("hover token");
+            let hover = hover_at_offset(source, offset).expect("closure syntax hover");
+            assert!(
+                hover["contents"]["value"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(expected)),
+                "{needle}: {hover:#?}"
             );
         }
     }

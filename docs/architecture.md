@@ -28,8 +28,8 @@ The server owns LSP transport, document state, UTF-16/UTF-8 position conversion,
 That conversion is loss-aware. The compiler's primary diagnostic label supplies
 the LSP range; secondary labels are exported as related information with UTF-16
 positions; explanations and Help remain readable diagnostic detail; stable
-codes, severity, kind, cause identity, documentation links, and structured fixes
-are retained. Duplicate and cause grouping stay compiler-owned. Only
+codes, severity, kind, development-only status, cause identity, documentation
+links, and structured fixes are retained. Duplicate and cause grouping stay compiler-owned. Only
 Machine Applicable fixes become automatic code actions, so clients never guess
 at a semantic correction.
 
