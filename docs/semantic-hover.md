@@ -29,6 +29,14 @@ References are returned only when the compiler can resolve them safely. Existing
 keyword, primitive type, and compiler-intrinsic hover remains available as a lexical
 fallback.
 
+The lexical fallback describes the accepted Pre-Stage-30 closure grammar. `fn`
+declares an explicitly typed arrow closure, `with` introduces an explicit capture
+list, and contextual `function(T): R` is the accepted function-type spelling.
+The pinned compiler still reports `E0641` for semantic use: capture checking,
+callable compatibility, lowering, and execution land in Stage 30. The server does
+not infer free variables, automatic capture, `$this` capture, closure effects, or
+environment layout.
+
 Compiler-known ownership and collection methods use the same signature-first
 presentation. When the compiler resolves the receiver, hover substitutes its concrete
 generic arguments and exact return type; for example, `WeakReference<Theme>::acquire()`

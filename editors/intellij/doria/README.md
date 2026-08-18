@@ -83,6 +83,13 @@ The syntax highlighter, file type registration, comments, and settings page only
 
 Double-quoted interpolation uses the ordinary Doria expression grammar, so expressions such as `{left() + right()}` receive normal token scopes inside the string. Literal opening braces use `\{`; single-quoted strings remain non-interpolating.
 
+The presentation lexer recognizes accepted Pre-Stage-30 closure syntax: `fn`
+arrow closures, anonymous `function` blocks, explicit `with` capture lists, and
+`function(T): R` types. It keeps `writable` and `take` as modifiers and rejects
+legacy PHP `use (...)` capture syntax. Closure checking and execution remain a
+Stage 30 concern reported by the compiler as `E0641`; the plugin does not
+implement those semantics.
+
 VS Code and IntelliJ / JetBrains highlighting should stay aligned. The shared smoke fixture is:
 
 ```text
