@@ -2884,7 +2884,7 @@ enum Shape { case Circle(float $radius); }
 class Document {}
 enum LoadResult { case Loaded(Document $document); }
 
-function main(): void throws Doria\Std\Io\IoError
+function main(): void
 {
     Status $status = Status::Draft;
     Priority $priority = Priority::High;
@@ -3082,7 +3082,7 @@ function main(): void
 
         let leaked = AnalysisSnapshot::analyze(
             "leaked.doria",
-            "enum Result { case Value(string $text); } function main(): void throws Doria\\Std\\Io\\IoError { Result $r = Result::Value(\"ok\"); string $v = match ($r) { Result::Value($inside) => $inside, }; echo $inside; }",
+            "enum Result { case Value(string $text); } function main(): void { Result $r = Result::Value(\"ok\"); string $v = match ($r) { Result::Value($inside) => $inside, }; echo $inside; }",
         );
         assert!(leaked
             .diagnostics()
@@ -3092,7 +3092,7 @@ function main(): void
 
     #[test]
     fn control_flow_foundations_share_semantic_scope_hover_and_rename_identity() {
-        let source = r#"function main(): void throws Doria\Std\Io\IoError
+        let source = r#"function main(): void
 {
     echo "😀"; given {
         /* 😀 */ let $prepared = true;
@@ -3268,7 +3268,7 @@ function inspect(): void
     function isReady(): bool { return true; }
 }
 enum LoadResult { case Loaded(Document $document); case Missing; }
-function main(): void throws Doria\Std\Io\IoError
+function main(): void
 {
     echo "😀";
     LoadResult $result = LoadResult::Loaded(new Document("ready"));
@@ -3647,7 +3647,7 @@ function main(): void
 
     #[test]
     fn string_intrinsic_hovers_use_the_canonical_surface() {
-        let source = r#"function main(): void throws Doria\Std\Io\IoError
+        let source = r#"function main(): void
 {
     string $text = "Straße";
     int $length = $text->length;
@@ -3809,7 +3809,7 @@ function main(): void
 
     #[test]
     fn decision_0113_hovers_cover_slice_three_and_in_place_clear() {
-        let source = r#"function main(): void throws Doria\Std\Io\IoError
+        let source = r#"function main(): void
 {
     echo "😀";
     writable List<int> $list = [1];
@@ -3903,7 +3903,7 @@ function main(): void
 
     #[test]
     fn grouped_locals_have_independent_symbols_hovers_completions_and_references() {
-        let source = r#"function main(): void throws Doria\Std\Io\IoError
+        let source = r#"function main(): void
 {
     let writable $left, $right = 10;
     int $minimum, $maximum = 5;
@@ -3955,7 +3955,7 @@ function main(): void
 
     #[test]
     fn grouped_local_scope_and_shadowing_keep_symbols_distinct() {
-        let source = r#"function main(): void throws Doria\Std\Io\IoError
+        let source = r#"function main(): void
 {
     let $value, $peer = 1;
     {
@@ -4146,7 +4146,7 @@ function main(): void
     string $referencedValue = "payload";
 }
 
-function main(): void throws Doria\Std\Io\IoError
+function main(): void
 {
     let $counter = shared new Counter();
     echo $counter->referencedValue->referencedValue;
@@ -4392,6 +4392,27 @@ function handle(): void { try { fail(); } catch (Failure $caught) { echo $caught
             .diagnostics()
             .iter()
             .any(|diagnostic| diagnostic.code == "E0101"));
+    }
+
+    #[test]
+    fn inferred_main_effects_do_not_rewrite_source_signature_hover() {
+        let source = r#"function main(): void
+{
+    echo "value";
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("inferred-main-effects.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+
+        let hover = snapshot
+            .hover_at_offset(source.find("main").expect("main declaration"))
+            .expect("main declaration hover");
+        assert!(hover.markdown.contains("function main(): void"));
+        assert!(!hover.markdown.contains("throws"));
     }
 
     #[test]

@@ -1403,7 +1403,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "Transfers ownership of one explicit `Error` value as a checked effect.",
         ),
         TokenKind::Throws => Some(
-            "Declares a callable's source-ordered checked-error effect set.",
+            "Declares a reusable callable's source-ordered checked-error effect set. The selected program entrypoint may omit it and infer escaping effects.",
         ),
         TokenKind::Echo => Some(
             "`echo value;` writes the displayed value and has the checked `Doria\\Std\\Io\\IoError` effect.",
@@ -1986,13 +1986,13 @@ function main(): void
         // Stage 23b (decision 0099) adds `main(List<string> $args)` alongside
         // the parameterless forms. None of them may be marked as invalid code.
         for source in [
-            r#"function main(List<string> $args): int throws Doria\Std\Io\IoError
+            r#"function main(List<string> $args): int
 {
     printf("count=%d\n", $args->count);
     return 0;
 }
 "#,
-            r#"function main(List<string> $args): void throws Doria\Std\Io\IoError
+            r#"function main(List<string> $args): void
 {
     foreach ($args as $argument) {
         echo $argument;
@@ -2021,7 +2021,7 @@ function main(): void
     fn sequence_fill_literals_are_not_reported_as_editor_errors() {
         let diagnostics = diagnostics_for_document(
             "test.doria",
-            r#"function main(List<string> $args): void throws Doria\Std\Io\IoError
+            r#"function main(List<string> $args): void
 {
     bool[] $flags = [true; $args->count];
     let $counts = [0; $args->count];
@@ -2607,7 +2607,7 @@ function main(): void
     #[test]
     fn control_flow_protocol_ranges_remain_utf16_safe() {
         let uri = "file:///control-flow-utf16.doria";
-        let text = r#"function main(): void throws Doria\Std\Io\IoError
+        let text = r#"function main(): void
 {
     echo "😀"; given {
         /* 😀 */ let $prepared = true;
@@ -2960,7 +2960,7 @@ function main(): void
     fn match_binding_lsp_features_share_utf16_safe_symbol_identity() {
         let uri = "file:///match-bindings.doria";
         let text = r#"enum Result { case Value(string $text); case Missing; }
-function main(): void throws Doria\Std\Io\IoError
+function main(): void
 {
     Result $result = Result::Value("ok");
     string $label = match ($result) {

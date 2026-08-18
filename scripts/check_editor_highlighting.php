@@ -37,6 +37,7 @@ $intellijPluginIcon = $root . '/editors/intellij/doria/src/main/resources/META-I
 $intellijCreateClassAction = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/actions/DoriaCreateClassAction.kt';
 $doriaLogo = $root . '/res/images/doria-app-icon-warm.svg';
 $releaseWorkflow = $root . '/.github/workflows/release.yml';
+$lspAnalysis = $root . '/server/src/analysis.rs';
 $lspServer = $root . '/server/src/lib.rs';
 $lspTests = $root . '/server/tests/lsp_tests.rs';
 $fixture = $root . '/editors/fixtures/latest-tokens.doria';
@@ -1620,7 +1621,7 @@ function check_pre_stage30_closure_alignment(): void
     global $cargoManifest, $readme, $vscodeGrammar, $intellijLexer, $intellijLexerTest;
     global $lspServer, $lspTests, $fixture, $rejectedFixture;
 
-    $compilerCommit = '2ddf396cd5e0a22ee1fb31d9f88f664df8ff6cc6';
+    $compilerCommit = '6ef9588c6accc375f2db107bc38f8db26f39b528';
     require_check(
         preg_match(
             '/doriac\s*=\s*\{[^}]*\brev\s*=\s*"' . $compilerCommit . '"/',
@@ -1787,6 +1788,37 @@ function check_pre_stage30_closure_alignment(): void
     );
 }
 
+function check_inferred_main_effect_alignment(): void
+{
+    global $readme, $lspAnalysis, $lspServer, $lspTests;
+
+    $serverText = read_text($lspAnalysis) . read_text($lspServer);
+    $testText = read_text($lspAnalysis) . read_text($lspTests);
+    $readmeText = read_text($readme);
+
+    require_check(
+        !str_contains($serverText, 'E0631'),
+        'LSP implementation must not infer or suppress compiler checked-effect diagnostics',
+    );
+    foreach ([
+        'accepts_compiler_inferred_checked_effects_for_selected_main',
+        'preserves_compiler_owned_checked_effect_diagnostics_for_ordinary_callables',
+        'preserves_compiler_owned_checked_effect_diagnostics_for_incomplete_main_clauses',
+        'assert_lsp_diagnostic_matches_compiler',
+        'inferred_main_effects_do_not_rewrite_source_signature_hover',
+    ] as $coverage) {
+        require_check(
+            str_contains($testText, $coverage),
+            "LSP inferred-main checked-effect coverage is missing {$coverage}",
+        );
+    }
+    require_check(
+        str_contains($readmeText, 'entrypoint may omit `throws`') &&
+            str_contains($readmeText, 'server neither infers effects nor suppresses E0631'),
+        'README must preserve compiler ownership of selected-main effect inference',
+    );
+}
+
 function main(): int
 {
     check_vscode_package();
@@ -1800,6 +1832,7 @@ function main(): int
     check_editor_fixture_diagnostics_are_skipped();
     check_fixture();
     check_pre_stage30_closure_alignment();
+    check_inferred_main_effect_alignment();
     echo "Doria editor highlighting checks passed.\n";
     return 0;
 }

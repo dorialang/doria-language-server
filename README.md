@@ -31,6 +31,12 @@ the pinned compiler and publishes its structured `E0641` development boundary;
 closure semantics and execution remain pending Stage 30. Highlighting is
 presentation only and does not implement capture checking or callable behavior.
 
+Checked-effect diagnostics also remain compiler-owned. Ordinary reusable
+callables declare escaping checked effects explicitly, while the selected
+entrypoint may omit `throws` and infer the checked effects that escape it. The
+language server neither infers effects nor suppresses E0631; it publishes the
+result from the pinned compiler.
+
 ## Layout
 
 ```text
