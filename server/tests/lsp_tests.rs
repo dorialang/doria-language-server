@@ -303,6 +303,32 @@ function main(): void { greet(); }"#,
 }
 
 #[test]
+fn publishes_inferred_main_diagnostics_in_source_order() {
+    let diagnostics = diagnostics_for_document(
+        "file:///inferred-main-order.doria",
+        r#"function earlier(): void
+{
+    int $value = "not an integer";
+}
+function main(): void
+{
+    int $value = "also not an integer";
+}"#,
+    );
+    let assignment_lines = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic["code"] == "E0403")
+        .map(|diagnostic| {
+            diagnostic["range"]["start"]["line"]
+                .as_u64()
+                .expect("diagnostic start line")
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(assignment_lines, [2, 6]);
+}
+
+#[test]
 fn preserves_compiler_owned_checked_effect_diagnostics_for_ordinary_callables() {
     let source = "function greet(): void { echo \"value\"; } function main(): void {}";
     assert_lsp_diagnostic_matches_compiler("ordinary-uncovered-io.doria", source, "E0631");

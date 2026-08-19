@@ -1621,7 +1621,7 @@ function check_pre_stage30_closure_alignment(): void
     global $cargoManifest, $readme, $vscodeGrammar, $intellijLexer, $intellijLexerTest;
     global $lspServer, $lspTests, $fixture, $rejectedFixture;
 
-    $compilerCommit = '6ef9588c6accc375f2db107bc38f8db26f39b528';
+    $compilerCommit = 'ce0590b218382da799982f3de13969c561865d66';
     require_check(
         preg_match(
             '/doriac\s*=\s*\{[^}]*\brev\s*=\s*"' . $compilerCommit . '"/',
