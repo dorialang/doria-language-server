@@ -6,6 +6,58 @@ use doria_language_server::{
 };
 use doriac::diagnostics::LabelRole;
 
+fn assert_lsp_diagnostic_matches_compiler(name: &str, source: &str, code: &str) {
+    let compiler_diagnostics =
+        doriac::check_source(name, source).expect_err("fixture must produce a diagnostic");
+    let compiler_diagnostic = compiler_diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == code)
+        .unwrap_or_else(|| panic!("compiler did not report {code}: {compiler_diagnostics:#?}"));
+    let compiler_span = compiler_diagnostic
+        .labels
+        .iter()
+        .find(|label| label.role == LabelRole::Primary)
+        .or_else(|| compiler_diagnostic.labels.first())
+        .map_or(compiler_diagnostic.span, |label| label.span);
+
+    let uri = format!("file:///{name}");
+    let lsp_diagnostics = diagnostics_for_document(&uri, source);
+    let lsp_diagnostic = lsp_diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == code)
+        .unwrap_or_else(|| panic!("language server did not publish {code}: {lsp_diagnostics:#?}"));
+    let expected_cause_id = compiler_diagnostic
+        .cause_id
+        .as_ref()
+        .map_or(Value::Null, |cause_id| Value::String(cause_id.clone()));
+    let expected_start = byte_offset_to_position(source, compiler_span.start);
+    let expected_end = byte_offset_to_position(source, compiler_span.end);
+
+    assert_eq!(lsp_diagnostic["source"], "doriac");
+    assert_eq!(
+        lsp_diagnostic["data"]["kind"],
+        compiler_diagnostic.kind.as_str()
+    );
+    assert_eq!(
+        lsp_diagnostic["data"]["developmentOnly"],
+        compiler_diagnostic.development_only
+    );
+    assert_eq!(lsp_diagnostic["data"]["causeId"], expected_cause_id);
+    assert_eq!(
+        lsp_diagnostic["range"]["start"]["line"],
+        expected_start.line
+    );
+    assert_eq!(
+        lsp_diagnostic["range"]["start"]["character"],
+        expected_start.character
+    );
+    assert_eq!(lsp_diagnostic["range"]["end"]["line"], expected_end.line);
+    assert_eq!(
+        lsp_diagnostic["range"]["end"]["character"],
+        expected_end.character
+    );
+}
+
 fn assert_stage_30_closure_boundary(name: &str, source: &str) {
     doriac::parse_source(name, source).expect("accepted closure grammar must parse");
     let compiler_diagnostics =
@@ -187,7 +239,7 @@ fn malformed_capture_forms_remain_parser_diagnostics_not_stage_30_boundaries() {
 fn grouped_local_declarations_use_compiler_diagnostics_without_false_positives() {
     let accepted = diagnostics_for_document(
         "file:///grouped.doria",
-        r#"function main(): void throws Doria\Std\Io\IoError
+        r#"function main(): void
 {
     let $left, $right = 1;
     let writable $red, $blue = 2;
@@ -218,7 +270,7 @@ fn grouped_local_declarations_use_compiler_diagnostics_without_false_positives()
 fn accepts_zero_argument_read_line_without_false_diagnostics() {
     let diagnostics = diagnostics_for_document(
         "file:///input.doria",
-        "function main(): void throws Doria\\Std\\Io\\IoError, Doria\\Std\\Io\\InvalidUtf8Error { let $line = read_line(); }",
+        "function main(): void { let $line = read_line(); }",
     );
     assert!(diagnostics.is_empty(), "{diagnostics:#?}");
 }
@@ -227,38 +279,68 @@ fn accepts_zero_argument_read_line_without_false_diagnostics() {
 fn accepts_prompted_read_line_without_false_diagnostics() {
     let diagnostics = diagnostics_for_document(
         "file:///input.doria",
-        "function main(): void throws Doria\\Std\\Io\\IoError, Doria\\Std\\Io\\InvalidUtf8Error { let $line = read_line(\"Name: \"); }",
+        "function main(): void { let $line = read_line(\"Name: \"); }",
     );
     assert!(diagnostics.is_empty(), "{diagnostics:#?}");
 }
 
 #[test]
-fn publishes_canonical_checked_io_effect_diagnostics() {
-    let echo = diagnostics_for_document(
-        "file:///unchecked-echo.doria",
-        "function main(): void { echo \"value\"; }",
-    );
-    let echo_diagnostic = echo
-        .iter()
-        .find(|diagnostic| diagnostic["code"] == "E0631")
-        .unwrap_or_else(|| panic!("missing uncovered echo effect: {echo:#?}"));
-    assert!(echo_diagnostic["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("Doria\\Std\\Io\\IoError")));
+fn accepts_compiler_inferred_checked_effects_for_selected_main() {
+    for (name, source) in [
+        (
+            "inferred-direct-io.doria",
+            "function main(): void { echo \"value\"; }",
+        ),
+        (
+            "inferred-helper-io.doria",
+            r#"function greet(): void throws Doria\Std\Io\IoError { echo "value"; }
+function main(): void { greet(); }"#,
+        ),
+    ] {
+        let diagnostics = diagnostics_for_document(&format!("file:///{name}"), source);
+        assert!(diagnostics.is_empty(), "{name}: {diagnostics:#?}");
+    }
+}
 
-    let input = diagnostics_for_document(
-        "file:///unchecked-input.doria",
-        "function main(): void { let $line = read_line(); }",
+#[test]
+fn publishes_inferred_main_diagnostics_in_source_order() {
+    let diagnostics = diagnostics_for_document(
+        "file:///inferred-main-order.doria",
+        r#"function earlier(): void
+{
+    int $value = "not an integer";
+}
+function main(): void
+{
+    int $value = "also not an integer";
+}"#,
     );
-    let input_diagnostic = input
+    let assignment_lines = diagnostics
         .iter()
-        .find(|diagnostic| diagnostic["code"] == "E0631")
-        .unwrap_or_else(|| panic!("missing uncovered input effects: {input:#?}"));
-    let message = input_diagnostic["message"]
-        .as_str()
-        .expect("input diagnostic message");
-    assert!(message.contains("Doria\\Std\\Io\\IoError"));
-    assert!(message.contains("Doria\\Std\\Io\\InvalidUtf8Error"));
+        .filter(|diagnostic| diagnostic["code"] == "E0403")
+        .map(|diagnostic| {
+            diagnostic["range"]["start"]["line"]
+                .as_u64()
+                .expect("diagnostic start line")
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(assignment_lines, [2, 6]);
+}
+
+#[test]
+fn preserves_compiler_owned_checked_effect_diagnostics_for_ordinary_callables() {
+    let source = "function greet(): void { echo \"value\"; } function main(): void {}";
+    assert_lsp_diagnostic_matches_compiler("ordinary-uncovered-io.doria", source, "E0631");
+}
+
+#[test]
+fn preserves_compiler_owned_checked_effect_diagnostics_for_incomplete_main_clauses() {
+    let source = r#"function main(): void throws Doria\Std\Io\IoError
+{
+    let $line = read_line();
+}"#;
+    assert_lsp_diagnostic_matches_compiler("incomplete-main-effects.doria", source, "E0631");
 }
 
 #[test]
@@ -283,7 +365,7 @@ fn publishes_lifecycle_and_finalizer_io_effect_diagnostics() {
 
     let finalizer = diagnostics_for_document(
         "file:///finalizer-output.doria",
-        r#"function main(): void throws Doria\Std\Io\IoError
+        r#"function main(): void
 {
     if (true) {} finally { echo "cleanup"; }
 }
@@ -330,7 +412,7 @@ fn accepts_only_the_canonical_compiler_known_io_type_identities() {
 fn runtime_io_outcomes_are_not_published_as_live_diagnostics() {
     let diagnostics = diagnostics_for_document(
         "file:///runtime-only-io.doria",
-        r#"function main(): void throws Doria\Std\Io\IoError
+        r#"function main(): void
 {
     echo "value";
 }
@@ -503,7 +585,7 @@ fn exposes_collection_diagnostic_fixes_as_utf16_safe_code_actions() {
 
 #[test]
 fn accepts_the_complete_decision_0113_surface_after_non_ascii_text() {
-    let source = r#"function main(): void throws Doria\Std\Io\IoError
+    let source = r#"function main(): void
 {
     echo "😀";
     writable List<int> $list = [1];
@@ -565,7 +647,7 @@ function fail(): void throws Failure
     throw new Failure("handled");
 }
 
-function main(): void throws Doria\Std\Io\IoError
+function main(): void
 {
     try {
         fail();
@@ -605,7 +687,7 @@ fn payload_enums_and_core_match_execution_come_from_the_compiler() {
         r#"enum Status { case Draft; }
 enum Priority: int { case High = 2; }
 enum Transport: string { case Rail = "rail"; }
-    function main(): void throws Doria\Std\Io\IoError
+    function main(): void
 {
     Status $status = Status::Draft;
     Priority $priority = Priority::High;
@@ -932,7 +1014,7 @@ class Counter
 fn executable_string_surface_has_no_false_diagnostics() {
     let diagnostics = diagnostics_for_document(
         "file:///strings.doria",
-        r#"function main(): void throws Doria\Std\Io\IoError
+        r#"function main(): void
 {
     string $text = String::trim("  Straße 👍🏾  ");
     int $characters = $text->length;
@@ -989,7 +1071,7 @@ function choose(
     return $left ?? $right;
 }
 
-function main(): void throws Doria\Std\Io\IoError
+function main(): void
 {
     let $root = shared new Node("root");
     let $weak = $root->createWeakReference();
@@ -1020,7 +1102,7 @@ function update(WritableSharedReference<Counter> $counter): void
     $write->value++;
 }
 
-function main(): void throws Doria\Std\Io\IoError
+function main(): void
 {
     let $counter = new WritableSharedReference(new Counter());
     let $second = $counter->share();
@@ -1048,7 +1130,7 @@ class Counter
     writable int $value = 0;
 }
 
-function main(): void throws Doria\Std\Io\IoError
+function main(): void
 {
     let $counter = new WritableSharedReference(new Counter());
 
@@ -1212,7 +1294,7 @@ fn accepts_stage22_is_narrowing_without_lsp_diagnostics() {
 fn accepts_control_flow_without_lsp_diagnostics() {
     let diagnostics = diagnostics_for_document(
         "file:///control_flow.doria",
-        r#"function main(): void throws Doria\Std\Io\IoError
+        r#"function main(): void
 {
 let writable $count = 0;
 
@@ -1239,7 +1321,7 @@ while ($count < 3) {
 fn accepts_stage28a_executable_control_flow_without_lsp_diagnostics() {
     let diagnostics = diagnostics_for_document(
         "file:///stage28a.doria",
-        r#"function main(): void throws Doria\Std\Io\IoError
+        r#"function main(): void
 {
     let writable $count = 0;
     given {

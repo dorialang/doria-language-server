@@ -50,8 +50,11 @@ offered. Because these declarations are compiler-known rather than source-backed
 server provides their contract documentation without inventing a definition location.
 
 Live diagnostics include uncovered checked effects such as `Doria\Std\Io\IoError` and
-`Doria\Std\Io\InvalidUtf8Error`. `R1000` remains a runtime outcome for an error that
-escapes the entry point, so it is not published as an editor diagnostic.
+`Doria\Std\Io\InvalidUtf8Error`. Ordinary reusable callables declare those effects
+explicitly. When the selected program entrypoint omits `throws`, the compiler infers
+its exact escaping set; the server does not perform inference or suppress E0631.
+`R1000` remains a runtime outcome for an error that escapes the entry point, so it is
+not published as an editor diagnostic.
 
 The server never guesses a symbol from spelling alone. Ambiguous or unresolved
 identifiers return no semantic hover.
@@ -62,7 +65,8 @@ identifiers return no semantic hover.
 hover. Free functions, instance methods, static methods, and constructors show
 parameter and return types together with any declared `throws` entries in source
 order. The server does not reconstruct or alphabetize the compiler's checked-error
-effects.
+effects. A clause-free `main` hover remains clause-free rather than synthesizing
+the compiler's inferred effective set as source syntax.
 
 ## PHPDoc presentation
 

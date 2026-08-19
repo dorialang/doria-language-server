@@ -21,6 +21,11 @@ VS Code launch profile -> baton run -> project entry selected from Baton.toml
 
 The compiler owns tokenization, parsing, semantic and type checking, diagnostic codes and spans, machine-applicable fixes, and the truth about whether a language feature is implemented.
 
+This includes checked-effect contracts. Ordinary reusable callables declare
+their escaping effects, while the selected program entrypoint may infer its
+effective escaping set. The server does not reproduce that analysis or suppress
+its diagnostics.
+
 ### `doria-lsp`
 
 The server owns LSP transport, document state, UTF-16/UTF-8 position conversion, protocol capability negotiation, and conversion of compiler results into LSP diagnostics, completion, hover, and code actions.
