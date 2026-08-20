@@ -111,6 +111,50 @@ function inspectHistory(History<int> $history): void
 {
 }
 
+// Stage 30a: structural callable grammar is accepted for parser and editor use.
+// Semantic callable compatibility, captures, and execution remain behind E0641.
+function(int): int $readonlyCallback = fn(int $value) => $value;
+
+function(writable Counter): void $writeCounter =
+    function (writable Counter $counter): void {
+    };
+
+function(take Payload): void $consumePayload =
+    function (take Payload $payload): void {
+    };
+
+writable function writable(int): int $writableCallback =
+    function (int $value): int {
+        return $value;
+    };
+
+take function once(): Payload $factory =
+    function (): Payload {
+        return new Payload("value");
+    };
+
+function(string): int throws ParseError, StorageError $parser =
+    function (string $value): int {
+        return $value->length;
+    };
+
+function(
+    (function(): int throws ParseError),
+    string
+): void $nestedCallback =
+    function (
+        function(): int $inner,
+        string $label
+    ): void {
+    };
+
+function(): (function(): int) throws StorageError $outerThrowingFactory =
+    fn() => fn() => 1;
+
+let $identity = fn(int $value) => $value;
+$identity(1);
+(fn(int $value) => $value)(2);
+
 // Stage 23b: the entry point may take the program arguments as a
 // `List<string>`; the executable path is not element 0.
 function main(List<string> $args): void
@@ -397,7 +441,7 @@ try {
     echo "done";
 }
 
-// Pre-Stage-30 Closure Grammar: accepted syntax; semantics and execution land in Stage 30.
+// Stage 30a Closure Grammar: accepted syntax; semantics begin in Stage 30b.
 let $double = fn(int $value) => $value * 2;
 
 let $minimum = 70;

@@ -24,12 +24,14 @@ Current editor support includes:
 - IntelliJ Platform support for RustRover, IntelliJ IDEA, PhpStorm, and compatible JetBrains IDEs, with local syntax highlighting and optional LSP integration.
 - Shared accepted and rejected-syntax fixtures used to keep both highlighters aligned.
 
-Pre-Stage-30 closure grammar is accepted and parseable. The editors recognize
+Stage 30a callable grammar is accepted and parseable. The editors recognize
 `fn` arrow closures, anonymous `function` closures, explicit `with` capture
-clauses, and `function(T): R` types. The language server delegates analysis to
-the pinned compiler and publishes its structured `E0641` development boundary;
-closure semantics and execution remain pending Stage 30. Highlighting is
-presentation only and does not implement capture checking or callable behavior.
+clauses, readonly/writable/once structural function types, parameter ownership,
+checked effects, grouped nested types, and callable-value invocation. The
+language server delegates analysis to the pinned compiler and publishes its
+structured `E0641` development boundary. Stage 30b semantic function types and
+captures are next; highlighting remains presentation only and does not implement
+capture checking, callable compatibility, lowering, or execution.
 
 Checked-effect diagnostics also remain compiler-owned. Ordinary reusable
 callables declare escaping checked effects explicitly, while the selected

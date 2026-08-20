@@ -450,6 +450,12 @@ class DoriaLexer : LexerBase() {
 
             "as" -> if (isImportUseLine()) DoriaTokenTypes.IMPORT_ALIAS_KEYWORD else DoriaTokenTypes.KEYWORD
 
+            "take" -> if (isRejectedFunctionInvocationModifier()) {
+                DoriaTokenTypes.INVALID
+            } else {
+                baseIdentifierTokenType(text)
+            }
+
             else -> contextualIdentifierTokenType(text)
         }
     }
@@ -601,6 +607,9 @@ class DoriaLexer : LexerBase() {
 
     private fun isFunctionDeclarationName(): Boolean =
         nextNonWhitespace(tokenEnd) in setOf('(', '<') && previousIdentifier() == "function"
+
+    private fun isRejectedFunctionInvocationModifier(): Boolean =
+        previousIdentifier() == "function" && nextNonWhitespace(tokenEnd) == '('
 
     private fun isEnumDeclarationName(): Boolean = previousIdentifier() == "enum"
 
@@ -943,6 +952,7 @@ class DoriaLexer : LexerBase() {
             "override",
             "with",
             "fn",
+            "once",
             "get",
             "set",
             "insteadof",

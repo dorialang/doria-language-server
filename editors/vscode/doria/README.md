@@ -13,11 +13,13 @@ New lines inside paired delimiters use VS Code's active indentation settings, in
 
 Double-quoted interpolation uses the ordinary Doria expression grammar, so expressions such as `{left() + right()}` receive normal token scopes inside the string. Literal opening braces use `\{`; single-quoted strings remain non-interpolating.
 
-The TextMate grammar recognizes accepted Pre-Stage-30 closure syntax: `fn`
-arrow closures, anonymous `function` blocks, explicit `with` capture lists, and
-`function(T): R` types. `writable` and `take` retain ownership-modifier scopes
-inside captures. This is presentation only; `doria-lsp` publishes the compiler's
-structured `E0641` boundary until Stage 30 semantics and execution land.
+The TextMate grammar recognizes accepted Stage 30a callable syntax: `fn` arrow
+closures, anonymous `function` blocks, explicit `with` capture lists, structural
+function invocation modes, parameter ownership, checked effects, grouped nested
+types, and callable-value calls. `once` is an accepted invocation modifier;
+`writable` and `take` retain their context-sensitive modifier scopes. This is
+presentation only; `doria-lsp` publishes the compiler's structured `E0641`
+boundary while Stage 30b semantics and later execution work remain pending.
 
 ## Install the VS Code extension
 

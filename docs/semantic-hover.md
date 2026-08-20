@@ -29,13 +29,17 @@ References are returned only when the compiler can resolve them safely. Existing
 keyword, primitive type, and compiler-intrinsic hover remains available as a lexical
 fallback.
 
-The lexical fallback describes the accepted Pre-Stage-30 closure grammar. `fn`
+The lexical fallback describes the accepted Stage 30a callable grammar. `fn`
 declares an explicitly typed arrow closure, `with` introduces an explicit capture
-list, and contextual `function(T): R` is the accepted function-type spelling.
-The pinned compiler still reports `E0641` for semantic use: capture checking,
-callable compatibility, lowering, and execution land in Stage 30. The server does
-not infer free variables, automatic capture, `$this` capture, closure effects, or
-environment layout.
+list, and structural function types preserve invocation mode, parameter ownership,
+checked effects, and authored grouping. `once` marks consuming one-shot invocation;
+grouping makes nested effect ownership explicit and does not create a tuple.
+Callable-value invocation is parser-supported. The pinned compiler still reports
+`E0641` for semantic use: capture checking, callable compatibility, lowering, and
+execution begin in Stage 30b. The server does not infer free variables, automatic
+capture, `$this` capture, closure effects, or environment layout. Grouping and call
+punctuation do not receive lexical hovers because the existing fallback is
+token-based; editor presentation does not add a second parser.
 
 Compiler-known ownership and collection methods use the same signature-first
 presentation. When the compiler resolves the receiver, hover substitutes its concrete
