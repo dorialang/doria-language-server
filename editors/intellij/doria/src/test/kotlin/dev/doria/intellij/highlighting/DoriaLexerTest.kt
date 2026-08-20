@@ -227,6 +227,22 @@ class DoriaLexerTest : TestCase() {
         assertEquals(DoriaTokenTypes.VARIABLE, tokens.first { it.text == "\$once" }.type)
         assertEquals(DoriaTokenTypes.STRING, tokens.first { it.text == "\"once\"" }.type)
         assertEquals(DoriaTokenTypes.COMMENT, tokens.first { it.text.startsWith("//") }.type)
+
+        for (source in listOf(
+            "function /* comment */ take(): Payload;",
+            "function // comment\n take(): Payload;",
+            "function # comment\n take /* comment */ (): Payload;",
+        )) {
+            assertEquals(
+                source,
+                DoriaTokenTypes.INVALID,
+                lex(source).first { it.text == "take" }.type,
+            )
+        }
+        assertFalse(
+            lex("// function\n take(): Payload;")
+                .any { it.text == "take" && it.type == DoriaTokenTypes.INVALID },
+        )
     }
 
     fun testClosureKeywordsRespectIdentifierStringAndCommentBoundaries() {

@@ -164,7 +164,7 @@
           "match": "\\b(?:goto|require|require_once|include_once|print|instanceof)\\b|\\buse\\b(?=\\s*\\()"
         },
         {
-          "match": "\\b(function)(\\s+)(take)(?=\\s*\\()",
+          "match": "\\b(function)((?:(?:\\s+)|(?:/\\*[\\s\\S]*?\\*/)|(?://[^\\r\\n]*(?:\\r?\\n|$))|(?:#(?!\\[)[^\\r\\n]*(?:\\r?\\n|$)))+)(take)(?=(?:(?:\\s+)|(?:/\\*[\\s\\S]*?\\*/)|(?://[^\\r\\n]*(?:\\r?\\n|$))|(?:#(?!\\[)[^\\r\\n]*(?:\\r?\\n|$)))*\\()",
           "captures": {
             "1": {
               "name": "storage.type.function.doria"

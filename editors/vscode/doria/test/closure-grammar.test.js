@@ -224,10 +224,18 @@ test("leaves malformed capture diagnostics to the compiler without reading comme
       )
   );
   assert.ok(invalidInvocation);
-  assert.match("function take(): Payload", new RegExp(invalidInvocation.match));
+  const invalidInvocationPattern = new RegExp(invalidInvocation.match);
+  for (const source of [
+    "function take(): Payload",
+    "function /* comment */ take(): Payload",
+    "function // comment\n take(): Payload",
+    "function # comment\n take /* comment */ (): Payload",
+  ]) {
+    assert.match(source, invalidInvocationPattern);
+  }
   assert.doesNotMatch(
     "function(take Payload): void",
-    new RegExp(invalidInvocation.match),
+    invalidInvocationPattern,
     "take remains valid as a function-type parameter ownership mode"
   );
 });

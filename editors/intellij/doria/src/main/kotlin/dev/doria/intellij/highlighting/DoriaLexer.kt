@@ -608,8 +608,18 @@ class DoriaLexer : LexerBase() {
     private fun isFunctionDeclarationName(): Boolean =
         nextNonWhitespace(tokenEnd) in setOf('(', '<') && previousIdentifier() == "function"
 
-    private fun isRejectedFunctionInvocationModifier(): Boolean =
-        previousIdentifier() == "function" && nextNonWhitespace(tokenEnd) == '('
+    private fun isRejectedFunctionInvocationModifier(): Boolean {
+        val prefix = buffer.subSequence(startOffset, tokenStart).toString()
+        val function = FUNCTION_BEFORE_REJECTED_TAKE.find(prefix) ?: return false
+        val functionStart = startOffset + function.range.first
+        val linePrefix = buffer.subSequence(lineStart(functionStart), functionStart).toString()
+        if (linePrefix.contains("//") || HASH_COMMENT_MARKER.containsMatchIn(linePrefix)) {
+            return false
+        }
+        return OPEN_PAREN_AFTER_CODE_TRIVIA.containsMatchIn(
+            buffer.subSequence(tokenEnd, endOffset),
+        )
+    }
 
     private fun isEnumDeclarationName(): Boolean = previousIdentifier() == "enum"
 
@@ -894,6 +904,11 @@ class DoriaLexer : LexerBase() {
     private data class DocTag(val name: String, val endOffset: Int)
 
     companion object {
+        private const val CODE_TRIVIA =
+            "(?:\\s|/\\*[\\s\\S]*?\\*/|//[^\\r\\n]*(?:\\r?\\n|$)|#(?!\\[)[^\\r\\n]*(?:\\r?\\n|$))*"
+        private val FUNCTION_BEFORE_REJECTED_TAKE = Regex("\\bfunction" + CODE_TRIVIA + "$")
+        private val OPEN_PAREN_AFTER_CODE_TRIVIA = Regex("^" + CODE_TRIVIA + "\\(")
+        private val HASH_COMMENT_MARKER = Regex("#(?!\\[)")
         private const val STATE_MODE_MASK = 0xFF
         private const val STATE_DEPTH_MASK = 0xFFF
         private const val STATE_ATTRIBUTE_DEPTH_SHIFT = 8
