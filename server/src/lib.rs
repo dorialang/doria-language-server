@@ -761,6 +761,7 @@ fn completion_items() -> Value {
         "override",
         "with",
         "take",
+        "once",
     ];
     let planned_keywords = [
         "interface",
@@ -832,11 +833,15 @@ fn completion_items() -> Value {
         match keyword {
             "fn" => {
                 item["detail"] = json!("Doria arrow-closure keyword");
-                item["documentation"] = json!("Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. Closure semantics and execution land in Stage 30.");
+                item["documentation"] = json!("Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. Closure semantics and execution begin in Stage 30b.");
             }
             "with" => {
                 item["detail"] = json!("Doria closure-capture keyword");
-                item["documentation"] = json!("Introduces an explicit closure capture list. A bare capture is readonly, `writable` takes an exclusive writable borrow, and `take` transfers ownership. Capture checking lands in Stage 30.");
+                item["documentation"] = json!("Introduces an explicit closure capture list. A bare capture is readonly, `writable` takes an exclusive writable borrow, and `take` transfers ownership. Capture checking begins in Stage 30b.");
+            }
+            "once" => {
+                item["detail"] = json!("Doria function-type invocation modifier");
+                item["documentation"] = json!("Marks a structural function type as consuming and one-shot. Calling a value of this type consumes the function value. Closure invocation-mode inference lands in Stage 30b.");
             }
             _ if planned => {
                 item["documentation"] =
@@ -1360,21 +1365,24 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "Declares nominal conformance to a compiler-known contract such as `Displayable` or `Error`.",
         ),
         TokenKind::Function => Some(
-            "Declares a named function or method, an anonymous block closure, or the accepted `function(T): R` function type according to context. Function-type parameters are written without names; callable compatibility and closure execution land in Stage 30.",
+            "Declares a named function or method, an anonymous block closure, or a structural function type according to context. Function types preserve readonly, writable, or once invocation; parameter ownership; checked effects; and grouped nested type boundaries. Callable compatibility and closure execution land after Stage 30a.",
         ),
         TokenKind::Fn => Some(
-            "Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. Closure semantics and execution land in Stage 30.",
+            "Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. Closure semantics and execution begin in Stage 30b.",
         ),
         TokenKind::With => Some(
-            "Introduces an explicit closure capture list. A bare capture is readonly, `writable` takes an exclusive writable borrow, and `take` transfers ownership. Capture checking lands in Stage 30.",
+            "Introduces an explicit closure capture list. A bare capture is readonly, `writable` takes an exclusive writable borrow, and `take` transfers ownership. Capture checking begins in Stage 30b.",
         ),
         TokenKind::Let => Some("Declares a local binding with an inferred type."),
         TokenKind::Take => Some(
-            "Gives ownership of a move-type argument to this parameter. Call sites remain unmarked.",
+            "Gives ownership of a move-type argument or structural function value to this parameter. Call sites remain unmarked. Consuming invocation is written `function once(...)`, not `function take(...)`.",
         ),
-        TokenKind::Writable => {
-            Some("Marks a binding, property, parameter, or method receiver as mutable.")
-        }
+        TokenKind::Writable => Some(
+            "Marks a binding, property, parameter, or method receiver as mutable. In a structural function type it may independently mark writable invocation or a writable parameter borrow.",
+        ),
+        TokenKind::Once => Some(
+            "Marks a structural function type as consuming and one-shot. Calling a value of this type consumes the function value. Closure invocation-mode inference lands in Stage 30b.",
+        ),
         TokenKind::Internal => {
             Some("Marks a class member as hidden from the external object surface.")
         }
@@ -1778,9 +1786,9 @@ mod tests {
     fn completion_and_hover_describe_the_accepted_closure_grammar_boundary() {
         let arrow = completion_item("fn");
         assert_eq!(arrow["detail"], "Doria arrow-closure keyword");
-        assert!(arrow["documentation"]
-            .as_str()
-            .is_some_and(|text| text.contains("Closure semantics and execution land in Stage 30")));
+        assert!(arrow["documentation"].as_str().is_some_and(
+            |text| text.contains("Closure semantics and execution begin in Stage 30b")
+        ));
 
         let capture = completion_item("with");
         assert_eq!(capture["detail"], "Doria closure-capture keyword");
@@ -1788,11 +1796,18 @@ mod tests {
             .as_str()
             .is_some_and(|text| text.contains("`take` transfers ownership")));
 
-        let source = "let $minimum = 70; let $f = fn(int $value) with ($minimum) => $value; function accept(function(int): int $callback): void {}";
+        let once = completion_item("once");
+        assert_eq!(once["detail"], "Doria function-type invocation modifier");
+        assert!(once["documentation"]
+            .as_str()
+            .is_some_and(|text| text.contains("consuming and one-shot")));
+
+        let source = "let $minimum = 70; let $f = fn(int $value) with ($minimum) => $value; function accept(function once(): int $callback): void {}";
         for (needle, expected) in [
             ("fn", "Declares an arrow closure"),
             ("with", "Introduces an explicit closure capture list"),
-            ("function(int)", "accepted `function(T): R` function type"),
+            ("function once", "structural function type"),
+            ("once", "consuming and one-shot"),
         ] {
             let offset = source.find(needle).expect("hover token");
             let hover = hover_at_offset(source, offset).expect("closure syntax hover");

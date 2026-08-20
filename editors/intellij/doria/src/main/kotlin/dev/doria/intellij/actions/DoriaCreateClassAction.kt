@@ -329,7 +329,7 @@ private class DoriaCreateClassDialog(
             "spawn", "scope", "trait", "enum", "match", "try", "catch", "mixed", "never",
             "resource", "array", "object", "use", "uses", "include", "declare", "with",
             "case", "when", "given", "finally", "unsafe", "extern", "open", "override", "is",
-            "default", "do", "fn", "get", "set", "insteadof", "shared",
+            "default", "do", "fn", "once", "get", "set", "insteadof", "shared",
             "goto", "require", "require_once", "include_once", "print", "instanceof",
         )
         val DORIA_RESERVED_CLASS_NAMES = setOf(

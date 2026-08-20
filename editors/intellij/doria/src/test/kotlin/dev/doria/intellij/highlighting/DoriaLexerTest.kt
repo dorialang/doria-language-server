@@ -190,6 +190,61 @@ class DoriaLexerTest : TestCase() {
         assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
     }
 
+    fun testStage30aFunctionTypesAndCallableCallsUseAlignedPresentationTokens() {
+        val tokens = lex(
+            "function writable(writable Counter): void \$writer; " +
+                "function once(take Payload): string \$consumer; " +
+                "function((function(): int throws ParseError), string): void \$nested; " +
+                "\$consumer(1); transform(2); \$service->transform(3);",
+        )
+
+        assertEquals(DoriaTokenTypes.KEYWORD, tokens.first { it.text == "once" }.type)
+        for (token in tokens.filter { it.text == "throws" }) {
+            assertEquals(DoriaTokenTypes.KEYWORD, token.type)
+        }
+        for (token in tokens.filter { it.text == "writable" || it.text == "take" }) {
+            assertEquals(DoriaTokenTypes.MODIFIER, token.type)
+        }
+        assertEquals(DoriaTokenTypes.VARIABLE, tokens.first { it.text == "\$consumer" }.type)
+        assertEquals(DoriaTokenTypes.FUNCTION_CALL, tokens.first { it.text == "transform" }.type)
+        assertEquals(DoriaTokenTypes.METHOD_CALL, tokens.last { it.text == "transform" }.type)
+        assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
+    }
+
+    fun testOnceAndRejectedTakeInvocationRespectLexicalContext() {
+        val tokens = lex(
+            "function once(): Payload; function take(): Payload; " +
+                "function(take Payload): void \$consumer; " +
+                "onceOnly once_more once1 \$once; \"once\"; // once\n",
+        )
+
+        assertEquals(DoriaTokenTypes.KEYWORD, tokens.first { it.text == "once" }.type)
+        assertEquals(DoriaTokenTypes.INVALID, tokens.first { it.text == "take" }.type)
+        assertEquals(DoriaTokenTypes.MODIFIER, tokens.last { it.text == "take" }.type)
+        for (identifier in listOf("onceOnly", "once_more", "once1")) {
+            assertEquals(DoriaTokenTypes.IDENTIFIER, tokens.first { it.text == identifier }.type)
+        }
+        assertEquals(DoriaTokenTypes.VARIABLE, tokens.first { it.text == "\$once" }.type)
+        assertEquals(DoriaTokenTypes.STRING, tokens.first { it.text == "\"once\"" }.type)
+        assertEquals(DoriaTokenTypes.COMMENT, tokens.first { it.text.startsWith("//") }.type)
+
+        for (source in listOf(
+            "function /* comment */ take(): Payload;",
+            "function // comment\n take(): Payload;",
+            "function # comment\n take /* comment */ (): Payload;",
+        )) {
+            assertEquals(
+                source,
+                DoriaTokenTypes.INVALID,
+                lex(source).first { it.text == "take" }.type,
+            )
+        }
+        assertFalse(
+            lex("// function\n take(): Payload;")
+                .any { it.text == "take" && it.type == DoriaTokenTypes.INVALID },
+        )
+    }
+
     fun testClosureKeywordsRespectIdentifierStringAndCommentBoundaries() {
         val tokens = lex("fnord withdraw functionality; \"fn with\"; // fn with\n")
 

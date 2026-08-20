@@ -25,6 +25,9 @@
       "include": "#accessors"
     },
     {
+      "include": "#callableCalls"
+    },
+    {
       "include": "#constants"
     },
     {
@@ -159,6 +162,17 @@
         {
           "name": "invalid.illegal.keyword.rejected.doria",
           "match": "\\b(?:goto|require|require_once|include_once|print|instanceof)\\b|\\buse\\b(?=\\s*\\()"
+        },
+        {
+          "match": "\\b(function)((?:(?:\\s+)|(?:/\\*[\\s\\S]*?\\*/)|(?://[^\\r\\n]*(?:\\r?\\n|$))|(?:#(?!\\[)[^\\r\\n]*(?:\\r?\\n|$)))+)(take)(?=(?:(?:\\s+)|(?:/\\*[\\s\\S]*?\\*/)|(?://[^\\r\\n]*(?:\\r?\\n|$))|(?:#(?!\\[)[^\\r\\n]*(?:\\r?\\n|$)))*\\()",
+          "captures": {
+            "1": {
+              "name": "storage.type.function.doria"
+            },
+            "3": {
+              "name": "invalid.illegal.modifier.function.invocation.doria"
+            }
+          }
         },
         {
           "match": "(::)(\\s*)(\\$)(?=[A-Za-z_][A-Za-z0-9_]*)",
@@ -431,12 +445,15 @@
         },
         {
           "name": "meta.type.function.doria",
-          "begin": "\\b(function)\\s*(\\()",
+          "begin": "\\b(function)(?:\\s+(writable|once))?\\s*(\\()",
           "beginCaptures": {
             "1": {
               "name": "storage.type.function.doria"
             },
             "2": {
+              "name": "storage.modifier.invocation.function.doria"
+            },
+            "3": {
               "name": "punctuation.definition.parameters.begin.doria"
             }
           },
@@ -447,6 +464,13 @@
             }
           },
           "patterns": [
+            {
+              "name": "storage.modifier.ownership.parameter.function-type.doria",
+              "match": "\\b(?:writable|take)\\b"
+            },
+            {
+              "include": "#typeGrouping"
+            },
             {
               "include": "#closures"
             },
@@ -460,6 +484,35 @@
         },
         {
           "include": "#closureCaptureList"
+        }
+      ]
+    },
+    "typeGrouping": {
+      "name": "meta.group.type.doria",
+      "begin": "(\\()(?=\\s*\\??\\s*function\\b)",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.type.group.begin.doria"
+        }
+      },
+      "end": "(\\))",
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.definition.type.group.end.doria"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#closures"
+        },
+        {
+          "include": "#types"
+        },
+        {
+          "include": "#keywords"
+        },
+        {
+          "include": "#punctuation"
         }
       ]
     },
@@ -847,6 +900,10 @@
           "match": "\\b(?:try|catch|finally|throw|throws)\\b"
         },
         {
+          "name": "storage.modifier.invocation.function.doria",
+          "match": "\\bonce\\b"
+        },
+        {
           "name": "storage.modifier.mutability.doria",
           "match": "\\b(?:writable|readonly|take|shared)\\b"
         },
@@ -979,6 +1036,21 @@
         {
           "name": "entity.name.function.call.doria",
           "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b(?=\\s*\\()"
+        }
+      ]
+    },
+    "callableCalls": {
+      "patterns": [
+        {
+          "match": "(\\$[A-Za-z_][A-Za-z0-9_]*)(\\s*)(\\()",
+          "captures": {
+            "1": {
+              "name": "variable.other.callable.doria"
+            },
+            "3": {
+              "name": "punctuation.definition.arguments.begin.callable.doria"
+            }
+          }
         }
       ]
     },

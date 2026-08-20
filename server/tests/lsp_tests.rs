@@ -194,6 +194,137 @@ fn publishes_one_structured_boundary_for_every_accepted_closure_form() {
 }
 
 #[test]
+fn publishes_the_compiler_owned_boundary_for_stage_30a_callable_grammar() {
+    let cases = [
+        (
+            "writable-invocation.doria",
+            "function accept(function writable(int): int $callback): void {}",
+        ),
+        (
+            "once-invocation.doria",
+            "class Payload {} function accept(function once(): Payload $factory): void {}",
+        ),
+        (
+            "parameter-ownership.doria",
+            "class Counter {} class Payload {} function accept(function(writable Counter): void $writer, function(take Payload): void $consumer): void {}",
+        ),
+        (
+            "checked-effects.doria",
+            "class ParseError {} class StorageError {} function accept(function(string): int throws ParseError, StorageError $parser): void {}",
+        ),
+        (
+            "grouped-nested.doria",
+            "class ParseError {} function accept(function((function(): int throws ParseError), string): void $callback): void {}",
+        ),
+        (
+            "inner-outer-effects.doria",
+            "class InnerError {} class OuterError {} function accept(function(): (function(): int throws InnerError) throws OuterError $callback): void {}",
+        ),
+        (
+            "variable-call.doria",
+            "let $callback = fn(int $value) => $value; $callback(1);",
+        ),
+        (
+            "factory-result-call.doria",
+            "let $factory = fn() => fn(int $value) => $value; $factory()(1);",
+        ),
+        (
+            "indexed-call.doria",
+            "let $callbacks = [fn(int $value) => $value]; $callbacks[0](1);",
+        ),
+        (
+            "direct-call.doria",
+            "(fn(int $value) => $value)(1);",
+        ),
+    ];
+
+    for (name, source) in cases {
+        assert_stage_30_closure_boundary(name, source);
+    }
+}
+
+#[test]
+fn stage_30a_does_not_change_named_function_method_or_static_calls() {
+    let source = r#"function identity(int $value): int { return $value; }
+class Calculator
+{
+    function identity(int $value): int { return $value; }
+    static function staticIdentity(int $value): int { return $value; }
+}
+function main(): void
+{
+    let $calculator = new Calculator();
+    int $a = identity(1);
+    int $b = $calculator->identity(2);
+    int $c = Calculator::staticIdentity(3);
+}"#;
+
+    let diagnostics = diagnostics_for_document("file:///ordinary-calls.doria", source);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn malformed_stage_30a_forms_remain_parser_diagnostics() {
+    let cases = [
+        "class Payload {} function accept(function take(): Payload $callback): void {}",
+        "function accept(function readonly(int): int $callback): void {}",
+        "class Payload {} function accept(function(take writable Payload): void $callback): void {}",
+        "function accept(function(): void throws $callback): void {}",
+        "function accept((int, string) $pair): void {}",
+        "let $callback = fn(int $value) => $value; $callback(value: 42);",
+    ];
+
+    for (index, source) in cases.into_iter().enumerate() {
+        let name = format!("malformed-stage30a-{index}.doria");
+        doriac::parse_source(&name, source).expect_err("malformed Stage 30a syntax must not parse");
+        let diagnostics = diagnostics_for_document(&format!("file:///{name}"), source);
+        assert!(
+            !diagnostics.is_empty(),
+            "missing parser diagnostic for {source}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic["code"] != "E0641"),
+            "malformed syntax was misreported as the semantic boundary: {diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
+fn stage_30a_diagnostics_preserve_compiler_source_order_and_metadata() {
+    let source = r#"function main(): void
+{
+    int $bad = "not an integer";
+    let $callback = fn(int $value) => $value;
+    $callback(1);
+}"#;
+    let compiler = doriac::check_source("stage30a-order.doria", source)
+        .expect_err("fixture must report the permanent error and Stage 30 boundary");
+    let lsp = diagnostics_for_document("file:///stage30a-order.doria", source);
+    let compiler_codes = compiler
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+    let lsp_codes = lsp
+        .iter()
+        .map(|diagnostic| diagnostic["code"].as_str().expect("diagnostic code"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(lsp_codes, compiler_codes);
+    assert_eq!(lsp_codes, ["E0403", "E0641"]);
+    assert!(lsp.windows(2).all(|pair| {
+        pair[0]["range"]["start"]["line"].as_u64() <= pair[1]["range"]["start"]["line"].as_u64()
+    }));
+    let boundary = lsp
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0641")
+        .expect("Stage 30 boundary");
+    assert_eq!(boundary["data"]["kind"], "unsupportedDevelopmentSurface");
+    assert_eq!(boundary["data"]["developmentOnly"], true);
+}
+
+#[test]
 fn closure_boundary_suppresses_body_cascades_and_stays_off_following_source() {
     let source = "let $closure = fn(int $value) => $missing + $value; let $after = 1;";
     assert_stage_30_closure_boundary("closure-body-boundary.doria", source);

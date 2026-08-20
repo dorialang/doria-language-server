@@ -21,6 +21,13 @@ let $badReferenceCapture = fn(int $value) with (&$outside) => $value;
 let $badWritableReferenceCapture = fn(int $value) with (writable &$outside) => $value;
 let $badReadonlyCapture = fn(int $value) with (readonly $outside) => $value;
 
+function acceptInvalidInvocation(function take(): Payload $callback): void;
+function acceptExplicitReadonly(function readonly(int): int $callback): void;
+function acceptConflictingOwnership(function(take writable Payload): void $callback): void;
+function acceptMissingEffect(function(): void throws $callback): void;
+function acceptTupleLikeGroup((int, string) $pair): void;
+$callback(value: 42);
+
 echo 1 === 1;
 echo 1 !== 1;
 

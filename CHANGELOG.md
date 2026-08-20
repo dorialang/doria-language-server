@@ -6,8 +6,9 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
-- Aligned the server and both editor highlighters with accepted Pre-Stage-30
-  closure grammar, preserving the compiler-owned `E0641` semantic boundary.
+- Completed Stage 30a editor alignment for structural function invocation modes,
+  parameter ownership, checked effects, grouped nested types, and callable-value
+  calls while preserving the compiler-owned `E0641` semantic boundary.
 - Established the standalone Doria Language Server repository structure.
 - Moved the VS Code and IntelliJ editor clients and shared syntax fixtures under one owner.
 - Added cross-editor highlighting guardrails, CI, contribution guidance, architecture documentation, and release guidance.

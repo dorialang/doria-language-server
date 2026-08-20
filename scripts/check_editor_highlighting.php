@@ -113,6 +113,7 @@ $acceptedKeywords = [
     'override',
     'with',
     'take',
+    'once',
 ];
 
 $plannedKeywords = [
@@ -1616,12 +1617,12 @@ function check_fixture(): void
     }
 }
 
-function check_pre_stage30_closure_alignment(): void
+function check_stage30a_callable_alignment(): void
 {
     global $cargoManifest, $readme, $vscodeGrammar, $intellijLexer, $intellijLexerTest;
     global $lspServer, $lspTests, $fixture, $rejectedFixture;
 
-    $compilerCommit = 'ce0590b218382da799982f3de13969c561865d66';
+    $compilerCommit = 'd85805241a7c14aa38f36479a1c59bf5a95a2a51';
     require_check(
         preg_match(
             '/doriac\s*=\s*\{[^}]*\brev\s*=\s*"' . $compilerCommit . '"/',
@@ -1638,6 +1639,13 @@ function check_pre_stage30_closure_alignment(): void
         'writable capture' => '/\bwith\s*\([^)]*\bwritable\s+\$[A-Za-z_][A-Za-z0-9_]*/',
         'taking capture' => '/\bwith\s*\([^)]*\btake\s+\$[A-Za-z_][A-Za-z0-9_]*/',
         'function type' => '/\bfunction\s*\([^$)]*\)\s*:\s*\??[A-Za-z_][A-Za-z0-9_]*/',
+        'writable invocation' => '/\bfunction\s+writable\s*\(/',
+        'once invocation' => '/\bfunction\s+once\s*\(/',
+        'function-type writable parameter' => '/\bfunction\s*\(\s*writable\s+[A-Za-z_]/',
+        'function-type take parameter' => '/\bfunction\s*\(\s*take\s+[A-Za-z_]/',
+        'function-type checked effects' => '/\bfunction\s*\([^)]*\)\s*:\s*[^;=\n]+\bthrows\s+[A-Za-z_]/',
+        'grouped nested function type' => '/\(\s*function\s*\(\s*\)\s*:\s*int\s+throws\s+ParseError\s*\)/',
+        'callable-value invocation' => '/\$identity\s*\(\s*1\s*\)/',
     ];
     foreach ($acceptedFacts as $fact => $pattern) {
         require_check(
@@ -1646,9 +1654,10 @@ function check_pre_stage30_closure_alignment(): void
         );
     }
     require_check(
-        str_contains($fixtureText, 'Pre-Stage-30 Closure Grammar') &&
+        str_contains($fixtureText, 'Stage 30a Closure Grammar') &&
+            str_contains($fixtureText, 'semantics begin in Stage 30b') &&
             !str_contains($fixtureText, 'Planned/future: closure'),
-        'shared fixture must describe closure grammar as accepted without claiming Stage 30 execution',
+        'shared fixture must describe Stage 30a grammar as accepted without claiming execution',
     );
 
     $rejectedText = read_text($rejectedFixture);
@@ -1657,6 +1666,12 @@ function check_pre_stage30_closure_alignment(): void
         'empty capture list' => '/\bwith\s*\(\s*\)/',
         'reference capture' => '/\bwith\s*\([^)]*&\s*\$[A-Za-z_]/',
         'readonly capture modifier' => '/\bwith\s*\([^)]*\breadonly\s+\$[A-Za-z_]/',
+        'take invocation spelling' => '/\bfunction\s+take\s*\(\s*\)/',
+        'explicit readonly invocation' => '/\bfunction\s+readonly\s*\(/',
+        'conflicting parameter ownership' => '/\bfunction\s*\(\s*take\s+writable\s+/',
+        'missing effect type' => '/\bfunction\s*\(\s*\)\s*:\s*void\s+throws\s+\$/',
+        'tuple-like grouped type' => '/\(\s*int\s*,\s*string\s*\)/',
+        'named callable argument' => '/\$callback\s*\(\s*value\s*:/',
     ] as $fact => $pattern) {
         require_check(
             preg_match($pattern, $rejectedText) === 1,
@@ -1679,6 +1694,10 @@ function check_pre_stage30_closure_alignment(): void
         'storage.modifier.ownership.capture.doria',
         'variable.other.capture.doria',
         'keyword.operator.closure.arrow.doria',
+        'storage.modifier.invocation.function.doria',
+        'storage.modifier.ownership.parameter.function-type.doria',
+        'meta.group.type.doria',
+        'punctuation.definition.arguments.begin.callable.doria',
     ] as $scope) {
         require_check(str_contains($grammarText, $scope), "VS Code closure grammar is missing {$scope}");
     }
@@ -1729,6 +1748,19 @@ function check_pre_stage30_closure_alignment(): void
         ),
         'VS Code anonymous closures must recognize namespace-qualified return types',
     );
+    require_check(
+        any_match(
+            $grammar['repository']['keywords']['patterns'] ?? [],
+            static fn (array $pattern): bool =>
+                ($pattern['name'] ?? null) === 'storage.modifier.invocation.function.doria' &&
+                regex_matches((string) ($pattern['match'] ?? ''), 'once'),
+        ),
+        'VS Code must recognize once as an accepted invocation modifier',
+    );
+    require_check(
+        isset($grammar['repository']['typeGrouping'], $grammar['repository']['callableCalls']),
+        'VS Code must present grouped function types and explicit callable-value calls',
+    );
     $reservedPattern = any_match(
         $grammar['repository']['keywords']['patterns'] ?? [],
         static fn (array $pattern): bool =>
@@ -1737,9 +1769,9 @@ function check_pre_stage30_closure_alignment(): void
             !regex_matches((string) ($pattern['match'] ?? ''), 'with'),
     );
     require_check($reservedPattern, 'VS Code must not classify fn or with as reserved vocabulary');
-    foreach (['fnord', 'withdraw', 'functionality'] as $identifier) {
+    foreach (['fnord', 'withdraw', 'functionality', 'onceOnly', 'once_more', 'once1'] as $identifier) {
         require_check(
-            !regex_matches('\\b(?:fn|with|function)\\b', $identifier),
+            !regex_matches('\\b(?:fn|with|function|once)\\b', $identifier),
             "closure keyword boundaries must preserve identifier {$identifier}",
         );
     }
@@ -1749,6 +1781,8 @@ function check_pre_stage30_closure_alignment(): void
     require_check(
         str_contains($lexerText, '"fn"') &&
             str_contains($lexerText, '"with"') &&
+            str_contains($lexerText, '"once"') &&
+            str_contains($lexerText, 'isRejectedFunctionInvocationModifier()') &&
             !str_contains($lexerText, 'withTokenType()') &&
             !str_contains($lexerText, 'hasInvalidClosureCaptureClause()'),
         'IntelliJ must recognize fn/with while leaving capture diagnostics to the compiler',
@@ -1757,6 +1791,8 @@ function check_pre_stage30_closure_alignment(): void
         'testAcceptedClosureGrammarUsesAlignedKeywordModifierAndVariableTokens',
         'testClosureKeywordsRespectIdentifierStringAndCommentBoundaries',
         'testCompilerOwnsMalformedCaptureDiagnosticsWithoutCommentFalsePositives',
+        'testStage30aFunctionTypesAndCallableCallsUseAlignedPresentationTokens',
+        'testOnceAndRejectedTakeInvocationRespectLexicalContext',
     ] as $test) {
         require_check(str_contains($lexerTestText, $test), "IntelliJ closure coverage is missing {$test}");
     }
@@ -1766,13 +1802,17 @@ function check_pre_stage30_closure_alignment(): void
     require_check(
         str_contains($lspText, '"developmentOnly": diagnostic.development_only') &&
             str_contains($lspText, 'Doria arrow-closure keyword') &&
-            str_contains($lspText, 'Doria closure-capture keyword'),
-        'LSP must preserve development metadata and describe accepted closure grammar',
+            str_contains($lspText, 'Doria closure-capture keyword') &&
+            str_contains($lspText, 'Doria function-type invocation modifier'),
+        'LSP must preserve development metadata and describe accepted Stage 30a grammar',
     );
     foreach ([
         'publishes_one_structured_boundary_for_every_accepted_closure_form',
         'closure_boundary_suppresses_body_cascades_and_stays_off_following_source',
         'malformed_capture_forms_remain_parser_diagnostics_not_stage_30_boundaries',
+        'publishes_the_compiler_owned_boundary_for_stage_30a_callable_grammar',
+        'malformed_stage_30a_forms_remain_parser_diagnostics',
+        'stage_30a_does_not_change_named_function_method_or_static_calls',
         'unsupportedDevelopmentSurface',
         'developmentOnly',
     ] as $coverage) {
@@ -1781,10 +1821,11 @@ function check_pre_stage30_closure_alignment(): void
 
     $readmeText = read_text($readme);
     require_check(
-        str_contains($readmeText, 'Pre-Stage-30 closure grammar') &&
+        str_contains($readmeText, 'Stage 30a callable grammar') &&
             str_contains($readmeText, 'E0641') &&
-            str_contains($readmeText, 'semantics and execution remain pending Stage 30'),
-        'README must state the accepted grammar and pending Stage 30 semantic boundary',
+            str_contains($readmeText, 'Stage 30b semantic function types and') &&
+            str_contains($readmeText, 'does not implement'),
+        'README must state Stage 30a completion and the pending Stage 30b semantic boundary',
     );
 }
 
@@ -1831,7 +1872,7 @@ function main(): int
     check_lsp_completion_vocabulary();
     check_editor_fixture_diagnostics_are_skipped();
     check_fixture();
-    check_pre_stage30_closure_alignment();
+    check_stage30a_callable_alignment();
     check_inferred_main_effect_alignment();
     echo "Doria editor highlighting checks passed.\n";
     return 0;
