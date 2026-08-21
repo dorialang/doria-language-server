@@ -88,8 +88,9 @@ closures, anonymous `function` blocks, explicit `with` capture lists, structural
 function invocation modes, parameter ownership, checked effects, grouped nested
 types, and callable-value calls. It recognizes `once` as an accepted keyword,
 keeps parameter `writable` and `take` as modifiers, and leaves semantic authority
-to the compiler. Stage 30b callable checking and later execution remain reported
-through compiler-owned `E0641`; the plugin does not implement those semantics.
+to the compiler. `doria-lsp` publishes Stage 30b callable and capture diagnostics,
+safe fixes, and semantic hovers; compiler-owned `E0641` is limited to execution
+that remains unavailable. The presentation lexer does not implement semantics.
 
 VS Code and IntelliJ / JetBrains highlighting should stay aligned. The shared smoke fixture is:
 

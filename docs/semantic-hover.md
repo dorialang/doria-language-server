@@ -29,17 +29,21 @@ References are returned only when the compiler can resolve them safely. Existing
 keyword, primitive type, and compiler-intrinsic hover remains available as a lexical
 fallback.
 
-The lexical fallback describes the accepted Stage 30a callable grammar. `fn`
-declares an explicitly typed arrow closure, `with` introduces an explicit capture
-list, and structural function types preserve invocation mode, parameter ownership,
-checked effects, and authored grouping. `once` marks consuming one-shot invocation;
-grouping makes nested effect ownership explicit and does not create a tuple.
-Callable-value invocation is parser-supported. The pinned compiler still reports
-`E0641` for semantic use: capture checking, callable compatibility, lowering, and
-execution begin in Stage 30b. The server does not infer free variables, automatic
-capture, `$this` capture, closure effects, or environment layout. Grouping and call
-punctuation do not receive lexical hovers because the existing fallback is
-token-based; editor presentation does not add a second parser.
+The lexical fallback describes the accepted Stage 30a callable grammar. Stage 30b
+semantic hovers use compiler metadata instead: structural function-typed bindings
+and parameters show their canonical semantic type, closure expressions show their
+inferred invocation mode and checked effects plus an explicit capture summary, and
+capture occurrences show their compiler-resolved capture mode. Callable-value calls
+show the checked function signature where the existing expression-hover route can
+identify the call. Authored effect order remains visible on source function types.
+The server does not rediscover free variables or infer captures from text.
+
+The compiler publishes precise capture and callable diagnostics with safe capture
+fixes. `E0641` is now limited to otherwise valid closure or callable execution;
+type-only function syntax does not receive it, and invalid closures receive their
+specific semantic diagnostic without a redundant execution boundary. Stage 30c
+owns capture acquisition, ownership, lifetimes, and escape checking. HIR, MIR,
+runtime, and backend closure execution remain unavailable.
 
 Compiler-known ownership and collection methods use the same signature-first
 presentation. When the compiler resolves the receiver, hover substitutes its concrete
