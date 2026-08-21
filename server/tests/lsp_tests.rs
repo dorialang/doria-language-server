@@ -299,6 +299,119 @@ fn publishes_compiler_owned_stage_30b_diagnostics_without_redundant_boundaries()
 }
 
 #[test]
+fn constructor_rooted_property_writes_follow_the_pinned_compiler() {
+    let accepted = [
+        (
+            "constructor-nested-write.doria",
+            r#"class Window
+{
+    writable string $title;
+    function __construct(string $inputTitle) { $this->title = $inputTitle; }
+}
+class Application
+{
+    internal writable Window $window = new Window("");
+    function __construct(string $inputTitle) { $this->window->title = $inputTitle; }
+}"#,
+        ),
+        (
+            "constructor-owned-initialize.doria",
+            r#"class Window
+{
+    string $title;
+    function __construct(string $inputTitle) { $this->title = $inputTitle; }
+}
+class Application
+{
+    internal writable Window $window;
+    function __construct(string $inputTitle) { $this->window = new Window($inputTitle); }
+}"#,
+        ),
+        (
+            "owned-property-replace.doria",
+            r#"class Window {}
+class Application
+{
+    internal writable Window $window = new Window();
+    writable function replace(take Window $window): void { $this->window = $window; }
+}"#,
+        ),
+    ];
+
+    for (name, source) in accepted {
+        doriac::check_source(name, source).expect("the pinned compiler must accept the write");
+        let diagnostics = diagnostics_for_document(&format!("file:///{name}"), source);
+        assert!(diagnostics.is_empty(), "{name}: {diagnostics:#?}");
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic["code"] != "E0472"),
+            "valid move-in must not publish historical E0472: {diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
+fn constructor_property_write_boundaries_preserve_compiler_diagnostics() {
+    let cases = [
+        (
+            "readonly-intermediate.doria",
+            r#"class Window { writable string $title = ""; }
+class Application
+{
+    Window $window = new Window();
+    function __construct() { $this->window->title = "Doria"; }
+}"#,
+            "E0201",
+        ),
+        (
+            "uninitialized-intermediate.doria",
+            r#"class Window { writable string $title = ""; }
+class Application
+{
+    writable Window $window;
+    function __construct() { $this->window->title = "Doria"; }
+}"#,
+            "E0501",
+        ),
+        (
+            "borrowed-owned-property.doria",
+            r#"class Window {}
+function inspect(Window $window): Window { return $window; }
+class Application
+{
+    writable Window $window = new Window();
+    writable function replace(Window $candidate): void
+    {
+        $this->window = inspect($candidate);
+    }
+}"#,
+            "E0478",
+        ),
+        (
+            "overlapping-property-move.doria",
+            r#"class Window {}
+class Application
+{
+    writable Window $window = new Window();
+    writable function replace(): void { $this->window = $this->window; }
+}"#,
+            "E0471",
+        ),
+    ];
+
+    for (name, source, code) in cases {
+        assert_lsp_diagnostic_matches_compiler(name, source, code);
+    }
+
+    assert_lsp_diagnostic_matches_compiler(
+        "closure-capture-regression.doria",
+        "let $value = 1; let $closure = fn() => $value;",
+        "E0642",
+    );
+}
+
+#[test]
 fn distinguishes_function_shape_and_checked_effect_mismatches() {
     let shape = "function(int): int $f = fn(string $value) => 1;";
     assert_lsp_diagnostic_matches_compiler("shape-mismatch.doria", shape, "E0648");

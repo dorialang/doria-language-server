@@ -45,6 +45,14 @@ specific semantic diagnostic without a redundant execution boundary. Stage 30c
 owns capture acquisition, ownership, lifetimes, and escape checking. HIR, MIR,
 runtime, and backend closure execution remain unavailable.
 
+Constructor-rooted writable paths and owned property writes use the same compiler
+authority. Accepted nested writes, owned initialization, and writable replacement
+remain diagnostic-free; readonly intermediates, uninitialized intermediates,
+borrowed right-hand sides, and overlapping transfers retain the compiler's exact
+codes, labels, severity, kind, and metadata. The server does not infer path
+capability or constructor state, and it does not claim support for moving values
+out of properties.
+
 Compiler-known ownership and collection methods use the same signature-first
 presentation. When the compiler resolves the receiver, hover substitutes its concrete
 generic arguments and exact return type; for example, `WeakReference<Theme>::acquire()`

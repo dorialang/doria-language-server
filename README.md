@@ -34,6 +34,13 @@ facts, and captures. `E0641` now marks executable closure and function-value wor
 only. Stage 30c ownership and lifetime enforcement is next; no closure execution
 exists, and highlighting remains presentation only.
 
+The compiler also accepts constructor-rooted mutation through definitely initialized
+writable property paths, owned initialization of instance properties, and replacement
+of initialized writable owned properties. `doria-lsp` publishes the pinned compiler's
+precise readonly-path, definite-initialization, ownership, and overlap diagnostics;
+it does not reproduce those analyses. Moving values out of properties remains a
+separate unsupported operation.
+
 Checked-effect diagnostics also remain compiler-owned. Ordinary reusable
 callables declare escaping checked effects explicitly, while the selected
 entrypoint may omit `throws` and infer the checked effects that escape it. The

@@ -6,6 +6,9 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Pinned `doria-lsp` to the constructor-rooted writable-path and owned-property
+  correction, including compiler-owned diagnostics for readonly or uninitialized
+  paths, borrowed move values, and overlapping transfers.
 - Aligned `doria-lsp` with Stage 30b semantic function types, capture diagnostics
   and safe fixes, semantic callable hovers, and the narrowed execution-only
   `E0641` boundary while leaving closure execution unavailable.
