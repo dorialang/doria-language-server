@@ -6,6 +6,9 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Aligned `doria-lsp` with Stage 30b semantic function types, capture diagnostics
+  and safe fixes, semantic callable hovers, and the narrowed execution-only
+  `E0641` boundary while leaving closure execution unavailable.
 - Completed Stage 30a editor alignment for structural function invocation modes,
   parameter ownership, checked effects, grouped nested types, and callable-value
   calls while preserving the compiler-owned `E0641` semantic boundary.

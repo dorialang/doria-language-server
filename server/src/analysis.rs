@@ -1,17 +1,19 @@
 use std::collections::{HashMap, HashSet};
 
 use doriac::ast::{
-    Block, ClassDecl, ClassMember, ControlFlowFinally, DoWhileStmt, ElseBranch, EnumDecl, Expr,
-    ForIncrement, ForInitializer, FunctionDecl, GivenPrelude, IfStmt, Item, MatchMode, MatchOrigin,
-    MatchPattern, MemberAccess, Param, Program, StaticQualifier, Stmt, TryStmt, VarDecl,
-    WhenExpression, WhileStmt,
+    Block, ClassDecl, ClassMember, ClosureCaptureMode, ControlFlowFinally, DoWhileStmt, ElseBranch,
+    EnumDecl, Expr, ForIncrement, ForInitializer, FunctionDecl, GivenPrelude, IfStmt, Item,
+    MatchMode, MatchOrigin, MatchPattern, MemberAccess, Param, Program, StaticQualifier, Stmt,
+    TryStmt, VarDecl, WhenExpression, WhileStmt,
 };
 use doriac::diagnostics::Diagnostic;
 use doriac::enums::{EnumBackingType, EnumBackingValue};
 use doriac::lexer::{Token, TokenKind};
 use doriac::semantics::{CallableTarget, EnumSemanticInfo, SemanticInfo};
 use doriac::source::Span;
-use doriac::types::{ResolvedType, SharedHandleKind, TypeRef};
+use doriac::types::{
+    FunctionInvocationMode, ResolvedType, SharedHandleKind, TypeRef, TypeRegistry,
+};
 
 use crate::string_surface::{string_companion_method, string_property};
 
@@ -34,6 +36,7 @@ pub(crate) struct AnalysisSnapshot {
     enum_member_completions: HashMap<String, Vec<SemanticCompletion>>,
     local_visibilities: Vec<LocalVisibility>,
     call_signatures: Vec<CallSignatureContext>,
+    semantic_hovers: Vec<SemanticHover>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,22 +201,43 @@ impl AnalysisSnapshot {
     }
 
     pub(crate) fn hover_at_offset(&self, offset: usize) -> Option<SemanticHover> {
-        let occurrence = self
+        let occurrence_hover = self
             .occurrences
             .iter()
             .filter(|occurrence| span_contains(occurrence.span, offset))
-            .min_by_key(|occurrence| occurrence.span.end.saturating_sub(occurrence.span.start))?;
-        let symbol = self.symbols.get(occurrence.symbol)?;
-        let mut markdown = format!("```doria\n{}\n```", symbol.signature);
-        if let Some(documentation) = &symbol.documentation {
-            markdown.push_str("\n\n");
-            markdown.push_str(documentation);
-        }
+            .min_by_key(|occurrence| occurrence.span.end.saturating_sub(occurrence.span.start))
+            .and_then(|occurrence| {
+                let symbol = self.symbols.get(occurrence.symbol)?;
+                let mut markdown = format!("```doria\n{}\n```", symbol.signature);
+                if let Some(documentation) = &symbol.documentation {
+                    markdown.push_str("\n\n");
+                    markdown.push_str(documentation);
+                }
+                Some(SemanticHover {
+                    span: occurrence.span,
+                    markdown,
+                })
+            });
+        let semantic_hover = self
+            .semantic_hovers
+            .iter()
+            .filter(|hover| span_contains(hover.span, offset))
+            .min_by_key(|hover| hover.span.end.saturating_sub(hover.span.start))
+            .cloned();
 
-        Some(SemanticHover {
-            span: occurrence.span,
-            markdown,
-        })
+        match (occurrence_hover, semantic_hover) {
+            (Some(occurrence), Some(semantic)) => {
+                let occurrence_width = occurrence.span.end.saturating_sub(occurrence.span.start);
+                let semantic_width = semantic.span.end.saturating_sub(semantic.span.start);
+                Some(if semantic_width <= occurrence_width {
+                    semantic
+                } else {
+                    occurrence
+                })
+            }
+            (Some(hover), None) | (None, Some(hover)) => Some(hover),
+            (None, None) => None,
+        }
     }
 
     pub(crate) fn member_completions_at_offset(
@@ -500,6 +524,7 @@ struct SnapshotBuilder<'a> {
     local_scope_ends: Vec<usize>,
     local_visibilities: Vec<LocalVisibility>,
     call_signatures: Vec<CallSignatureContext>,
+    semantic_hovers: Vec<SemanticHover>,
     when_depth: usize,
 }
 
@@ -534,6 +559,7 @@ impl<'a> SnapshotBuilder<'a> {
             local_scope_ends: Vec::new(),
             local_visibilities: Vec::new(),
             call_signatures: Vec::new(),
+            semantic_hovers: Vec::new(),
             when_depth: 0,
         }
     }
@@ -542,6 +568,7 @@ impl<'a> SnapshotBuilder<'a> {
         self.collect_declarations(program);
         self.collect_semantic_only_declarations();
         self.collect_references(program);
+        self.collect_semantic_hovers();
         AnalysisSnapshot {
             diagnostics: self.diagnostics,
             symbols: self.symbols,
@@ -554,7 +581,141 @@ impl<'a> SnapshotBuilder<'a> {
             enum_member_completions: self.enum_member_completions,
             local_visibilities: self.local_visibilities,
             call_signatures: self.call_signatures,
+            semantic_hovers: self.semantic_hovers,
         }
+    }
+
+    fn collect_semantic_hovers(&mut self) {
+        let Some(info) = self.semantic_info else {
+            return;
+        };
+        let mut hovers = Vec::new();
+
+        let mut function_types = info.function_types_by_span.iter().collect::<Vec<_>>();
+        function_types.sort_by_key(|(span, _)| **span);
+        for ((start, end), semantic) in function_types {
+            hovers.push(SemanticHover {
+                span: Span::new(*start, *end),
+                markdown: format!(
+                    "```doria\n{}\n```\n\nCanonical semantic function type.",
+                    display_function_type_with_effects(
+                        &semantic.ty,
+                        &semantic.authored_checked_effects,
+                    )
+                ),
+            });
+        }
+
+        let mut bindings = info
+            .binding_resolution
+            .declarations_by_id
+            .values()
+            .filter_map(|declaration| {
+                let span = declaration.span?;
+                let ty = declaration.source_type.as_ref()?;
+                matches!(ty, ResolvedType::Function(_)).then_some((declaration.id, span, ty))
+            })
+            .collect::<Vec<_>>();
+        bindings.sort_by_key(|(id, span, _)| (span.start, span.end, *id));
+        for (binding_id, declaration_span, ty) in bindings {
+            let name = binding_source_name(info, binding_id);
+            let markdown = format!(
+                "```doria\n{} {name}\n```\n\nSemantically resolved function-typed binding.",
+                display_resolved_type(ty),
+            );
+            hovers.push(SemanticHover {
+                span: declaration_span,
+                markdown: markdown.clone(),
+            });
+            let mut use_spans = info
+                .binding_resolution
+                .uses_by_span
+                .iter()
+                .filter_map(|((start, end), resolved)| {
+                    (*resolved == binding_id).then_some(Span::new(*start, *end))
+                })
+                .collect::<Vec<_>>();
+            use_spans.sort_by_key(|span| (span.start, span.end));
+            hovers.extend(use_spans.into_iter().map(|span| SemanticHover {
+                span,
+                markdown: markdown.clone(),
+            }));
+        }
+
+        let mut closures = info.closures.values().collect::<Vec<_>>();
+        closures.sort_by_key(|closure| (closure.closure_id.start, closure.closure_id.end));
+        for closure in closures {
+            let signature = display_function_type_with_effects(
+                &closure.function_type,
+                &closure.inferred_checked_effects,
+            );
+            let effects = if closure.inferred_checked_effects.is_empty() {
+                "none".to_string()
+            } else {
+                closure
+                    .inferred_checked_effects
+                    .iter()
+                    .map(display_resolved_type)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let captures = if closure.captures.is_empty() {
+                "none".to_string()
+            } else {
+                closure
+                    .captures
+                    .iter()
+                    .map(|capture| {
+                        format!(
+                            "{} {}",
+                            capture_mode_name(capture.mode),
+                            binding_source_name(info, capture.source_binding_id)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            hovers.push(SemanticHover {
+                span: Span::new(closure.closure_id.start, closure.closure_id.end),
+                markdown: format!(
+                    "```doria\n{signature}\n```\n\n**Inferred invocation mode:** `{}`\n\n**Inferred checked effects:** {effects}\n\n**Captures:** {captures}\n\nClosure execution is not available in Stage 30b.",
+                    invocation_mode_name(closure.inferred_invocation_mode),
+                ),
+            });
+
+            for capture in &closure.captures {
+                let name = binding_source_name(info, capture.source_binding_id);
+                let markdown = format!(
+                    "```doria\n{} {}\n```\n\n{} capture of `{name}`.",
+                    display_resolved_type(&capture.source_type),
+                    name,
+                    capture_mode_name(capture.mode),
+                );
+                hovers.push(SemanticHover {
+                    span: capture.declaration_span,
+                    markdown: markdown.clone(),
+                });
+                hovers.extend(capture.use_spans.iter().map(|span| SemanticHover {
+                    span: *span,
+                    markdown: markdown.clone(),
+                }));
+            }
+        }
+
+        let mut callable_calls = info.callable_value_calls.iter().collect::<Vec<_>>();
+        callable_calls.sort_by_key(|(span, _)| **span);
+        for ((start, end), call) in callable_calls {
+            hovers.push(SemanticHover {
+                span: Span::new(*start, *end),
+                markdown: format!(
+                    "```doria\n{}\n```\n\nSemantically checked callable-value invocation returning `{}`. Execution is not available in Stage 30b.",
+                    display_function_type_with_effects(&call.function_type, &call.checked_effects),
+                    display_resolved_type(&call.return_type),
+                ),
+            });
+        }
+
+        self.semantic_hovers.extend(hovers);
     }
 
     fn collect_declarations(&mut self, program: &Program) {
@@ -2569,60 +2730,42 @@ fn append_documentation(documentation: &mut Option<String>, addition: &str) {
 }
 
 fn display_resolved_type(ty: &ResolvedType) -> String {
-    match ty {
-        ResolvedType::Void => "void".to_string(),
-        ResolvedType::Integer(integer) => integer.to_string(),
-        ResolvedType::Float(float) => float.to_string(),
-        ResolvedType::String => "string".to_string(),
-        ResolvedType::Bytes => "Bytes".to_string(),
-        ResolvedType::Bool => "bool".to_string(),
-        ResolvedType::Null => "null".to_string(),
-        ResolvedType::Mixed => "mixed".to_string(),
-        ResolvedType::Error => "Error".to_string(),
-        ResolvedType::TypeParameter(name) => name.clone(),
-        ResolvedType::Nullable(inner) => format!("?{}", display_resolved_type(inner)),
-        ResolvedType::Enum(enum_type) => enum_type.name.clone(),
-        ResolvedType::Class(class) => {
-            if class.arguments.is_empty() {
-                class.name.clone()
-            } else {
-                format!(
-                    "{}<{}>",
-                    class.name,
-                    class
-                        .arguments
-                        .iter()
-                        .map(display_resolved_type)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            }
-        }
-        ResolvedType::TypedArray(element) => format!("{}[]", display_resolved_type(element)),
-        ResolvedType::List(element) => format!("List<{}>", display_resolved_type(element)),
-        ResolvedType::Dictionary(key, value) => format!(
-            "Dictionary<{}, {}>",
-            display_resolved_type(key),
-            display_resolved_type(value)
-        ),
-        ResolvedType::SortedDictionary(key, value) => format!(
-            "SortedDictionary<{}, {}>",
-            display_resolved_type(key),
-            display_resolved_type(value)
-        ),
-        ResolvedType::Set(element) => format!("Set<{}>", display_resolved_type(element)),
-        ResolvedType::SortedSet(element) => {
-            format!("SortedSet<{}>", display_resolved_type(element))
-        }
-        ResolvedType::PriorityQueue(element) => {
-            format!("PriorityQueue<{}>", display_resolved_type(element))
-        }
-        ResolvedType::Deque(element) => format!("Deque<{}>", display_resolved_type(element)),
-        ResolvedType::SharedHandle(kind, payload) => {
-            format!("{}<{}>", kind.source_name(), display_resolved_type(payload))
-        }
-        ResolvedType::Unsupported => "Unknown".to_string(),
+    let mut types = TypeRegistry::new();
+    let id = types.intern_resolved(ty);
+    types.display(id)
+}
+
+fn display_function_type_with_effects(ty: &ResolvedType, effects: &[ResolvedType]) -> String {
+    let mut source_ordered = ty.clone();
+    if let ResolvedType::Function(function) = &mut source_ordered {
+        function.checked_effects = effects.to_vec();
     }
+    display_resolved_type(&source_ordered)
+}
+
+fn invocation_mode_name(mode: FunctionInvocationMode) -> &'static str {
+    match mode {
+        FunctionInvocationMode::Readonly => "readonly",
+        FunctionInvocationMode::Writable => "writable",
+        FunctionInvocationMode::Once => "once",
+    }
+}
+
+fn capture_mode_name(mode: ClosureCaptureMode) -> &'static str {
+    match mode {
+        ClosureCaptureMode::Readonly => "Readonly",
+        ClosureCaptureMode::Writable => "Writable",
+        ClosureCaptureMode::Take => "Taking",
+    }
+}
+
+fn binding_source_name(info: &SemanticInfo, binding_id: doriac::symbols::BindingId) -> String {
+    let name = info
+        .binding_resolution
+        .declarations_by_id
+        .get(&binding_id)
+        .map_or("value", |declaration| declaration.name.as_str());
+    format!("${name}")
 }
 
 fn function_signature(function: &FunctionDecl, container: Option<&str>) -> String {

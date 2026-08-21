@@ -4,7 +4,7 @@ use doria_language_server::{
     byte_offset_to_position, code_actions_for_document, diagnostics_for_document,
     position_to_byte_offset,
 };
-use doriac::diagnostics::LabelRole;
+use doriac::diagnostics::{DiagnosticSeverity, LabelRole};
 
 fn assert_lsp_diagnostic_matches_compiler(name: &str, source: &str, code: &str) {
     let compiler_diagnostics =
@@ -35,6 +35,17 @@ fn assert_lsp_diagnostic_matches_compiler(name: &str, source: &str, code: &str) 
 
     assert_eq!(lsp_diagnostic["source"], "doriac");
     assert_eq!(
+        lsp_diagnostic["severity"],
+        match compiler_diagnostic.severity {
+            DiagnosticSeverity::Error => 1,
+            DiagnosticSeverity::Warning => 2,
+            DiagnosticSeverity::Note => 3,
+        }
+    );
+    assert!(lsp_diagnostic["message"]
+        .as_str()
+        .is_some_and(|message| message.starts_with(&compiler_diagnostic.title)));
+    assert_eq!(
         lsp_diagnostic["data"]["kind"],
         compiler_diagnostic.kind.as_str()
     );
@@ -56,6 +67,15 @@ fn assert_lsp_diagnostic_matches_compiler(name: &str, source: &str, code: &str) 
         lsp_diagnostic["range"]["end"]["character"],
         expected_end.character
     );
+    let compiler_related = compiler_diagnostic
+        .labels
+        .iter()
+        .filter(|label| label.role == LabelRole::Secondary)
+        .count();
+    let lsp_related = lsp_diagnostic["relatedInformation"]
+        .as_array()
+        .map_or(0, Vec::len);
+    assert_eq!(lsp_related, compiler_related);
 }
 
 fn assert_stage_30_closure_boundary(name: &str, source: &str) {
@@ -88,7 +108,7 @@ fn assert_stage_30_closure_boundary(name: &str, source: &str) {
     assert_eq!(diagnostic["data"]["developmentOnly"], true);
     assert!(diagnostic["message"]
         .as_str()
-        .is_some_and(|message| message.starts_with("Closure Semantics Await Stage 30")));
+        .is_some_and(|message| message.starts_with("Closure Execution Is Not Yet Available")));
     let expected_start = byte_offset_to_position(source, compiler_span.start);
     let expected_end = byte_offset_to_position(source, compiler_span.end);
     assert_eq!(diagnostic["range"]["start"]["line"], expected_start.line);
@@ -174,18 +194,6 @@ fn publishes_one_structured_boundary_for_every_accepted_closure_form() {
             "block-capture.doria",
             "let $minimum = 70; let $passes = function (int $score): bool with ($minimum) { return $score >= $minimum; };",
         ),
-        (
-            "function-type.doria",
-            "function accept(function(int): int $callback): void {}",
-        ),
-        (
-            "nested.doria",
-            "let $nested = fn(int $outer) => fn(int $inner) => $outer + $inner;",
-        ),
-        (
-            "argument.doria",
-            "function consume(mixed $value): void {} consume(fn(string $label) => $label);",
-        ),
     ];
 
     for (name, source) in cases {
@@ -194,7 +202,7 @@ fn publishes_one_structured_boundary_for_every_accepted_closure_form() {
 }
 
 #[test]
-fn publishes_the_compiler_owned_boundary_for_stage_30a_callable_grammar() {
+fn type_only_function_syntax_has_no_execution_boundary() {
     let cases = [
         (
             "writable-invocation.doria",
@@ -210,37 +218,176 @@ fn publishes_the_compiler_owned_boundary_for_stage_30a_callable_grammar() {
         ),
         (
             "checked-effects.doria",
-            "class ParseError {} class StorageError {} function accept(function(string): int throws ParseError, StorageError $parser): void {}",
+            "class ParseError implements Error { function __construct(string $message) {} } class StorageError implements Error { function __construct(string $message) {} } function accept(function(string): int throws ParseError, StorageError $parser): void {}",
         ),
         (
             "grouped-nested.doria",
-            "class ParseError {} function accept(function((function(): int throws ParseError), string): void $callback): void {}",
+            "class ParseError implements Error { function __construct(string $message) {} } function accept(function((function(): int throws ParseError), string): void $callback): void {}",
         ),
         (
             "inner-outer-effects.doria",
-            "class InnerError {} class OuterError {} function accept(function(): (function(): int throws InnerError) throws OuterError $callback): void {}",
-        ),
-        (
-            "variable-call.doria",
-            "let $callback = fn(int $value) => $value; $callback(1);",
-        ),
-        (
-            "factory-result-call.doria",
-            "let $factory = fn() => fn(int $value) => $value; $factory()(1);",
-        ),
-        (
-            "indexed-call.doria",
-            "let $callbacks = [fn(int $value) => $value]; $callbacks[0](1);",
-        ),
-        (
-            "direct-call.doria",
-            "(fn(int $value) => $value)(1);",
+            "class InnerError implements Error { function __construct(string $message) {} } class OuterError implements Error { function __construct(string $message) {} } function accept(function(): (function(): int throws InnerError) throws OuterError $callback): void {}",
         ),
     ];
 
     for (name, source) in cases {
-        assert_stage_30_closure_boundary(name, source);
+        doriac::check_source(name, source).expect("type-only function syntax is semantic");
+        let diagnostics = diagnostics_for_document(&format!("file:///{name}"), source);
+        assert!(diagnostics.is_empty(), "{name}: {diagnostics:#?}");
     }
+}
+
+#[test]
+fn publishes_compiler_owned_stage_30b_diagnostics_without_redundant_boundaries() {
+    let cases = [
+        (
+            "missing.doria",
+            "let $value = 1; let $f = fn() => $value;",
+            "E0642",
+        ),
+        (
+            "duplicate.doria",
+            "let $value = 1; let $f = fn() with ($value, $value) => $value;",
+            "E0643",
+        ),
+        (
+            "unused.doria",
+            "let $value = 1; let $f = fn() with ($value) => 1;",
+            "E0646",
+        ),
+        (
+            "writable.doria",
+            "let $value = 1; let $f = fn() with (writable $value) => $value;",
+            "E0645",
+        ),
+        ("this.doria", "let $f = fn() with ($this) => 1;", "E0644"),
+        ("recursive.doria", "let $f = fn() with ($f) => 1;", "E0647"),
+        (
+            "return.doria",
+            "function(): int $f = fn() => \"wrong\";",
+            "E0648",
+        ),
+        (
+            "nullable.doria",
+            "function invoke(?function(): int $f): void { $f(); }",
+            "E0650",
+        ),
+        (
+            "access.doria",
+            "function invoke(function writable(): int $f): void { $f(); }",
+            "E0651",
+        ),
+        (
+            "named.doria",
+            "class Worker { function(int): int $format; function __construct(function(int): int $format) { $this->format = $format; } } function invoke(Worker $worker): void { $worker->format(value: 1); }",
+            "E0652",
+        ),
+    ];
+
+    for (name, source, code) in cases {
+        assert_lsp_diagnostic_matches_compiler(name, source, code);
+        let diagnostics = diagnostics_for_document(&format!("file:///{name}"), source);
+        if code != "E0646" {
+            assert!(
+                diagnostics
+                    .iter()
+                    .all(|diagnostic| diagnostic["code"] != "E0641"),
+                "invalid source must not also receive E0641: {diagnostics:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn distinguishes_function_shape_and_checked_effect_mismatches() {
+    let shape = "function(int): int $f = fn(string $value) => 1;";
+    assert_lsp_diagnostic_matches_compiler("shape-mismatch.doria", shape, "E0648");
+    let shape_diagnostic = diagnostics_for_document("file:///shape-mismatch.doria", shape)
+        .into_iter()
+        .find(|diagnostic| diagnostic["code"] == "E0648")
+        .expect("function-shape mismatch");
+    assert!(shape_diagnostic["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("parameter 1")));
+
+    let effects = r#"class Failure implements Error { function __construct(string $message) {} }
+function(): void $f = function (): void { throw new Failure("later"); };"#;
+    assert_lsp_diagnostic_matches_compiler("effect-mismatch.doria", effects, "E0648");
+    let effect_diagnostic = diagnostics_for_document("file:///effect-mismatch.doria", effects)
+        .into_iter()
+        .find(|diagnostic| diagnostic["code"] == "E0648")
+        .expect("checked-effect mismatch");
+    assert!(effect_diagnostic["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("checked errors")));
+}
+
+#[test]
+fn exposes_only_safe_compiler_owned_capture_fixes_as_code_actions() {
+    let uri = "file:///capture-actions.doria";
+    let readonly = "let $value = 1; let $f = fn() => $value;";
+    let actions = code_actions_for_document(uri, readonly);
+    assert_eq!(actions.len(), 1, "{actions:#?}");
+    assert_eq!(actions[0]["title"], "Add Missing Closure Captures");
+    assert_eq!(
+        actions[0]["edit"]["changes"][uri][0]["newText"],
+        " with ($value)"
+    );
+
+    let extended =
+        "let $base = 1; let $minimum = 2; let $f = fn() with ($base) => $base + $minimum;";
+    let actions = code_actions_for_document(uri, extended);
+    assert_eq!(actions.len(), 1, "{actions:#?}");
+    assert_eq!(
+        actions[0]["edit"]["changes"][uri][0]["newText"],
+        ", $minimum"
+    );
+
+    let writable =
+        "let writable $total = 0; let $f = function (): int { $total += 1; return $total; };";
+    let actions = code_actions_for_document(uri, writable);
+    assert_eq!(actions.len(), 1, "{actions:#?}");
+    assert_eq!(
+        actions[0]["edit"]["changes"][uri][0]["newText"],
+        " with (writable $total)"
+    );
+
+    let unused = "let $value = 1; let $f = fn() with ($value) => 1;";
+    let actions = code_actions_for_document(uri, unused);
+    assert_eq!(actions.len(), 1, "{actions:#?}");
+    assert_eq!(actions[0]["edit"]["changes"][uri][0]["newText"], "");
+
+    let one_unused =
+        "let $used = 1; let $unused = 2; let $f = fn() with ($used, $unused) => $used;";
+    let actions = code_actions_for_document(uri, one_unused);
+    assert_eq!(actions.len(), 1, "{actions:#?}");
+    assert_eq!(actions[0]["title"], "Remove the Unused Capture Entry");
+    assert_eq!(actions[0]["edit"]["changes"][uri][0]["newText"], "");
+
+    let taking = r#"class Payload {}
+let $payload = new Payload();
+let $f = function (): Payload { return $payload; };"#;
+    let actions = code_actions_for_document(uri, taking);
+    assert!(
+        actions.iter().all(|action| {
+            !action["edit"]["changes"][uri]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|edit| {
+                    edit["newText"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("take"))
+                })
+        }),
+        "the server must not synthesize an ownership-transferring `take` fix: {actions:#?}"
+    );
+
+    let commented = "let $value = 1; let $f = fn() with (/* keep */ $value) => 1;";
+    assert!(
+        code_actions_for_document(uri, commented).is_empty(),
+        "comment-owning capture removal requires review"
+    );
 }
 
 #[test]
@@ -312,7 +459,7 @@ fn stage_30a_diagnostics_preserve_compiler_source_order_and_metadata() {
         .collect::<Vec<_>>();
 
     assert_eq!(lsp_codes, compiler_codes);
-    assert_eq!(lsp_codes, ["E0403", "E0641"]);
+    assert_eq!(lsp_codes, ["E0403", "E0641", "E0641"]);
     assert!(lsp.windows(2).all(|pair| {
         pair[0]["range"]["start"]["line"].as_u64() <= pair[1]["range"]["start"]["line"].as_u64()
     }));
@@ -325,14 +472,15 @@ fn stage_30a_diagnostics_preserve_compiler_source_order_and_metadata() {
 }
 
 #[test]
-fn closure_boundary_suppresses_body_cascades_and_stays_off_following_source() {
-    let source = "let $closure = fn(int $value) => $missing + $value; let $after = 1;";
-    assert_stage_30_closure_boundary("closure-body-boundary.doria", source);
+fn missing_capture_diagnostic_stays_off_following_source() {
+    let source =
+        "let $outside = 1; let $closure = fn(int $value) => $outside + $value; let $after = 1;";
+    assert_lsp_diagnostic_matches_compiler("closure-body-boundary.doria", source, "E0642");
 
     let diagnostic = diagnostics_for_document("file:///closure-body-boundary.doria", source)
         .into_iter()
-        .next()
-        .expect("closure boundary");
+        .find(|diagnostic| diagnostic["code"] == "E0642")
+        .expect("missing capture");
     let after = byte_offset_to_position(source, source.find("let $after").unwrap());
     assert!(
         diagnostic["range"]["end"]["character"].as_u64().unwrap() < after.character as u64,

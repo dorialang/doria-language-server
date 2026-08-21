@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use doriac::builtins::Builtin;
 use doriac::diagnostics::{
     prepare_diagnostics, Diagnostic, DiagnosticFix, DiagnosticSeverity, DiagnosticSource,
-    FixApplicability, LabelRole,
+    FixApplicability, FixEdit, LabelRole,
 };
 use doriac::lexer::{Token, TokenKind};
 use doriac::source::Span;
@@ -228,6 +228,7 @@ fn code_action_for_fix(
             .edits
             .iter()
             .any(|edit| !matches!(&edit.source, DiagnosticSource::Current))
+        || edits_overlap(&fix.edits)
     {
         return None;
     }
@@ -254,6 +255,17 @@ fn code_action_for_fix(
             "changes": changes,
         },
     }))
+}
+
+fn edits_overlap(edits: &[FixEdit]) -> bool {
+    let mut spans = edits.iter().map(|edit| edit.span).collect::<Vec<_>>();
+    spans.sort_by_key(|span| (span.start, span.end));
+    spans.windows(2).any(|pair| {
+        pair[1].start < pair[0].end
+            || (pair[0].start == pair[0].end
+                && pair[1].start == pair[1].end
+                && pair[0].start == pair[1].start)
+    })
 }
 
 impl Server {
@@ -833,15 +845,15 @@ fn completion_items() -> Value {
         match keyword {
             "fn" => {
                 item["detail"] = json!("Doria arrow-closure keyword");
-                item["documentation"] = json!("Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. Closure semantics and execution begin in Stage 30b.");
+                item["documentation"] = json!("Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. Stage 30b checks closure semantics; execution remains unavailable.");
             }
             "with" => {
                 item["detail"] = json!("Doria closure-capture keyword");
-                item["documentation"] = json!("Introduces an explicit closure capture list. A bare capture is readonly, `writable` takes an exclusive writable borrow, and `take` transfers ownership. Capture checking begins in Stage 30b.");
+                item["documentation"] = json!("Introduces an explicit closure capture list. A bare capture is readonly, `writable` requests exclusive writable access, and `take` transfers ownership. The compiler validates capture lists in Stage 30b.");
             }
             "once" => {
                 item["detail"] = json!("Doria function-type invocation modifier");
-                item["documentation"] = json!("Marks a structural function type as consuming and one-shot. Calling a value of this type consumes the function value. Closure invocation-mode inference lands in Stage 30b.");
+                item["documentation"] = json!("Marks a structural function type as consuming and one-shot. Calling a value of this type consumes the function value. Stage 30b infers closure invocation modes.");
             }
             _ if planned => {
                 item["documentation"] =
@@ -1365,13 +1377,13 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "Declares nominal conformance to a compiler-known contract such as `Displayable` or `Error`.",
         ),
         TokenKind::Function => Some(
-            "Declares a named function or method, an anonymous block closure, or a structural function type according to context. Function types preserve readonly, writable, or once invocation; parameter ownership; checked effects; and grouped nested type boundaries. Callable compatibility and closure execution land after Stage 30a.",
+            "Declares a named function or method, an anonymous block closure, or a structural function type according to context. Function types preserve readonly, writable, or once invocation; parameter ownership; and checked effects. Stage 30b checks callable compatibility; closure execution remains unavailable.",
         ),
         TokenKind::Fn => Some(
-            "Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. Closure semantics and execution begin in Stage 30b.",
+            "Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. Stage 30b checks closure semantics; execution remains unavailable.",
         ),
         TokenKind::With => Some(
-            "Introduces an explicit closure capture list. A bare capture is readonly, `writable` takes an exclusive writable borrow, and `take` transfers ownership. Capture checking begins in Stage 30b.",
+            "Introduces an explicit closure capture list. A bare capture is readonly, `writable` requests exclusive writable access, and `take` transfers ownership. The compiler validates capture lists in Stage 30b.",
         ),
         TokenKind::Let => Some("Declares a local binding with an inferred type."),
         TokenKind::Take => Some(
@@ -1381,7 +1393,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "Marks a binding, property, parameter, or method receiver as mutable. In a structural function type it may independently mark writable invocation or a writable parameter borrow.",
         ),
         TokenKind::Once => Some(
-            "Marks a structural function type as consuming and one-shot. Calling a value of this type consumes the function value. Closure invocation-mode inference lands in Stage 30b.",
+            "Marks a structural function type as consuming and one-shot. Calling a value of this type consumes the function value. Stage 30b infers closure invocation modes.",
         ),
         TokenKind::Internal => {
             Some("Marks a class member as hidden from the external object surface.")
@@ -1783,12 +1795,12 @@ mod tests {
     }
 
     #[test]
-    fn completion_and_hover_describe_the_accepted_closure_grammar_boundary() {
+    fn completion_and_hover_describe_stage_30b_semantics_and_execution_boundary() {
         let arrow = completion_item("fn");
         assert_eq!(arrow["detail"], "Doria arrow-closure keyword");
-        assert!(arrow["documentation"].as_str().is_some_and(
-            |text| text.contains("Closure semantics and execution begin in Stage 30b")
-        ));
+        assert!(arrow["documentation"]
+            .as_str()
+            .is_some_and(|text| text.contains("Stage 30b checks closure semantics")));
 
         let capture = completion_item("with");
         assert_eq!(capture["detail"], "Doria closure-capture keyword");
@@ -1802,22 +1814,45 @@ mod tests {
             .as_str()
             .is_some_and(|text| text.contains("consuming and one-shot")));
 
-        let source = "let $minimum = 70; let $f = fn(int $value) with ($minimum) => $value; function accept(function once(): int $callback): void {}";
-        for (needle, expected) in [
-            ("fn", "Declares an arrow closure"),
-            ("with", "Introduces an explicit closure capture list"),
-            ("function once", "structural function type"),
-            ("once", "consuming and one-shot"),
-        ] {
-            let offset = source.find(needle).expect("hover token");
-            let hover = hover_at_offset(source, offset).expect("closure syntax hover");
-            assert!(
-                hover["contents"]["value"]
-                    .as_str()
-                    .is_some_and(|text| text.contains(expected)),
-                "{needle}: {hover:#?}"
-            );
-        }
+        assert!(hover_description(&TokenKind::Fn)
+            .is_some_and(|text| text.contains("Stage 30b checks closure semantics")));
+        assert!(hover_description(&TokenKind::With)
+            .is_some_and(|text| text.contains("validates capture lists")));
+
+        let source = "let $minimum = 70; let $f = fn(int $value) with ($minimum) => $value; function accept(function once(): int $callback): void { $callback(); }";
+        let closure = hover_at_offset(source, source.find("fn(").unwrap()).expect("closure hover");
+        let closure_text = closure["contents"]["value"].as_str().unwrap();
+        assert!(closure_text.contains("function(int): int"));
+        assert!(closure_text.contains("Inferred invocation mode"));
+        assert!(closure_text.contains("Readonly $minimum"));
+        assert!(closure_text.contains("execution is not available"));
+        assert!(!closure_text.contains("BindingId"));
+        assert!(!closure_text.contains("ClosureId"));
+
+        let capture_offset = source.find("($minimum)").unwrap() + 1;
+        let capture = hover_at_offset(source, capture_offset).expect("capture occurrence hover");
+        assert!(capture["contents"]["value"]
+            .as_str()
+            .is_some_and(|text| text.contains("Readonly capture of `$minimum`")));
+
+        let function_type =
+            hover_at_offset(source, source.find("function once").expect("function type"))
+                .expect("semantic function-type hover");
+        assert!(function_type["contents"]["value"]
+            .as_str()
+            .is_some_and(|text| text.contains("function once(): int")));
+
+        let callback_binding = source.find("$callback").expect("function parameter");
+        let binding = hover_at_offset(source, callback_binding).expect("function binding hover");
+        assert!(binding["contents"]["value"]
+            .as_str()
+            .is_some_and(|text| text.contains("function once(): int $callback")));
+
+        let callback_use = source.rfind("$callback").expect("callable use") + "$callback".len() + 1;
+        let call = hover_at_offset(source, callback_use).expect("callable-value hover");
+        assert!(call["contents"]["value"]
+            .as_str()
+            .is_some_and(|text| text.contains("Semantically checked callable-value invocation")));
     }
 
     #[test]
@@ -2726,7 +2761,7 @@ function main(): void
         let mut line = 0_u64;
         let mut character = 0_u64;
         let mut found_prepared = false;
-        for token in data.chunks_exact(5) {
+        for token in data.as_chunks::<5>().0 {
             let delta_line = token[0].as_u64().unwrap();
             let delta_start = token[1].as_u64().unwrap();
             line += delta_line;
@@ -2847,6 +2882,25 @@ function main(): void
             diagnostic_to_lsp(uri, text, &cross_file)["data"]["fix"].is_null(),
             "the legacy single-edit field must not advertise part of a multi-file fix"
         );
+
+        let overlapping = Diagnostic::new("E0201", "overlapping fix", use_span)
+            .with_structured_fix(
+                "Overlapping Edits",
+                FixApplicability::MachineApplicable,
+                vec![
+                    FixEdit {
+                        source: DiagnosticSource::Current,
+                        span: Span::new(10, 14),
+                        replacement: "first".to_string(),
+                    },
+                    FixEdit {
+                        source: DiagnosticSource::Current,
+                        span: Span::new(12, 16),
+                        replacement: "second".to_string(),
+                    },
+                ],
+            );
+        assert!(code_action_for_fix(uri, text, &overlapping, &overlapping.fixes[0]).is_none());
     }
 
     #[test]
@@ -3045,7 +3099,7 @@ function main(): void
         let mut line = 0_u32;
         let mut character = 0_u32;
         let mut found_binding = false;
-        for token in data.chunks_exact(5) {
+        for token in data.as_chunks::<5>().0 {
             let delta_line = token[0].as_u64().unwrap() as u32;
             let delta_start = token[1].as_u64().unwrap() as u32;
             if delta_line == 0 {
@@ -3170,7 +3224,7 @@ function main(): void
         let mut line = 0_u32;
         let mut character = 0_u32;
         let mut found = false;
-        for token in data.chunks_exact(5) {
+        for token in data.as_chunks::<5>().0 {
             let delta_line = token[0].as_u64().unwrap() as u32;
             let delta_start = token[1].as_u64().unwrap() as u32;
             if delta_line == 0 {
@@ -3435,7 +3489,7 @@ function relay(take Failure $failure): void throws Failure
         let mut line = 0_u64;
         let mut character = 0_u64;
         let mut found_binding = false;
-        for token in data.chunks_exact(5) {
+        for token in data.as_chunks::<5>().0 {
             let delta_line = token[0].as_u64().unwrap();
             let delta_start = token[1].as_u64().unwrap();
             line += delta_line;

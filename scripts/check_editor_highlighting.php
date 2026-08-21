@@ -1620,9 +1620,9 @@ function check_fixture(): void
 function check_stage30a_callable_alignment(): void
 {
     global $cargoManifest, $readme, $vscodeGrammar, $intellijLexer, $intellijLexerTest;
-    global $lspServer, $lspTests, $fixture, $rejectedFixture;
+    global $lspAnalysis, $lspServer, $lspTests, $fixture, $rejectedFixture;
 
-    $compilerCommit = 'd85805241a7c14aa38f36479a1c59bf5a95a2a51';
+    $compilerCommit = 'a45f83f809e04c5a7998f52f1de57af7b605e458';
     require_check(
         preg_match(
             '/doriac\s*=\s*\{[^}]*\brev\s*=\s*"' . $compilerCommit . '"/',
@@ -1654,10 +1654,10 @@ function check_stage30a_callable_alignment(): void
         );
     }
     require_check(
-        str_contains($fixtureText, 'Stage 30a Closure Grammar') &&
-            str_contains($fixtureText, 'semantics begin in Stage 30b') &&
+        str_contains($fixtureText, 'Stage 30b Closure Semantics') &&
+            str_contains($fixtureText, 'execution remains unavailable') &&
             !str_contains($fixtureText, 'Planned/future: closure'),
-        'shared fixture must describe Stage 30a grammar as accepted without claiming execution',
+        'shared fixture must describe Stage 30b semantics without claiming execution',
     );
 
     $rejectedText = read_text($rejectedFixture);
@@ -1797,20 +1797,25 @@ function check_stage30a_callable_alignment(): void
         require_check(str_contains($lexerTestText, $test), "IntelliJ closure coverage is missing {$test}");
     }
 
-    $lspText = read_text($lspServer);
+    $lspText = read_text($lspAnalysis) . read_text($lspServer);
     $lspTestText = read_text($lspTests);
     require_check(
         str_contains($lspText, '"developmentOnly": diagnostic.development_only') &&
             str_contains($lspText, 'Doria arrow-closure keyword') &&
             str_contains($lspText, 'Doria closure-capture keyword') &&
-            str_contains($lspText, 'Doria function-type invocation modifier'),
-        'LSP must preserve development metadata and describe accepted Stage 30a grammar',
+            str_contains($lspText, 'Doria function-type invocation modifier') &&
+            str_contains($lspText, 'collect_semantic_hovers') &&
+            str_contains($lspText, 'Semantically checked callable-value invocation'),
+        'LSP must preserve compiler metadata and expose Stage 30b semantic hovers',
     );
     foreach ([
         'publishes_one_structured_boundary_for_every_accepted_closure_form',
-        'closure_boundary_suppresses_body_cascades_and_stays_off_following_source',
+        'missing_capture_diagnostic_stays_off_following_source',
         'malformed_capture_forms_remain_parser_diagnostics_not_stage_30_boundaries',
-        'publishes_the_compiler_owned_boundary_for_stage_30a_callable_grammar',
+        'type_only_function_syntax_has_no_execution_boundary',
+        'publishes_compiler_owned_stage_30b_diagnostics_without_redundant_boundaries',
+        'distinguishes_function_shape_and_checked_effect_mismatches',
+        'exposes_only_safe_compiler_owned_capture_fixes_as_code_actions',
         'malformed_stage_30a_forms_remain_parser_diagnostics',
         'stage_30a_does_not_change_named_function_method_or_static_calls',
         'unsupportedDevelopmentSurface',
@@ -1821,11 +1826,11 @@ function check_stage30a_callable_alignment(): void
 
     $readmeText = read_text($readme);
     require_check(
-        str_contains($readmeText, 'Stage 30a callable grammar') &&
+        str_contains($readmeText, 'Stage 30b semantic function types and capture checking are implemented') &&
             str_contains($readmeText, 'E0641') &&
-            str_contains($readmeText, 'Stage 30b semantic function types and') &&
-            str_contains($readmeText, 'does not implement'),
-        'README must state Stage 30a completion and the pending Stage 30b semantic boundary',
+            str_contains($readmeText, 'Stage 30c ownership and lifetime enforcement is next') &&
+            str_contains($readmeText, 'no closure execution'),
+        'README must state Stage 30b completion and the execution-only boundary',
     );
 }
 
