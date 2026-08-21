@@ -1622,7 +1622,7 @@ function check_stage30a_callable_alignment(): void
     global $cargoManifest, $readme, $vscodeGrammar, $intellijLexer, $intellijLexerTest;
     global $lspAnalysis, $lspServer, $lspTests, $fixture, $rejectedFixture;
 
-    $compilerCommit = 'a45f83f809e04c5a7998f52f1de57af7b605e458';
+    $compilerCommit = '96d5ae822601d404a6f3999aa9b94bb9d585510d';
     require_check(
         preg_match(
             '/doriac\s*=\s*\{[^}]*\brev\s*=\s*"' . $compilerCommit . '"/',

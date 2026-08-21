@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 use doriac::ast::{
@@ -21,6 +22,38 @@ use crate::string_surface::{string_companion_method, string_property};
 pub(crate) struct SemanticHover {
     pub(crate) span: Span,
     pub(crate) markdown: String,
+    priority: SemanticHoverPriority,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SemanticHoverPriority {
+    General,
+    Capture,
+}
+
+impl SemanticHover {
+    fn new(span: Span, markdown: String) -> Self {
+        Self {
+            span,
+            markdown,
+            priority: SemanticHoverPriority::General,
+        }
+    }
+
+    fn capture(span: Span, markdown: String) -> Self {
+        Self {
+            span,
+            markdown,
+            priority: SemanticHoverPriority::Capture,
+        }
+    }
+
+    fn selection_key(&self) -> (usize, Reverse<SemanticHoverPriority>) {
+        (
+            self.span.end.saturating_sub(self.span.start),
+            Reverse(self.priority),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -213,16 +246,13 @@ impl AnalysisSnapshot {
                     markdown.push_str("\n\n");
                     markdown.push_str(documentation);
                 }
-                Some(SemanticHover {
-                    span: occurrence.span,
-                    markdown,
-                })
+                Some(SemanticHover::new(occurrence.span, markdown))
             });
         let semantic_hover = self
             .semantic_hovers
             .iter()
             .filter(|hover| span_contains(hover.span, offset))
-            .min_by_key(|hover| hover.span.end.saturating_sub(hover.span.start))
+            .min_by_key(|hover| hover.selection_key())
             .cloned();
 
         match (occurrence_hover, semantic_hover) {
@@ -594,16 +624,16 @@ impl<'a> SnapshotBuilder<'a> {
         let mut function_types = info.function_types_by_span.iter().collect::<Vec<_>>();
         function_types.sort_by_key(|(span, _)| **span);
         for ((start, end), semantic) in function_types {
-            hovers.push(SemanticHover {
-                span: Span::new(*start, *end),
-                markdown: format!(
+            hovers.push(SemanticHover::new(
+                Span::new(*start, *end),
+                format!(
                     "```doria\n{}\n```\n\nCanonical semantic function type.",
                     display_function_type_with_effects(
                         &semantic.ty,
                         &semantic.authored_checked_effects,
                     )
                 ),
-            });
+            ));
         }
 
         let mut bindings = info
@@ -623,10 +653,7 @@ impl<'a> SnapshotBuilder<'a> {
                 "```doria\n{} {name}\n```\n\nSemantically resolved function-typed binding.",
                 display_resolved_type(ty),
             );
-            hovers.push(SemanticHover {
-                span: declaration_span,
-                markdown: markdown.clone(),
-            });
+            hovers.push(SemanticHover::new(declaration_span, markdown.clone()));
             let mut use_spans = info
                 .binding_resolution
                 .uses_by_span
@@ -636,10 +663,11 @@ impl<'a> SnapshotBuilder<'a> {
                 })
                 .collect::<Vec<_>>();
             use_spans.sort_by_key(|span| (span.start, span.end));
-            hovers.extend(use_spans.into_iter().map(|span| SemanticHover {
-                span,
-                markdown: markdown.clone(),
-            }));
+            hovers.extend(
+                use_spans
+                    .into_iter()
+                    .map(|span| SemanticHover::new(span, markdown.clone())),
+            );
         }
 
         let mut closures = info.closures.values().collect::<Vec<_>>();
@@ -675,13 +703,13 @@ impl<'a> SnapshotBuilder<'a> {
                     .collect::<Vec<_>>()
                     .join(", ")
             };
-            hovers.push(SemanticHover {
-                span: Span::new(closure.closure_id.start, closure.closure_id.end),
-                markdown: format!(
+            hovers.push(SemanticHover::new(
+                Span::new(closure.closure_id.start, closure.closure_id.end),
+                format!(
                     "```doria\n{signature}\n```\n\n**Inferred invocation mode:** `{}`\n\n**Inferred checked effects:** {effects}\n\n**Captures:** {captures}\n\nClosure execution is not available in Stage 30b.",
                     invocation_mode_name(closure.inferred_invocation_mode),
                 ),
-            });
+            ));
 
             for capture in &closure.captures {
                 let name = binding_source_name(info, capture.source_binding_id);
@@ -691,28 +719,30 @@ impl<'a> SnapshotBuilder<'a> {
                     name,
                     capture_mode_name(capture.mode),
                 );
-                hovers.push(SemanticHover {
-                    span: capture.declaration_span,
-                    markdown: markdown.clone(),
-                });
-                hovers.extend(capture.use_spans.iter().map(|span| SemanticHover {
-                    span: *span,
-                    markdown: markdown.clone(),
-                }));
+                hovers.push(SemanticHover::capture(
+                    capture.declaration_span,
+                    markdown.clone(),
+                ));
+                hovers.extend(
+                    capture
+                        .use_spans
+                        .iter()
+                        .map(|span| SemanticHover::capture(*span, markdown.clone())),
+                );
             }
         }
 
         let mut callable_calls = info.callable_value_calls.iter().collect::<Vec<_>>();
         callable_calls.sort_by_key(|(span, _)| **span);
         for ((start, end), call) in callable_calls {
-            hovers.push(SemanticHover {
-                span: Span::new(*start, *end),
-                markdown: format!(
+            hovers.push(SemanticHover::new(
+                Span::new(*start, *end),
+                format!(
                     "```doria\n{}\n```\n\nSemantically checked callable-value invocation returning `{}`. Execution is not available in Stage 30b.",
                     display_function_type_with_effects(&call.function_type, &call.checked_effects),
                     display_resolved_type(&call.return_type),
                 ),
-            });
+            ));
         }
 
         self.semantic_hovers.extend(hovers);
@@ -4556,6 +4586,39 @@ function handle(): void { try { fail(); } catch (Failure $caught) { echo $caught
             .expect("main declaration hover");
         assert!(hover.markdown.contains("function main(): void"));
         assert!(!hover.markdown.contains("throws"));
+    }
+
+    #[test]
+    fn capture_metadata_wins_ties_with_function_typed_binding_hovers() {
+        let source = r#"let $callback = fn() => 1;
+let $wrapper = fn() with ($callback) => $callback();
+"#;
+        let snapshot = AnalysisSnapshot::analyze("capture-hover.doria", source);
+        assert!(
+            snapshot
+                .diagnostics()
+                .iter()
+                .all(|diagnostic| diagnostic.code == "E0641"),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+
+        let declaration_offset = source.find("($callback)").expect("capture declaration") + 1;
+        let declaration = snapshot
+            .hover_at_offset(declaration_offset)
+            .expect("capture declaration hover");
+        assert!(declaration
+            .markdown
+            .contains("Readonly capture of `$callback`"));
+        assert!(!declaration
+            .markdown
+            .contains("Semantically resolved function-typed binding"));
+
+        let use_offset = source.rfind("$callback").expect("captured use");
+        let usage = snapshot
+            .hover_at_offset(use_offset)
+            .expect("captured use hover");
+        assert!(usage.markdown.contains("Readonly capture of `$callback`"));
     }
 
     #[test]
