@@ -472,6 +472,13 @@ function check_vscode_language_server_packaging(): void
         'VS Code packaging must build, bundle, and platform-target doria-lsp'
     );
     require_check(
+        str_contains(
+            $builder,
+            "seed_local_runner_lock(\$root . '/Cargo.lock', \$runner . '/Cargo.lock')"
+        ) && str_contains($builder, 'function seed_local_runner_lock('),
+        'local compiler builds must reseed the disposable runner from the canonical Cargo lockfile'
+    );
+    require_check(
         str_contains($extension, 'registerDebugConfigurationProvider')
             && str_contains($extension, 'registerDebugAdapterDescriptorFactory')
             && str_contains($extension, 'resolveBatonPath')
@@ -1622,7 +1629,7 @@ function check_stage30a_callable_alignment(): void
     global $cargoManifest, $readme, $vscodeGrammar, $intellijLexer, $intellijLexerTest;
     global $lspAnalysis, $lspServer, $lspTests, $fixture, $rejectedFixture;
 
-    $compilerCommit = '9fc46724dcd51ec643fd79fdef58feb75c0ae1f7';
+    $compilerCommit = '94da7f904802c6e222537e50c56e5a5c354acaa7';
     require_check(
         preg_match(
             '/doriac\s*=\s*\{[^}]*\brev\s*=\s*"' . $compilerCommit . '"/',
@@ -1654,10 +1661,10 @@ function check_stage30a_callable_alignment(): void
         );
     }
     require_check(
-        str_contains($fixtureText, 'Stage 30c Ownership And Escape') &&
-            str_contains($fixtureText, 'Stage 30d execution remains unavailable') &&
+        str_contains($fixtureText, 'Stage 30d Closure HIR/MIR And Interpreter Oracle') &&
+            str_contains($fixtureText, 'executable in the debug target') &&
             !str_contains($fixtureText, 'Planned/future: closure'),
-        'shared fixture must describe Stage 30c ownership without claiming execution',
+        'shared fixture must describe Stage 30d debug execution without claiming native or PHP execution',
     );
 
     $rejectedText = read_text($rejectedFixture);
@@ -1807,11 +1814,16 @@ function check_stage30a_callable_alignment(): void
             str_contains($lspText, 'collect_semantic_hovers') &&
             str_contains($lspText, 'Semantically checked callable-value invocation') &&
             str_contains($lspText, 'ClosureValueProvenance') &&
-            str_contains($lspText, 'ClosureEscapeClassification'),
-        'LSP must preserve compiler metadata and expose Stage 30c ownership hovers',
+            str_contains($lspText, 'ClosureEscapeClassification') &&
+            str_contains($lspText, 'Debug Interpreter Supports Closure Execution') &&
+            str_contains($lspText, 'Closure Execution Lands In Stage 30e') &&
+            str_contains($lspText, 'Closure Lowering Lands In Stage 30f') &&
+            !str_contains($lspText, 'Stage 30b checks') &&
+            !str_contains($lspText, 'Stage 30b infers'),
+        'LSP must preserve compiler metadata and expose current closure target capabilities without stale stage claims',
     );
     foreach ([
-        'publishes_one_structured_boundary_for_every_accepted_closure_form',
+        'valid_stage_30d_closure_documents_are_target_neutral',
         'missing_capture_diagnostic_stays_off_following_source',
         'malformed_capture_forms_remain_parser_diagnostics_not_stage_30_boundaries',
         'type_only_function_syntax_has_no_execution_boundary',
@@ -1824,7 +1836,7 @@ function check_stage30a_callable_alignment(): void
         'closure_hovers_distinguish_callback_and_return_escape_contracts',
         'malformed_stage_30a_forms_remain_parser_diagnostics',
         'stage_30a_does_not_change_named_function_method_or_static_calls',
-        'unsupportedDevelopmentSurface',
+        'stage_30_diagnostics_preserve_compiler_source_order_without_redundant_e0641',
         'developmentOnly',
     ] as $coverage) {
         require_check(
@@ -1835,11 +1847,11 @@ function check_stage30a_callable_alignment(): void
 
     $readmeText = read_text($readme);
     require_check(
-        str_contains($readmeText, 'Stage 30c ownership, lifetime, and escape checking is implemented') &&
+        str_contains($readmeText, 'Stage 30d closure-aware HIR, MIR, and debug-interpreter execution are implemented') &&
             str_contains($readmeText, 'E0641') &&
-            str_contains($readmeText, 'Stage 30d closure HIR/MIR') &&
-            str_contains($readmeText, 'no closure execution'),
-        'README must state Stage 30c completion and the Stage 30d execution-only boundary',
+            str_contains($readmeText, 'Stage 30e') &&
+            str_contains($readmeText, 'Stage 30f'),
+        'README must state Stage 30d debug execution and the native/PHP target boundaries',
     );
 }
 

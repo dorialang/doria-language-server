@@ -78,49 +78,13 @@ fn assert_lsp_diagnostic_matches_compiler(name: &str, source: &str, code: &str) 
     assert_eq!(lsp_related, compiler_related);
 }
 
-fn assert_stage_30_closure_boundary(name: &str, source: &str) {
+fn assert_stage_30d_closure_is_valid(name: &str, source: &str) {
     doriac::parse_source(name, source).expect("accepted closure grammar must parse");
-    let compiler_diagnostics =
-        doriac::check_source(name, source).expect_err("closure semantics remain a boundary");
-    assert_eq!(
-        compiler_diagnostics.len(),
-        1,
-        "compiler diagnostic cascade for {name}: {compiler_diagnostics:#?}"
-    );
-    let compiler_diagnostic = &compiler_diagnostics[0];
-    assert_eq!(compiler_diagnostic.code, "E0641");
-    let compiler_span = compiler_diagnostic
-        .labels
-        .iter()
-        .find(|label| label.role == LabelRole::Primary)
-        .map_or(compiler_diagnostic.span, |label| label.span);
-
+    doriac::check_source(name, source)
+        .unwrap_or_else(|diagnostics| panic!("valid Stage 30d source: {diagnostics:#?}"));
     let uri = format!("file:///{name}");
     let diagnostics = diagnostics_for_document(&uri, source);
-    assert_eq!(
-        diagnostics.len(),
-        1,
-        "LSP diagnostic cascade for {name}: {diagnostics:#?}"
-    );
-    let diagnostic = &diagnostics[0];
-    assert_eq!(diagnostic["code"], "E0641");
-    assert_eq!(diagnostic["data"]["kind"], "unsupportedDevelopmentSurface");
-    assert_eq!(diagnostic["data"]["developmentOnly"], true);
-    assert!(diagnostic["message"]
-        .as_str()
-        .is_some_and(|message| message.starts_with("Closure Execution Is Not Yet Available")));
-    let expected_start = byte_offset_to_position(source, compiler_span.start);
-    let expected_end = byte_offset_to_position(source, compiler_span.end);
-    assert_eq!(diagnostic["range"]["start"]["line"], expected_start.line);
-    assert_eq!(
-        diagnostic["range"]["start"]["character"],
-        expected_start.character
-    );
-    assert_eq!(diagnostic["range"]["end"]["line"], expected_end.line);
-    assert_eq!(
-        diagnostic["range"]["end"]["character"],
-        expected_end.character
-    );
+    assert!(diagnostics.is_empty(), "{name}: {diagnostics:#?}");
 }
 
 #[test]
@@ -176,28 +140,36 @@ $count = 1;
 }
 
 #[test]
-fn publishes_one_structured_boundary_for_every_accepted_closure_form() {
+fn valid_stage_30d_closure_documents_are_target_neutral() {
     let cases = [
         (
-            "arrow.doria",
-            "let $double = fn(int $value) => $value * 2; let $after = 1;",
+            "no-capture.doria",
+            "function main(): void { let $double = fn(int $value) => $value * 2; int $result = $double(21); }",
         ),
         (
-            "readonly-capture.doria",
-            "let $minimum = 70; let $passes = fn(int $score) with ($minimum) => $score >= $minimum;",
+            "capture.doria",
+            "function main(): void { let $minimum = 70; let $passes = fn(int $score) with ($minimum) => $score >= $minimum; bool $result = $passes(70); }",
         ),
         (
-            "block.doria",
-            "let $positive = function (int $value): bool { return $value > 0; };",
+            "callable-value.doria",
+            "function main(): void { let $identity = fn(int $value) => $value; int $result = $identity(42); }",
         ),
         (
-            "block-capture.doria",
-            "let $minimum = 70; let $passes = function (int $score): bool with ($minimum) { return $score >= $minimum; };",
+            "callable-property.doria",
+            "class Runner { writable function(int): int $callback = fn(int $value) => $value; function run(int $value): int { return $this->callback($value); } } function main(): void { let $runner = new Runner(); int $result = $runner->run(42); }",
+        ),
+        (
+            "checked-callable.doria",
+            "class Failure implements Error { function __construct(string $message) {} } function main(): void { let $fail = function (): int { throw new Failure(\"x\"); }; try { $fail(); } catch (Failure $error) {} }",
+        ),
+        (
+            "function-property.doria",
+            "class Runner { function(int): int $callback = fn(int $value) => $value + 1; } function main(): void { let $runner = new Runner(); int $result = $runner->callback(41); }",
         ),
     ];
 
     for (name, source) in cases {
-        assert_stage_30_closure_boundary(name, source);
+        assert_stage_30d_closure_is_valid(name, source);
     }
 }
 
@@ -412,8 +384,8 @@ fn publishes_the_complete_stage_30c_ownership_diagnostic_surface() {
         }
     }
 
-    assert_stage_30_closure_boundary(
-        "stage30d-boundary.doria",
+    assert_stage_30d_closure_is_valid(
+        "stage30d-valid.doria",
         "function main(): void { let $callback = fn() => 1; }",
     );
 }
@@ -716,7 +688,7 @@ fn malformed_stage_30a_forms_remain_parser_diagnostics() {
 }
 
 #[test]
-fn stage_30a_diagnostics_preserve_compiler_source_order_and_metadata() {
+fn stage_30_diagnostics_preserve_compiler_source_order_without_redundant_e0641() {
     let source = r#"function main(): void
 {
     int $bad = "not an integer";
@@ -724,7 +696,7 @@ fn stage_30a_diagnostics_preserve_compiler_source_order_and_metadata() {
     $callback(1);
 }"#;
     let compiler = doriac::check_source("stage30a-order.doria", source)
-        .expect_err("fixture must report the permanent error and Stage 30 boundary");
+        .expect_err("fixture must report the permanent type error");
     let lsp = diagnostics_for_document("file:///stage30a-order.doria", source);
     let compiler_codes = compiler
         .iter()
@@ -736,16 +708,11 @@ fn stage_30a_diagnostics_preserve_compiler_source_order_and_metadata() {
         .collect::<Vec<_>>();
 
     assert_eq!(lsp_codes, compiler_codes);
-    assert_eq!(lsp_codes, ["E0403", "E0641", "E0641"]);
+    assert_eq!(lsp_codes, ["E0403"]);
     assert!(lsp.windows(2).all(|pair| {
         pair[0]["range"]["start"]["line"].as_u64() <= pair[1]["range"]["start"]["line"].as_u64()
     }));
-    let boundary = lsp
-        .iter()
-        .find(|diagnostic| diagnostic["code"] == "E0641")
-        .expect("Stage 30 boundary");
-    assert_eq!(boundary["data"]["kind"], "unsupportedDevelopmentSurface");
-    assert_eq!(boundary["data"]["developmentOnly"], true);
+    assert!(lsp.iter().all(|diagnostic| diagnostic["code"] != "E0641"));
 }
 
 #[test]

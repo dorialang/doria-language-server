@@ -41,13 +41,17 @@ on source function types. The server does not rediscover free variables, infer
 captures, or calculate lifetimes from text.
 
 The compiler publishes precise capture and callable diagnostics with safe capture
-fixes. `E0641` is now limited to otherwise valid closure or callable execution;
-type-only function syntax does not receive it, and invalid closures receive their
-specific semantic diagnostic without a redundant execution boundary. Stage 30c
-capture acquisition, ownership, lifetimes, and escape checking are implemented.
-Stage 30d HIR, MIR, runtime, and backend closure execution remain unavailable.
+fixes. Ordinary language-server analysis is target-neutral, so valid closures and
+type-only function syntax do not receive `E0641`; invalid closures receive their
+specific semantic diagnostic without a redundant execution boundary. Stage 30d
+closure-aware HIR, MIR, and debug-interpreter execution are implemented. Semantic
+closure hovers describe target capabilities: the debug interpreter supports closure
+execution, native execution lands in Stage 30e, and PHP lowering lands in Stage 30f.
+This wording does not claim that a semantically invalid closure is executable. Target-specific
+`E0641` is emitted by explicit compiler requests for native or PHP output, not by
+editor analysis.
 
-Ownership hover text stays in Doria vocabulary: Owned or Borrow-bound closure,
+Ownership hover text stays in Doria vocabulary: Owned Closure or Borrow-Bound Closure,
 Readonly/Writable/Owned taking capture, Readonly/Writable Repeatable or Consumes On
 Invocation, Nonescaping or Owned callback, and returned closures tied to a parameter
 or `$this`. Compiler-private binding IDs, closure coordinates, pass slots, future

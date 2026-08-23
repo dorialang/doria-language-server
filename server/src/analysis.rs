@@ -762,8 +762,9 @@ impl<'a> SnapshotBuilder<'a> {
             hovers.push(SemanticHover::new(
                 Span::new(closure.closure_id.start, closure.closure_id.end),
                 format!(
-                    "```doria\n{signature}\n```\n\n**Inferred invocation mode:** `{}`\n\n**Inferred checked effects:** {effects}\n\n**Ownership:** {ownership_summary}\n\n**Invocation:** {invocation}\n\n**Escape:** {escape}\n\n**Captures:** {captures}\n\nClosure execution remains behind the Stage 30d HIR/MIR/runtime boundary.",
+                    "```doria\n{signature}\n```\n\n**Inferred invocation mode:** `{}`\n\n**Inferred checked effects:** {effects}\n\n**Ownership:** {ownership_summary}\n\n**Invocation:** {invocation}\n\n**Escape:** {escape}\n\n**Captures:** {captures}\n\n{}",
                     invocation_mode_name(closure.inferred_invocation_mode),
+                    closure_target_capabilities(),
                 ),
             ));
 
@@ -801,9 +802,10 @@ impl<'a> SnapshotBuilder<'a> {
             hovers.push(SemanticHover::new(
                 Span::new(*start, *end),
                 format!(
-                    "```doria\n{}\n```\n\nSemantically checked callable-value invocation returning `{}`. Execution remains behind the Stage 30d HIR/MIR/runtime boundary.",
+                    "```doria\n{}\n```\n\nSemantically checked callable-value invocation returning `{}`.\n\n{}",
                     display_function_type_with_effects(&call.function_type, &call.checked_effects),
                     display_resolved_type(&call.return_type),
+                    closure_target_capabilities(),
                 ),
             ));
         }
@@ -2836,6 +2838,10 @@ fn display_function_type_with_effects(ty: &ResolvedType, effects: &[ResolvedType
     display_resolved_type(&source_ordered)
 }
 
+fn closure_target_capabilities() -> &'static str {
+    "**Debug target capability:** Debug Interpreter Supports Closure Execution\n\n**Native target capability:** Closure Execution Lands In Stage 30e\n\n**PHP target capability:** Closure Lowering Lands In Stage 30f"
+}
+
 fn invocation_mode_name(mode: FunctionInvocationMode) -> &'static str {
     match mode {
         FunctionInvocationMode::Readonly => "readonly",
@@ -2871,13 +2877,13 @@ fn closure_invocation_summary(
 
 fn closure_provenance_summary(info: &SemanticInfo, provenance: &ClosureValueProvenance) -> String {
     match provenance {
-        ClosureValueProvenance::Owned => "Owned closure".to_string(),
+        ClosureValueProvenance::Owned => "Owned Closure".to_string(),
         ClosureValueProvenance::BorrowBound(roots) => {
             let roots = closure_root_names(info, roots);
             if roots.is_empty() {
-                "Borrow-bound closure".to_string()
+                "Borrow-Bound Closure".to_string()
             } else {
-                format!("Borrow-bound closure tied to {}", roots.join(", "))
+                format!("Borrow-Bound Closure tied to {}", roots.join(", "))
             }
         }
     }
@@ -4726,10 +4732,7 @@ let $wrapper = fn() with ($callback) => $callback();
 "#;
         let snapshot = AnalysisSnapshot::analyze("capture-hover.doria", source);
         assert!(
-            snapshot
-                .diagnostics()
-                .iter()
-                .all(|diagnostic| diagnostic.code == "E0641"),
+            snapshot.diagnostics().is_empty(),
             "{:#?}",
             snapshot.diagnostics()
         );
@@ -4779,13 +4782,15 @@ function main(): void
             )
             .expect("repeatable closure hover");
         for expected in [
-            "Borrow-bound closure",
+            "Borrow-Bound Closure",
             "Readonly capture of `$read`",
             "Writable capture of `$write`",
             "Owned taking capture of `$copy`",
             "Writable Repeatable",
             "Nonescaping",
-            "Stage 30d HIR/MIR/runtime boundary",
+            "Debug Interpreter Supports Closure Execution",
+            "Closure Execution Lands In Stage 30e",
+            "Closure Lowering Lands In Stage 30f",
         ] {
             assert!(
                 operation.markdown.contains(expected),
@@ -4797,7 +4802,7 @@ function main(): void
         let once = snapshot
             .hover_at_offset(source.rfind("function (): Payload").expect("once closure"))
             .expect("once closure hover");
-        assert!(once.markdown.contains("Owned closure"));
+        assert!(once.markdown.contains("Owned Closure"));
         assert!(once.markdown.contains("Owned taking capture of `$payload`"));
         assert!(once.markdown.contains("Consumes On Invocation"));
 

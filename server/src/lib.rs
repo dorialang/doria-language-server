@@ -845,15 +845,15 @@ fn completion_items() -> Value {
         match keyword {
             "fn" => {
                 item["detail"] = json!("Doria arrow-closure keyword");
-                item["documentation"] = json!("Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. Stage 30b checks closure semantics; execution remains unavailable.");
+                item["documentation"] = json!("Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. The compiler checks closure signatures, captures, ownership, invocation mode, checked effects, and escape. Closure execution is available through the explicit debug interpreter; native execution lands in Stage 30e and PHP compatibility lands in Stage 30f.");
             }
             "with" => {
                 item["detail"] = json!("Doria closure-capture keyword");
-                item["documentation"] = json!("Introduces an explicit closure capture list. A bare capture is readonly, `writable` requests exclusive writable access, and `take` transfers ownership. The compiler validates capture lists in Stage 30b.");
+                item["documentation"] = json!("Introduces an explicit closure capture list. A bare capture is readonly, `writable` requests exclusive writable access, and `take` transfers ownership. The compiler validates capture names, modes, ownership, lifetimes, and escape.");
             }
             "once" => {
                 item["detail"] = json!("Doria function-type invocation modifier");
-                item["documentation"] = json!("Marks a structural function type as consuming and one-shot. Calling a value of this type consumes the function value. Stage 30b infers closure invocation modes.");
+                item["documentation"] = json!("Marks a structural function type as consuming and one-shot. Calling a value of this type consumes the function value. The compiler infers and enforces closure invocation modes.");
             }
             _ if planned => {
                 item["documentation"] =
@@ -1377,13 +1377,13 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "Declares nominal conformance to a compiler-known contract such as `Displayable` or `Error`.",
         ),
         TokenKind::Function => Some(
-            "Declares a named function or method, an anonymous block closure, or a structural function type according to context. Function types preserve readonly, writable, or once invocation; parameter ownership; and checked effects. Stage 30b checks callable compatibility; closure execution remains unavailable.",
+            "Declares a named function or method, an anonymous block closure, or a structural function type according to context. Function types preserve readonly, writable, or once invocation; parameter ownership; and checked effects. The compiler checks structural callable compatibility. Closure execution is available through the explicit debug interpreter; native execution lands in Stage 30e and PHP compatibility lands in Stage 30f.",
         ),
         TokenKind::Fn => Some(
-            "Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. Stage 30b checks closure semantics; execution remains unavailable.",
+            "Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. The compiler checks closure signatures, captures, ownership, invocation mode, checked effects, and escape. Closure execution is available through the explicit debug interpreter; native execution lands in Stage 30e and PHP compatibility lands in Stage 30f.",
         ),
         TokenKind::With => Some(
-            "Introduces an explicit closure capture list. A bare capture is readonly, `writable` requests exclusive writable access, and `take` transfers ownership. The compiler validates capture lists in Stage 30b.",
+            "Introduces an explicit closure capture list. A bare capture is readonly, `writable` requests exclusive writable access, and `take` transfers ownership. The compiler validates capture names, modes, ownership, lifetimes, and escape.",
         ),
         TokenKind::Let => Some("Declares a local binding with an inferred type."),
         TokenKind::Take => Some(
@@ -1393,7 +1393,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "Marks a binding, property, parameter, or method receiver as mutable. In a structural function type it may independently mark writable invocation or a writable parameter borrow.",
         ),
         TokenKind::Once => Some(
-            "Marks a structural function type as consuming and one-shot. Calling a value of this type consumes the function value. Stage 30b infers closure invocation modes.",
+            "Marks a structural function type as consuming and one-shot. Calling a value of this type consumes the function value. The compiler infers and enforces closure invocation modes.",
         ),
         TokenKind::Internal => {
             Some("Marks a class member as hidden from the external object surface.")
@@ -1795,12 +1795,15 @@ mod tests {
     }
 
     #[test]
-    fn completion_and_hover_describe_stage_30b_semantics_and_execution_boundary() {
+    fn completion_and_hover_describe_current_closure_behavior_and_target_capabilities() {
         let arrow = completion_item("fn");
         assert_eq!(arrow["detail"], "Doria arrow-closure keyword");
         assert!(arrow["documentation"]
             .as_str()
-            .is_some_and(|text| text.contains("Stage 30b checks closure semantics")));
+            .is_some_and(|text| text.contains("The compiler checks closure signatures")));
+        assert!(arrow["documentation"]
+            .as_str()
+            .is_some_and(|text| text.contains("debug interpreter")));
 
         let capture = completion_item("with");
         assert_eq!(capture["detail"], "Doria closure-capture keyword");
@@ -1815,9 +1818,11 @@ mod tests {
             .is_some_and(|text| text.contains("consuming and one-shot")));
 
         assert!(hover_description(&TokenKind::Fn)
-            .is_some_and(|text| text.contains("Stage 30b checks closure semantics")));
-        assert!(hover_description(&TokenKind::With)
-            .is_some_and(|text| text.contains("validates capture lists")));
+            .is_some_and(|text| text.contains("The compiler checks closure signatures")));
+        assert!(hover_description(&TokenKind::Fn)
+            .is_some_and(|text| text.contains("native execution lands in Stage 30e")));
+        assert!(hover_description(&TokenKind::With).is_some_and(|text| text
+            .contains("validates capture names, modes, ownership, lifetimes, and escape")));
 
         let source = "let $minimum = 70; let $f = fn(int $value) with ($minimum) => $value; function accept(function once(): int $callback): void { $callback(); }";
         let closure = hover_at_offset(source, source.find("fn(").unwrap()).expect("closure hover");
@@ -1825,7 +1830,9 @@ mod tests {
         assert!(closure_text.contains("function(int): int"));
         assert!(closure_text.contains("Inferred invocation mode"));
         assert!(closure_text.contains("Readonly capture of `$minimum`"));
-        assert!(closure_text.contains("Stage 30d HIR/MIR/runtime boundary"));
+        assert!(closure_text.contains("Debug Interpreter Supports Closure Execution"));
+        assert!(closure_text.contains("Closure Execution Lands In Stage 30e"));
+        assert!(closure_text.contains("Closure Lowering Lands In Stage 30f"));
         assert!(!closure_text.contains("BindingId"));
         assert!(!closure_text.contains("ClosureId"));
 
