@@ -2,16 +2,21 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 use doriac::ast::{
-    Block, ClassDecl, ClassMember, ClosureCaptureMode, ControlFlowFinally, DoWhileStmt, ElseBranch,
-    EnumDecl, Expr, ForIncrement, ForInitializer, FunctionDecl, GivenPrelude, IfStmt, Item,
-    MatchMode, MatchOrigin, MatchPattern, MemberAccess, Param, Program, StaticQualifier, Stmt,
-    TryStmt, VarDecl, WhenExpression, WhileStmt,
+    Block, ClassDecl, ClassMember, ControlFlowFinally, DoWhileStmt, ElseBranch, EnumDecl, Expr,
+    ForIncrement, ForInitializer, FunctionDecl, GivenPrelude, IfStmt, Item, MatchMode, MatchOrigin,
+    MatchPattern, MemberAccess, Param, Program, StaticQualifier, Stmt, TryStmt, VarDecl,
+    WhenExpression, WhileStmt,
 };
 use doriac::diagnostics::Diagnostic;
 use doriac::enums::{EnumBackingType, EnumBackingValue};
 use doriac::lexer::{Token, TokenKind};
+use doriac::ownership::{
+    CaptureAcquisitionKind, ClosureBorrowRoot, ClosureEscapeClassification, ClosureValueProvenance,
+    InvocationConsumption,
+};
 use doriac::semantics::{CallableTarget, EnumSemanticInfo, SemanticInfo};
 use doriac::source::Span;
+use doriac::symbols::{BindingKind, BindingOwnership};
 use doriac::types::{
     FunctionInvocationMode, ResolvedType, SharedHandleKind, TypeRef, TypeRegistry,
 };
@@ -643,17 +648,46 @@ impl<'a> SnapshotBuilder<'a> {
             .filter_map(|declaration| {
                 let span = declaration.span?;
                 let ty = declaration.source_type.as_ref()?;
-                matches!(ty, ResolvedType::Function(_)).then_some((declaration.id, span, ty))
+                matches!(ty, ResolvedType::Function(_)).then_some((
+                    declaration.id,
+                    span,
+                    ty,
+                    declaration.kind,
+                    declaration.ownership,
+                    declaration.name.as_str(),
+                ))
             })
             .collect::<Vec<_>>();
-        bindings.sort_by_key(|(id, span, _)| (span.start, span.end, *id));
-        for (binding_id, declaration_span, ty) in bindings {
+        bindings.sort_by_key(|(id, span, _, _, _, _)| (span.start, span.end, *id));
+        for (binding_id, declaration_span, ty, kind, ownership, declaration_name) in bindings {
             let name = binding_source_name(info, binding_id);
-            let markdown = format!(
+            let mut markdown = format!(
                 "```doria\n{} {name}\n```\n\nSemantically resolved function-typed binding.",
                 display_resolved_type(ty),
             );
-            hovers.push(SemanticHover::new(declaration_span, markdown.clone()));
+            if matches!(
+                kind,
+                BindingKind::FunctionParameter
+                    | BindingKind::MethodParameter
+                    | BindingKind::ClosureParameter
+            ) {
+                markdown.push_str(match ownership {
+                    BindingOwnership::Owned => "\n\n**Ownership:** Owned Callback Parameter",
+                    BindingOwnership::ReadonlyBorrow | BindingOwnership::WritableBorrow => {
+                        "\n\n**Ownership:** Nonescaping Callback Parameter"
+                    }
+                });
+            }
+            let hover_span = self
+                .tokens
+                .iter()
+                .find(|token| {
+                    declaration_span.start <= token.span.start
+                        && token.span.end <= declaration_span.end
+                        && matches!(&token.kind, TokenKind::Variable(name) if name == declaration_name)
+                })
+                .map_or(declaration_span, |token| token.span);
+            hovers.push(SemanticHover::new(hover_span, markdown.clone()));
             let mut use_spans = info
                 .binding_resolution
                 .uses_by_span
@@ -673,6 +707,7 @@ impl<'a> SnapshotBuilder<'a> {
         let mut closures = info.closures.values().collect::<Vec<_>>();
         closures.sort_by_key(|closure| (closure.closure_id.start, closure.closure_id.end));
         for closure in closures {
+            let ownership = info.closure_ownership.get(&closure.closure_id);
             let signature = display_function_type_with_effects(
                 &closure.function_type,
                 &closure.inferred_checked_effects,
@@ -694,30 +729,58 @@ impl<'a> SnapshotBuilder<'a> {
                     .captures
                     .iter()
                     .map(|capture| {
+                        let acquisition = ownership.and_then(|ownership| {
+                            ownership.acquisitions.iter().find(|acquisition| {
+                                acquisition.environment_binding_id == capture.environment_binding_id
+                            })
+                        });
                         format!(
-                            "{} {}",
-                            capture_mode_name(capture.mode),
+                            "{} capture of `{}`",
+                            acquisition.map_or("Capture", |acquisition| {
+                                capture_acquisition_name(acquisition.kind)
+                            }),
                             binding_source_name(info, capture.source_binding_id)
                         )
                     })
                     .collect::<Vec<_>>()
                     .join(", ")
             };
+            let ownership_summary = ownership.map_or_else(
+                || "Not available because ownership checking did not complete.".to_string(),
+                |ownership| closure_provenance_summary(info, &ownership.provenance),
+            );
+            let invocation = ownership.map_or("Not available", |ownership| {
+                closure_invocation_summary(
+                    closure.inferred_invocation_mode,
+                    ownership.invocation_consumption,
+                )
+            });
+            let escape = ownership.map_or_else(
+                || "Not available".to_string(),
+                |ownership| closure_escape_summary(info, ownership.escape, &ownership.provenance),
+            );
             hovers.push(SemanticHover::new(
                 Span::new(closure.closure_id.start, closure.closure_id.end),
                 format!(
-                    "```doria\n{signature}\n```\n\n**Inferred invocation mode:** `{}`\n\n**Inferred checked effects:** {effects}\n\n**Captures:** {captures}\n\nClosure execution is not available in Stage 30b.",
+                    "```doria\n{signature}\n```\n\n**Inferred invocation mode:** `{}`\n\n**Inferred checked effects:** {effects}\n\n**Ownership:** {ownership_summary}\n\n**Invocation:** {invocation}\n\n**Escape:** {escape}\n\n**Captures:** {captures}\n\nClosure execution remains behind the Stage 30d HIR/MIR/runtime boundary.",
                     invocation_mode_name(closure.inferred_invocation_mode),
                 ),
             ));
 
             for capture in &closure.captures {
                 let name = binding_source_name(info, capture.source_binding_id);
+                let acquisition = ownership.and_then(|ownership| {
+                    ownership.acquisitions.iter().find(|acquisition| {
+                        acquisition.environment_binding_id == capture.environment_binding_id
+                    })
+                });
                 let markdown = format!(
                     "```doria\n{} {}\n```\n\n{} capture of `{name}`.",
                     display_resolved_type(&capture.source_type),
                     name,
-                    capture_mode_name(capture.mode),
+                    acquisition.map_or("Compiler-resolved", |acquisition| {
+                        capture_acquisition_name(acquisition.kind)
+                    }),
                 );
                 hovers.push(SemanticHover::capture(
                     capture.declaration_span,
@@ -738,7 +801,7 @@ impl<'a> SnapshotBuilder<'a> {
             hovers.push(SemanticHover::new(
                 Span::new(*start, *end),
                 format!(
-                    "```doria\n{}\n```\n\nSemantically checked callable-value invocation returning `{}`. Execution is not available in Stage 30b.",
+                    "```doria\n{}\n```\n\nSemantically checked callable-value invocation returning `{}`. Execution remains behind the Stage 30d HIR/MIR/runtime boundary.",
                     display_function_type_with_effects(&call.function_type, &call.checked_effects),
                     display_resolved_type(&call.return_type),
                 ),
@@ -2781,12 +2844,80 @@ fn invocation_mode_name(mode: FunctionInvocationMode) -> &'static str {
     }
 }
 
-fn capture_mode_name(mode: ClosureCaptureMode) -> &'static str {
-    match mode {
-        ClosureCaptureMode::Readonly => "Readonly",
-        ClosureCaptureMode::Writable => "Writable",
-        ClosureCaptureMode::Take => "Taking",
+fn capture_acquisition_name(kind: CaptureAcquisitionKind) -> &'static str {
+    match kind {
+        CaptureAcquisitionKind::ReadonlyLease => "Readonly",
+        CaptureAcquisitionKind::WritableLease => "Writable",
+        CaptureAcquisitionKind::CopyIntoEnvironment
+        | CaptureAcquisitionKind::MoveIntoEnvironment => "Owned taking",
     }
+}
+
+fn closure_invocation_summary(
+    mode: FunctionInvocationMode,
+    consumption: InvocationConsumption,
+) -> &'static str {
+    match (mode, consumption) {
+        (FunctionInvocationMode::Readonly, InvocationConsumption::Repeatable) => {
+            "Readonly Repeatable"
+        }
+        (FunctionInvocationMode::Writable, InvocationConsumption::Repeatable) => {
+            "Writable Repeatable"
+        }
+        (FunctionInvocationMode::Once, InvocationConsumption::Repeatable) => "Repeatable",
+        (_, InvocationConsumption::Once) => "Consumes On Invocation",
+    }
+}
+
+fn closure_provenance_summary(info: &SemanticInfo, provenance: &ClosureValueProvenance) -> String {
+    match provenance {
+        ClosureValueProvenance::Owned => "Owned closure".to_string(),
+        ClosureValueProvenance::BorrowBound(roots) => {
+            let roots = closure_root_names(info, roots);
+            if roots.is_empty() {
+                "Borrow-bound closure".to_string()
+            } else {
+                format!("Borrow-bound closure tied to {}", roots.join(", "))
+            }
+        }
+    }
+}
+
+fn closure_escape_summary(
+    info: &SemanticInfo,
+    escape: ClosureEscapeClassification,
+    provenance: &ClosureValueProvenance,
+) -> String {
+    match escape {
+        ClosureEscapeClassification::Local => "Nonescaping".to_string(),
+        ClosureEscapeClassification::Owned => "Owned callback".to_string(),
+        ClosureEscapeClassification::ReturnedBorrow => {
+            let roots = match provenance {
+                ClosureValueProvenance::BorrowBound(roots) => closure_root_names(info, roots),
+                ClosureValueProvenance::Owned => Vec::new(),
+            };
+            if roots.is_empty() {
+                "Returned closure with a compiler-checked borrow".to_string()
+            } else {
+                format!("Returned closure tied to {}", roots.join(", "))
+            }
+        }
+    }
+}
+
+fn closure_root_names(info: &SemanticInfo, roots: &[ClosureBorrowRoot]) -> Vec<String> {
+    let mut names = roots
+        .iter()
+        .map(|root| match root {
+            ClosureBorrowRoot::Binding(binding) => binding_source_name(info, *binding),
+            ClosureBorrowRoot::Receiver => "$this".to_string(),
+            ClosureBorrowRoot::EnclosingEnvironment(_) => "the enclosing closure".to_string(),
+            ClosureBorrowRoot::Temporary => "a temporary receiver".to_string(),
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn binding_source_name(info: &SemanticInfo, binding_id: doriac::symbols::BindingId) -> String {
@@ -4619,6 +4750,131 @@ let $wrapper = fn() with ($callback) => $callback();
             .hover_at_offset(use_offset)
             .expect("captured use hover");
         assert!(usage.markdown.contains("Readonly capture of `$callback`"));
+    }
+
+    #[test]
+    fn closure_hovers_present_compiler_owned_ownership_without_internal_identity() {
+        let source = r#"class Payload {}
+function main(): void
+{
+    let $read = 1;
+    let writable $write = 2;
+    let $copy = "copy";
+    let writable $operation = function (): void with ($read, writable $write, take $copy) {
+        echo "{$read}{$copy}";
+        $write += 1;
+    };
+    $operation();
+
+    let $payload = new Payload();
+    let $once = function (): Payload with (take $payload) { return $payload; };
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("ownership-hover.doria", source);
+        let operation = snapshot
+            .hover_at_offset(
+                source
+                    .find("function (): void")
+                    .expect("repeatable closure"),
+            )
+            .expect("repeatable closure hover");
+        for expected in [
+            "Borrow-bound closure",
+            "Readonly capture of `$read`",
+            "Writable capture of `$write`",
+            "Owned taking capture of `$copy`",
+            "Writable Repeatable",
+            "Nonescaping",
+            "Stage 30d HIR/MIR/runtime boundary",
+        ] {
+            assert!(
+                operation.markdown.contains(expected),
+                "missing `{expected}` from {}",
+                operation.markdown
+            );
+        }
+
+        let once = snapshot
+            .hover_at_offset(source.rfind("function (): Payload").expect("once closure"))
+            .expect("once closure hover");
+        assert!(once.markdown.contains("Owned closure"));
+        assert!(once.markdown.contains("Owned taking capture of `$payload`"));
+        assert!(once.markdown.contains("Consumes On Invocation"));
+
+        for forbidden in [
+            "BindingId",
+            "ClosureId",
+            "OwnershipSlotId",
+            "environment offset",
+            "descriptor address",
+            "CaptureAcquisitionKind",
+        ] {
+            assert!(!operation.markdown.contains(forbidden));
+            assert!(!once.markdown.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn closure_hovers_distinguish_callback_and_return_escape_contracts() {
+        let source = r#"function keep(function(): int $borrowed, take function(): int $owned): void {}
+function bind(int $value): function(): int
+{
+    return fn() with ($value) => $value;
+}
+class Box
+{
+    int $value = 1;
+    function bind(): function(): int
+    {
+        return fn() with ($this) => $this->value;
+    }
+}
+function main(): void
+{
+    List<function(): int> $callbacks = [fn() => 1];
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("escape-hover.doria", source);
+
+        let borrowed_parameter = snapshot
+            .hover_at_offset(
+                source
+                    .find("$borrowed")
+                    .expect("borrowed callback parameter"),
+            )
+            .expect("borrowed callback parameter hover");
+        assert!(borrowed_parameter
+            .markdown
+            .contains("Nonescaping Callback Parameter"));
+        let owned_parameter = snapshot
+            .hover_at_offset(source.find("$owned").expect("owned callback parameter"))
+            .expect("owned callback parameter hover");
+        assert!(owned_parameter
+            .markdown
+            .contains("Owned Callback Parameter"));
+
+        let parameter_return = snapshot
+            .hover_at_offset(
+                source
+                    .find("fn() with ($value)")
+                    .expect("parameter closure"),
+            )
+            .expect("parameter-rooted closure hover");
+        assert!(parameter_return
+            .markdown
+            .contains("Returned closure tied to $value"));
+
+        let receiver_return = snapshot
+            .hover_at_offset(source.find("fn() with ($this)").expect("receiver closure"))
+            .expect("receiver-rooted closure hover");
+        assert!(receiver_return
+            .markdown
+            .contains("Returned closure tied to $this"));
+
+        let owned_callback = snapshot
+            .hover_at_offset(source.rfind("fn() => 1").expect("stored callback"))
+            .expect("stored callback hover");
+        assert!(owned_callback.markdown.contains("Owned callback"));
     }
 
     #[test]

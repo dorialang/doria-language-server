@@ -6,6 +6,9 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Aligned `doria-lsp` with Stage 30c ownership, lifetime, and escape analysis,
+  including compiler-owned diagnostics and review-only fixes plus semantic
+  closure ownership, capture acquisition, invocation, and escape hovers.
 - Pinned `doria-lsp` to the constructor-rooted writable-path and owned-property
   correction, including compiler-owned diagnostics for readonly or uninitialized
   paths, borrowed move values, and overlapping transfers.

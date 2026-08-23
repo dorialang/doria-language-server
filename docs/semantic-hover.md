@@ -29,21 +29,29 @@ References are returned only when the compiler can resolve them safely. Existing
 keyword, primitive type, and compiler-intrinsic hover remains available as a lexical
 fallback.
 
-The lexical fallback describes the accepted Stage 30a callable grammar. Stage 30b
+The lexical fallback describes the accepted Stage 30a callable grammar. Stage 30c
 semantic hovers use compiler metadata instead: structural function-typed bindings
-and parameters show their canonical semantic type, closure expressions show their
-inferred invocation mode and checked effects plus an explicit capture summary, and
-capture occurrences show their compiler-resolved capture mode. Callable-value calls
-show the checked function signature where the existing expression-hover route can
-identify the call. Authored effect order remains visible on source function types.
-The server does not rediscover free variables or infer captures from text.
+and parameters show their canonical semantic type and callback ownership contract;
+closure expressions show inferred invocation mode and checked effects together with
+owned or borrow-bound provenance, capture acquisition, invocation consumption, and
+escape classification. Capture occurrences show their compiler-resolved acquisition
+mode. Callable-value calls show the checked function signature where the existing
+expression-hover route can identify the call. Authored effect order remains visible
+on source function types. The server does not rediscover free variables, infer
+captures, or calculate lifetimes from text.
 
 The compiler publishes precise capture and callable diagnostics with safe capture
 fixes. `E0641` is now limited to otherwise valid closure or callable execution;
 type-only function syntax does not receive it, and invalid closures receive their
 specific semantic diagnostic without a redundant execution boundary. Stage 30c
-owns capture acquisition, ownership, lifetimes, and escape checking. HIR, MIR,
-runtime, and backend closure execution remain unavailable.
+capture acquisition, ownership, lifetimes, and escape checking are implemented.
+Stage 30d HIR, MIR, runtime, and backend closure execution remain unavailable.
+
+Ownership hover text stays in Doria vocabulary: Owned or Borrow-bound closure,
+Readonly/Writable/Owned taking capture, Readonly/Writable Repeatable or Consumes On
+Invocation, Nonescaping or Owned callback, and returned closures tied to a parameter
+or `$this`. Compiler-private binding IDs, closure coordinates, pass slots, future
+environment layout, and backend symbols are never presented.
 
 Constructor-rooted writable paths and owned property writes use the same compiler
 authority. Accepted nested writes, owned initialization, and writable replacement

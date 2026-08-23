@@ -1824,8 +1824,8 @@ mod tests {
         let closure_text = closure["contents"]["value"].as_str().unwrap();
         assert!(closure_text.contains("function(int): int"));
         assert!(closure_text.contains("Inferred invocation mode"));
-        assert!(closure_text.contains("Readonly $minimum"));
-        assert!(closure_text.contains("execution is not available"));
+        assert!(closure_text.contains("Readonly capture of `$minimum`"));
+        assert!(closure_text.contains("Stage 30d HIR/MIR/runtime boundary"));
         assert!(!closure_text.contains("BindingId"));
         assert!(!closure_text.contains("ClosureId"));
 

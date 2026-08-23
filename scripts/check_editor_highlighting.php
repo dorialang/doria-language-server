@@ -1622,7 +1622,7 @@ function check_stage30a_callable_alignment(): void
     global $cargoManifest, $readme, $vscodeGrammar, $intellijLexer, $intellijLexerTest;
     global $lspAnalysis, $lspServer, $lspTests, $fixture, $rejectedFixture;
 
-    $compilerCommit = 'a87e2d6b91a9f297ce88b2fdcf1c3b75c4b6631e';
+    $compilerCommit = '120c023a0b677897314962f40a13bfdf429cd0bf';
     require_check(
         preg_match(
             '/doriac\s*=\s*\{[^}]*\brev\s*=\s*"' . $compilerCommit . '"/',
@@ -1654,10 +1654,10 @@ function check_stage30a_callable_alignment(): void
         );
     }
     require_check(
-        str_contains($fixtureText, 'Stage 30b Closure Semantics') &&
-            str_contains($fixtureText, 'execution remains unavailable') &&
+        str_contains($fixtureText, 'Stage 30c Ownership And Escape') &&
+            str_contains($fixtureText, 'Stage 30d execution remains unavailable') &&
             !str_contains($fixtureText, 'Planned/future: closure'),
-        'shared fixture must describe Stage 30b semantics without claiming execution',
+        'shared fixture must describe Stage 30c ownership without claiming execution',
     );
 
     $rejectedText = read_text($rejectedFixture);
@@ -1805,8 +1805,10 @@ function check_stage30a_callable_alignment(): void
             str_contains($lspText, 'Doria closure-capture keyword') &&
             str_contains($lspText, 'Doria function-type invocation modifier') &&
             str_contains($lspText, 'collect_semantic_hovers') &&
-            str_contains($lspText, 'Semantically checked callable-value invocation'),
-        'LSP must preserve compiler metadata and expose Stage 30b semantic hovers',
+            str_contains($lspText, 'Semantically checked callable-value invocation') &&
+            str_contains($lspText, 'ClosureValueProvenance') &&
+            str_contains($lspText, 'ClosureEscapeClassification'),
+        'LSP must preserve compiler metadata and expose Stage 30c ownership hovers',
     );
     foreach ([
         'publishes_one_structured_boundary_for_every_accepted_closure_form',
@@ -1816,21 +1818,28 @@ function check_stage30a_callable_alignment(): void
         'publishes_compiler_owned_stage_30b_diagnostics_without_redundant_boundaries',
         'distinguishes_function_shape_and_checked_effect_mismatches',
         'exposes_only_safe_compiler_owned_capture_fixes_as_code_actions',
+        'publishes_the_complete_stage_30c_ownership_diagnostic_surface',
+        'ownership_edits_remain_compiler_owned_and_review_only',
+        'closure_hovers_present_compiler_owned_ownership_without_internal_identity',
+        'closure_hovers_distinguish_callback_and_return_escape_contracts',
         'malformed_stage_30a_forms_remain_parser_diagnostics',
         'stage_30a_does_not_change_named_function_method_or_static_calls',
         'unsupportedDevelopmentSurface',
         'developmentOnly',
     ] as $coverage) {
-        require_check(str_contains($lspTestText, $coverage), "LSP closure coverage is missing {$coverage}");
+        require_check(
+            str_contains($lspTestText . $lspText, $coverage),
+            "LSP closure coverage is missing {$coverage}",
+        );
     }
 
     $readmeText = read_text($readme);
     require_check(
-        str_contains($readmeText, 'Stage 30b semantic function types and capture checking are implemented') &&
+        str_contains($readmeText, 'Stage 30c ownership, lifetime, and escape checking is implemented') &&
             str_contains($readmeText, 'E0641') &&
-            str_contains($readmeText, 'Stage 30c ownership and lifetime enforcement is next') &&
+            str_contains($readmeText, 'Stage 30d closure HIR/MIR') &&
             str_contains($readmeText, 'no closure execution'),
-        'README must state Stage 30b completion and the execution-only boundary',
+        'README must state Stage 30c completion and the Stage 30d execution-only boundary',
     );
 }
 

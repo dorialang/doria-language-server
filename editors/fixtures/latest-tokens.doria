@@ -111,8 +111,8 @@ function inspectHistory(History<int> $history): void
 {
 }
 
-// Stage 30b: structural callables and captures are semantically checked.
-// Execution alone remains behind E0641; editors only present the syntax.
+// Stage 30c: structural callables, captures, ownership, and escape are checked.
+// Executable closure lowering alone remains behind E0641; editors present syntax.
 function(int): int $readonlyCallback = fn(int $value) => $value;
 
 function(writable Counter): void $writeCounter =
@@ -441,7 +441,7 @@ try {
     echo "done";
 }
 
-// Stage 30b Closure Semantics: checked syntax; execution remains unavailable.
+// Stage 30c Ownership And Escape: checked; Stage 30d execution remains unavailable.
 let $double = fn(int $value) => $value * 2;
 
 let $minimum = 70;
