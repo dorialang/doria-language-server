@@ -1629,7 +1629,7 @@ function check_stage30a_callable_alignment(): void
     global $cargoManifest, $readme, $vscodeGrammar, $intellijLexer, $intellijLexerTest;
     global $lspAnalysis, $lspServer, $lspTests, $fixture, $rejectedFixture;
 
-    $compilerCommit = 'e0bfabe00b5473b3b78a5b771a43cf08b8bea4d8';
+    $compilerCommit = '94da7f904802c6e222537e50c56e5a5c354acaa7';
     require_check(
         preg_match(
             '/doriac\s*=\s*\{[^}]*\brev\s*=\s*"' . $compilerCommit . '"/',
@@ -1815,10 +1815,12 @@ function check_stage30a_callable_alignment(): void
             str_contains($lspText, 'Semantically checked callable-value invocation') &&
             str_contains($lspText, 'ClosureValueProvenance') &&
             str_contains($lspText, 'ClosureEscapeClassification') &&
-            str_contains($lspText, 'Executable In Debug Interpreter') &&
-            str_contains($lspText, 'Native Execution Lands In Stage 30e') &&
-            str_contains($lspText, 'PHP Compatibility Lands In Stage 30f'),
-        'LSP must preserve compiler metadata and expose Stage 30d execution boundaries',
+            str_contains($lspText, 'Debug Interpreter Supports Closure Execution') &&
+            str_contains($lspText, 'Closure Execution Lands In Stage 30e') &&
+            str_contains($lspText, 'Closure Lowering Lands In Stage 30f') &&
+            !str_contains($lspText, 'Stage 30b checks') &&
+            !str_contains($lspText, 'Stage 30b infers'),
+        'LSP must preserve compiler metadata and expose current closure target capabilities without stale stage claims',
     );
     foreach ([
         'valid_stage_30d_closure_documents_are_target_neutral',

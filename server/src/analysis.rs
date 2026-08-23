@@ -764,7 +764,7 @@ impl<'a> SnapshotBuilder<'a> {
                 format!(
                     "```doria\n{signature}\n```\n\n**Inferred invocation mode:** `{}`\n\n**Inferred checked effects:** {effects}\n\n**Ownership:** {ownership_summary}\n\n**Invocation:** {invocation}\n\n**Escape:** {escape}\n\n**Captures:** {captures}\n\n{}",
                     invocation_mode_name(closure.inferred_invocation_mode),
-                    closure_execution_status(),
+                    closure_target_capabilities(),
                 ),
             ));
 
@@ -805,7 +805,7 @@ impl<'a> SnapshotBuilder<'a> {
                     "```doria\n{}\n```\n\nSemantically checked callable-value invocation returning `{}`.\n\n{}",
                     display_function_type_with_effects(&call.function_type, &call.checked_effects),
                     display_resolved_type(&call.return_type),
-                    closure_execution_status(),
+                    closure_target_capabilities(),
                 ),
             ));
         }
@@ -2838,8 +2838,8 @@ fn display_function_type_with_effects(ty: &ResolvedType, effects: &[ResolvedType
     display_resolved_type(&source_ordered)
 }
 
-fn closure_execution_status() -> &'static str {
-    "**Execution:** Executable In Debug Interpreter\n\n**Native:** Native Execution Lands In Stage 30e\n\n**PHP:** PHP Compatibility Lands In Stage 30f"
+fn closure_target_capabilities() -> &'static str {
+    "**Debug target capability:** Debug Interpreter Supports Closure Execution\n\n**Native target capability:** Closure Execution Lands In Stage 30e\n\n**PHP target capability:** Closure Lowering Lands In Stage 30f"
 }
 
 fn invocation_mode_name(mode: FunctionInvocationMode) -> &'static str {
@@ -4788,9 +4788,9 @@ function main(): void
             "Owned taking capture of `$copy`",
             "Writable Repeatable",
             "Nonescaping",
-            "Executable In Debug Interpreter",
-            "Native Execution Lands In Stage 30e",
-            "PHP Compatibility Lands In Stage 30f",
+            "Debug Interpreter Supports Closure Execution",
+            "Closure Execution Lands In Stage 30e",
+            "Closure Lowering Lands In Stage 30f",
         ] {
             assert!(
                 operation.markdown.contains(expected),

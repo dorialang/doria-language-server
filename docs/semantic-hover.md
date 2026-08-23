@@ -45,8 +45,9 @@ fixes. Ordinary language-server analysis is target-neutral, so valid closures an
 type-only function syntax do not receive `E0641`; invalid closures receive their
 specific semantic diagnostic without a redundant execution boundary. Stage 30d
 closure-aware HIR, MIR, and debug-interpreter execution are implemented. Semantic
-closure hovers state **Executable In Debug Interpreter**, **Native Execution Lands
-In Stage 30e**, and **PHP Compatibility Lands In Stage 30f**. Target-specific
+closure hovers describe target capabilities: the debug interpreter supports closure
+execution, native execution lands in Stage 30e, and PHP lowering lands in Stage 30f.
+This wording does not claim that a semantically invalid closure is executable. Target-specific
 `E0641` is emitted by explicit compiler requests for native or PHP output, not by
 editor analysis.
 
