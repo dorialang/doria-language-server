@@ -299,6 +299,283 @@ fn publishes_compiler_owned_stage_30b_diagnostics_without_redundant_boundaries()
 }
 
 #[test]
+fn publishes_the_complete_stage_30c_ownership_diagnostic_surface() {
+    let cases = [
+        (
+            "readonly-lease-conflict.doria",
+            "function main(): void { let writable $value = 1; let $read = fn() with ($value) => $value; $value = 2; $read(); }",
+            "E0654",
+        ),
+        (
+            "writable-lease-conflict.doria",
+            "function main(): void { let writable $value = 1; let writable $write = function (): void with (writable $value) { $value += 1; }; let $read = fn() with ($value) => $value; $write(); $read(); }",
+            "E0654",
+        ),
+        (
+            "taking-capture-use-after-move.doria",
+            "class Payload {} function main(): void { let $value = new Payload(); let $first = fn() with (take $value) => $value; let $second = fn() with (take $value) => $value; }",
+            "E0655",
+        ),
+        (
+            "function-value-move.doria",
+            "function main(): void { let $first = fn() => 1; let $second = $first; $first; $second(); }",
+            "E0655",
+        ),
+        (
+            "once-reuse.doria",
+            "class Payload {} function main(): void { let $value = new Payload(); let $once = function (): Payload with (take $value) { return $value; }; $once(); $once(); }",
+            "E0655",
+        ),
+        (
+            "maybe-consumed-once.doria",
+            "class Payload {} function main(bool $condition): void { let $value = new Payload(); let $once = function (): Payload with (take $value) { return $value; }; if ($condition) { $once(); } $once(); }",
+            "E0655",
+        ),
+        (
+            "borrowed-once-parameter.doria",
+            "class Payload {} function invoke(function once(): Payload $factory): Payload { return $factory(); }",
+            "E0656",
+        ),
+        (
+            "stored-once-invocation.doria",
+            "class Store { writable function once(): int $factory = fn() => 1; writable function make(): int { return $this->factory(); } }",
+            "E0660",
+        ),
+        (
+            "borrow-bound-storage.doria",
+            "function main(): void { let $value = 1; let $borrowed = fn() with ($value) => $value; List<function(): int> $items = [$borrowed]; }",
+            "E0658",
+        ),
+        (
+            "nonescaping-retention.doria",
+            "function retain(function(): int $callback): function(): int { return $callback; }",
+            "E0657",
+        ),
+        (
+            "borrowed-property-retention.doria",
+            "class Store { function(): int $callback; function __construct(function(): int $callback) { $this->callback = $callback; } }",
+            "E0657",
+        ),
+        (
+            "returned-local-borrow.doria",
+            "function invalid(): function(): int { let $value = 1; return fn() with ($value) => $value; }",
+            "E0658",
+        ),
+        (
+            "multiple-return-roots.doria",
+            "function invalid(int $left, int $right): function(): int { return fn() with ($left, $right) => $left + $right; }",
+            "E0659",
+        ),
+        (
+            "receiver-cycle.doria",
+            "class Box { writable function(): int $callback = fn() => 0; writable function install(): void { $this->callback = fn() with ($this) => 1; } }",
+            "E0658",
+        ),
+        (
+            "incomplete-constructor-capture.doria",
+            "class Box { int $value; function __construct() { let $read = fn() with ($this) => $this->value; $this->value = 1; } }",
+            "E0503",
+        ),
+        (
+            "development-storage-boundary.doria",
+            "function main(): void { mixed $value = fn() => 1; }",
+            "E0661",
+        ),
+    ];
+
+    for (name, source, code) in cases {
+        assert_lsp_diagnostic_matches_compiler(name, source, code);
+        let compiler = doriac::check_source(name, source)
+            .expect_err("Stage 30c diagnostic fixture must fail checking");
+        let compiler_codes = compiler
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>();
+        let lsp = diagnostics_for_document(&format!("file:///{name}"), source);
+        let lsp_codes = lsp
+            .iter()
+            .filter_map(|diagnostic| diagnostic["code"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lsp_codes, compiler_codes,
+            "diagnostic order drift for {name}"
+        );
+        if code != "E0661" {
+            let ownership_diagnostic = lsp
+                .iter()
+                .find(|diagnostic| diagnostic["code"] == code)
+                .unwrap_or_else(|| panic!("missing {code}: {lsp:#?}"));
+            assert!(
+                ownership_diagnostic["data"]["developmentOnly"] == false,
+                "ordinary ownership finding is not a development boundary: {ownership_diagnostic:#?}"
+            );
+        }
+    }
+
+    assert_stage_30_closure_boundary(
+        "stage30d-boundary.doria",
+        "function main(): void { let $callback = fn() => 1; }",
+    );
+}
+
+#[test]
+fn ownership_edits_remain_compiler_owned_and_review_only() {
+    let uri = "file:///ownership-review.doria";
+    let cases = [
+        (
+            "function main(): void { let $value = 1; let $borrowed = fn() with (/* keep */ $value) => $value; List<function(): int> $items = [$borrowed]; }",
+            "E0658",
+            "Capture Borrowed Values With Ownership",
+        ),
+        (
+            "class Store { writable function(): int $callback = fn() => 0; writable function retain(/* keep */ function(): int $input): void { $this->callback = $input; } }",
+            "E0657",
+            "Accept Callback With Ownership",
+        ),
+    ];
+
+    for (source, code, title) in cases {
+        let diagnostics = diagnostics_for_document(uri, source);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic["code"] == code)
+            .unwrap_or_else(|| panic!("missing {code}: {diagnostics:#?}"));
+        let fixes = diagnostic["data"]["fixes"]
+            .as_array()
+            .expect("compiler-owned structured fixes");
+        assert_eq!(fixes.len(), 1, "{diagnostic:#?}");
+        assert_eq!(fixes[0]["title"], title);
+        assert_eq!(fixes[0]["applicability"], "requiresReview");
+        let replacement = fixes[0]["edits"][0]["newText"]
+            .as_str()
+            .expect("fix replacement");
+        assert_eq!(replacement, "take ");
+        assert!(
+            !replacement.contains("clone")
+                && !replacement.contains("SharedReference")
+                && !replacement.contains("lifetime")
+        );
+        assert!(
+            code_actions_for_document(uri, source).is_empty(),
+            "ownership-changing review edits must not become automatic actions"
+        );
+    }
+}
+
+#[test]
+fn constructor_rooted_property_writes_follow_the_pinned_compiler() {
+    let accepted = [
+        (
+            "constructor-nested-write.doria",
+            r#"class Window
+{
+    writable string $title;
+    function __construct(string $inputTitle) { $this->title = $inputTitle; }
+}
+class Application
+{
+    internal writable Window $window = new Window("");
+    function __construct(string $inputTitle) { $this->window->title = $inputTitle; }
+}"#,
+        ),
+        (
+            "constructor-owned-initialize.doria",
+            r#"class Window
+{
+    string $title;
+    function __construct(string $inputTitle) { $this->title = $inputTitle; }
+}
+class Application
+{
+    internal writable Window $window;
+    function __construct(string $inputTitle) { $this->window = new Window($inputTitle); }
+}"#,
+        ),
+        (
+            "owned-property-replace.doria",
+            r#"class Window {}
+class Application
+{
+    internal writable Window $window = new Window();
+    writable function replace(take Window $window): void { $this->window = $window; }
+}"#,
+        ),
+    ];
+
+    for (name, source) in accepted {
+        doriac::check_source(name, source).expect("the pinned compiler must accept the write");
+        let diagnostics = diagnostics_for_document(&format!("file:///{name}"), source);
+        assert!(diagnostics.is_empty(), "{name}: {diagnostics:#?}");
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic["code"] != "E0472"),
+            "valid move-in must not publish historical E0472: {diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
+fn constructor_property_write_boundaries_preserve_compiler_diagnostics() {
+    let cases = [
+        (
+            "readonly-intermediate.doria",
+            r#"class Window { writable string $title = ""; }
+class Application
+{
+    Window $window = new Window();
+    function __construct() { $this->window->title = "Doria"; }
+}"#,
+            "E0201",
+        ),
+        (
+            "uninitialized-intermediate.doria",
+            r#"class Window { writable string $title = ""; }
+class Application
+{
+    writable Window $window;
+    function __construct() { $this->window->title = "Doria"; }
+}"#,
+            "E0501",
+        ),
+        (
+            "borrowed-owned-property.doria",
+            r#"class Window {}
+function inspect(Window $window): Window { return $window; }
+class Application
+{
+    writable Window $window = new Window();
+    writable function replace(Window $candidate): void
+    {
+        $this->window = inspect($candidate);
+    }
+}"#,
+            "E0478",
+        ),
+        (
+            "overlapping-property-move.doria",
+            r#"class Window {}
+class Application
+{
+    writable Window $window = new Window();
+    writable function replace(): void { $this->window = $this->window; }
+}"#,
+            "E0471",
+        ),
+    ];
+
+    for (name, source, code) in cases {
+        assert_lsp_diagnostic_matches_compiler(name, source, code);
+    }
+
+    assert_lsp_diagnostic_matches_compiler(
+        "closure-capture-regression.doria",
+        "let $value = 1; let $closure = fn() => $value;",
+        "E0642",
+    );
+}
+
+#[test]
 fn distinguishes_function_shape_and_checked_effect_mismatches() {
     let shape = "function(int): int $f = fn(string $value) => 1;";
     assert_lsp_diagnostic_matches_compiler("shape-mismatch.doria", shape, "E0648");

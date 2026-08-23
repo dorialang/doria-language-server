@@ -18,10 +18,11 @@ closures, anonymous `function` blocks, explicit `with` capture lists, structural
 function invocation modes, parameter ownership, checked effects, grouped nested
 types, and callable-value calls. `once` is an accepted invocation modifier;
 `writable` and `take` retain their context-sensitive modifier scopes. This is
-presentation only; `doria-lsp` publishes the compiler's structured `E0641`
-execution boundary together with Stage 30b semantic diagnostics and safe capture
-fixes. The grammar does not implement capture or callable semantics, and closure
-execution remains unavailable.
+presentation only; `doria-lsp` publishes Stage 30c compiler-owned ownership,
+lifetime, escape diagnostics, review-only fixes, and semantic hovers. Structured
+`E0641` now marks only the missing Stage 30d executable closure pipeline. The
+grammar does not implement capture or callable semantics, and closure execution
+remains unavailable.
 
 ## Install the VS Code extension
 
