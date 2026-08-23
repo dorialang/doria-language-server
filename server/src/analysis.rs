@@ -648,7 +648,7 @@ impl<'a> SnapshotBuilder<'a> {
             .filter_map(|declaration| {
                 let span = declaration.span?;
                 let ty = declaration.source_type.as_ref()?;
-                matches!(ty, ResolvedType::Function(_)).then_some((
+                matches!(non_nullable_type(ty), ResolvedType::Function(_)).then_some((
                     declaration.id,
                     span,
                     ty,
@@ -4816,7 +4816,12 @@ function main(): void
 
     #[test]
     fn closure_hovers_distinguish_callback_and_return_escape_contracts() {
-        let source = r#"function keep(function(): int $borrowed, take function(): int $owned): void {}
+        let source = r#"function keep(
+    function(): int $borrowed,
+    take function(): int $owned,
+    ?function(): int $nullableBorrowed,
+    take ?function(): int $nullableOwned
+): void {}
 function bind(int $value): function(): int
 {
     return fn() with ($value) => $value;
@@ -4852,6 +4857,30 @@ function main(): void
         assert!(owned_parameter
             .markdown
             .contains("Owned Callback Parameter"));
+        let nullable_borrowed = snapshot
+            .hover_at_offset(
+                source
+                    .find("$nullableBorrowed")
+                    .expect("nullable borrowed callback parameter"),
+            )
+            .expect("nullable borrowed callback parameter hover");
+        assert!(nullable_borrowed
+            .markdown
+            .contains("?function(): int $nullableBorrowed"));
+        assert!(nullable_borrowed
+            .markdown
+            .contains("Nonescaping Callback Parameter"));
+        let nullable_owned = snapshot
+            .hover_at_offset(
+                source
+                    .find("$nullableOwned")
+                    .expect("nullable owned callback parameter"),
+            )
+            .expect("nullable owned callback parameter hover");
+        assert!(nullable_owned
+            .markdown
+            .contains("?function(): int $nullableOwned"));
+        assert!(nullable_owned.markdown.contains("Owned Callback Parameter"));
 
         let parameter_return = snapshot
             .hover_at_offset(
