@@ -197,7 +197,10 @@ php scripts/build.php server --compiler-path ../doria
 Use `all` instead of `server` to package both editor clients in the same command.
 The local compiler mode creates a disposable runner under `target/`, writes the
 resulting executable under this repository's `target/`, and does not change the
-commit-pinned `Cargo.toml` or `Cargo.lock`. Install a compiler-matched server with:
+commit-pinned `Cargo.toml` or `Cargo.lock`. Each build reseeds the runner's private
+lockfile from the repository lockfile before applying the local compiler override,
+so dependency changes cannot leave later development-toolchain refreshes stuck on
+stale generated state. Install a compiler-matched server with:
 
 ```bash
 php scripts/build.php install-server --compiler-path ../doria

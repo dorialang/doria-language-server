@@ -112,6 +112,7 @@ fn main() -> std::process::ExitCode {
 RUST
         . "\n"
     );
+    seed_local_runner_lock($root . '/Cargo.lock', $runner . '/Cargo.lock');
 
     $command = [
         'cargo',
@@ -141,6 +142,16 @@ RUST
     fwrite(STDOUT, "local compiler crate: {$compiler}\n");
 
     return $artifact;
+}
+
+function seed_local_runner_lock(string $source, string $destination): void
+{
+    if (!is_file($source)) {
+        throw new RuntimeException("canonical Cargo lockfile was not found at {$source}");
+    }
+    if (!copy($source, $destination)) {
+        throw new RuntimeException("could not seed local runner lockfile: {$destination}");
+    }
 }
 
 function remove_local_server_override(string $root, bool $release): void

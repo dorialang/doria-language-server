@@ -472,6 +472,13 @@ function check_vscode_language_server_packaging(): void
         'VS Code packaging must build, bundle, and platform-target doria-lsp'
     );
     require_check(
+        str_contains(
+            $builder,
+            "seed_local_runner_lock(\$root . '/Cargo.lock', \$runner . '/Cargo.lock')"
+        ) && str_contains($builder, 'function seed_local_runner_lock('),
+        'local compiler builds must reseed the disposable runner from the canonical Cargo lockfile'
+    );
+    require_check(
         str_contains($extension, 'registerDebugConfigurationProvider')
             && str_contains($extension, 'registerDebugAdapterDescriptorFactory')
             && str_contains($extension, 'resolveBatonPath')
