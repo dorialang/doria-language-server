@@ -24,16 +24,17 @@ Current editor support includes:
 - IntelliJ Platform support for RustRover, IntelliJ IDEA, PhpStorm, and compatible JetBrains IDEs, with local syntax highlighting and optional LSP integration.
 - Shared accepted and rejected-syntax fixtures used to keep both highlighters aligned.
 
-Stage 30c ownership, lifetime, and escape checking is implemented. The editors recognize
+Stage 30d closure-aware HIR, MIR, and debug-interpreter execution are implemented. The editors recognize
 `fn` arrow closures, anonymous `function` closures, explicit `with` capture
 clauses, readonly/writable/once structural function types, parameter ownership,
 checked effects, grouped nested types, and callable-value invocation. The language
 server publishes the pinned compiler's semantic diagnostics and safe capture
 fixes, and its hovers show compiler-resolved function signatures, inferred closure
-facts, ownership, capture acquisition, consumption, and escape contracts. `E0641`
-now marks only the missing executable closure pipeline. Stage 30d closure HIR/MIR
-and the interpreter oracle are next; no closure execution exists, and highlighting
-remains presentation only.
+facts, ownership, capture acquisition, consumption, and escape contracts. Ordinary
+language-server analysis no longer publishes `E0641` for valid closures. Closure
+programs execute through the compiler's explicit debug target; native execution
+remains the Stage 30e boundary and PHP lowering remains the Stage 30f boundary.
+Stage 30e is next, and highlighting remains presentation only.
 
 The compiler also accepts constructor-rooted mutation through definitely initialized
 writable property paths, owned initialization of instance properties, and replacement

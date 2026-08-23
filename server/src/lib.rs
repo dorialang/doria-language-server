@@ -845,7 +845,7 @@ fn completion_items() -> Value {
         match keyword {
             "fn" => {
                 item["detail"] = json!("Doria arrow-closure keyword");
-                item["documentation"] = json!("Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. Stage 30b checks closure semantics; execution remains unavailable.");
+                item["documentation"] = json!("Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. Stage 30b checks closure semantics. Stage 30d closures execute through the explicit debug interpreter; native execution lands in Stage 30e and PHP compatibility lands in Stage 30f.");
             }
             "with" => {
                 item["detail"] = json!("Doria closure-capture keyword");
@@ -1377,10 +1377,10 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "Declares nominal conformance to a compiler-known contract such as `Displayable` or `Error`.",
         ),
         TokenKind::Function => Some(
-            "Declares a named function or method, an anonymous block closure, or a structural function type according to context. Function types preserve readonly, writable, or once invocation; parameter ownership; and checked effects. Stage 30b checks callable compatibility; closure execution remains unavailable.",
+            "Declares a named function or method, an anonymous block closure, or a structural function type according to context. Function types preserve readonly, writable, or once invocation; parameter ownership; and checked effects. Stage 30b checks callable compatibility. Stage 30d closures execute through the explicit debug interpreter; native execution lands in Stage 30e and PHP compatibility lands in Stage 30f.",
         ),
         TokenKind::Fn => Some(
-            "Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. Stage 30b checks closure semantics; execution remains unavailable.",
+            "Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. Stage 30b checks closure semantics. Stage 30d closures execute through the explicit debug interpreter; native execution lands in Stage 30e and PHP compatibility lands in Stage 30f.",
         ),
         TokenKind::With => Some(
             "Introduces an explicit closure capture list. A bare capture is readonly, `writable` requests exclusive writable access, and `take` transfers ownership. The compiler validates capture lists in Stage 30b.",
@@ -1795,12 +1795,15 @@ mod tests {
     }
 
     #[test]
-    fn completion_and_hover_describe_stage_30b_semantics_and_execution_boundary() {
+    fn completion_and_hover_describe_stage_30d_interpreter_boundary() {
         let arrow = completion_item("fn");
         assert_eq!(arrow["detail"], "Doria arrow-closure keyword");
         assert!(arrow["documentation"]
             .as_str()
             .is_some_and(|text| text.contains("Stage 30b checks closure semantics")));
+        assert!(arrow["documentation"]
+            .as_str()
+            .is_some_and(|text| text.contains("debug interpreter")));
 
         let capture = completion_item("with");
         assert_eq!(capture["detail"], "Doria closure-capture keyword");
@@ -1816,6 +1819,8 @@ mod tests {
 
         assert!(hover_description(&TokenKind::Fn)
             .is_some_and(|text| text.contains("Stage 30b checks closure semantics")));
+        assert!(hover_description(&TokenKind::Fn)
+            .is_some_and(|text| text.contains("native execution lands in Stage 30e")));
         assert!(hover_description(&TokenKind::With)
             .is_some_and(|text| text.contains("validates capture lists")));
 
@@ -1825,7 +1830,9 @@ mod tests {
         assert!(closure_text.contains("function(int): int"));
         assert!(closure_text.contains("Inferred invocation mode"));
         assert!(closure_text.contains("Readonly capture of `$minimum`"));
-        assert!(closure_text.contains("Stage 30d HIR/MIR/runtime boundary"));
+        assert!(closure_text.contains("Executable In Debug Interpreter"));
+        assert!(closure_text.contains("Native Execution Lands In Stage 30e"));
+        assert!(closure_text.contains("PHP Compatibility Lands In Stage 30f"));
         assert!(!closure_text.contains("BindingId"));
         assert!(!closure_text.contains("ClosureId"));
 

@@ -222,7 +222,7 @@ dependencies = [
 [[package]]
 name = "doria-diagnostic-catalogue"
 version = "2026.3.1-canary"
-source = "git+https://github.com/dorialang/doria?rev=9fc46724dcd51ec643fd79fdef58feb75c0ae1f7#9fc46724dcd51ec643fd79fdef58feb75c0ae1f7"
+source = "git+https://github.com/dorialang/doria?rev=e0bfabe00b5473b3b78a5b771a43cf08b8bea4d8#e0bfabe00b5473b3b78a5b771a43cf08b8bea4d8"
 
 [[package]]
 name = "doria-language-server"
@@ -235,7 +235,7 @@ dependencies = [
 [[package]]
 name = "doria-unicode"
 version = "2026.3.1-canary"
-source = "git+https://github.com/dorialang/doria?rev=9fc46724dcd51ec643fd79fdef58feb75c0ae1f7#9fc46724dcd51ec643fd79fdef58feb75c0ae1f7"
+source = "git+https://github.com/dorialang/doria?rev=e0bfabe00b5473b3b78a5b771a43cf08b8bea4d8#e0bfabe00b5473b3b78a5b771a43cf08b8bea4d8"
 dependencies = [
  "icu_casemap",
  "icu_locale_core",
@@ -247,7 +247,7 @@ dependencies = [
 [[package]]
 name = "doriac"
 version = "2026.3.1-canary"
-source = "git+https://github.com/dorialang/doria?rev=9fc46724dcd51ec643fd79fdef58feb75c0ae1f7#9fc46724dcd51ec643fd79fdef58feb75c0ae1f7"
+source = "git+https://github.com/dorialang/doria?rev=e0bfabe00b5473b3b78a5b771a43cf08b8bea4d8#e0bfabe00b5473b3b78a5b771a43cf08b8bea4d8"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -690,9 +690,9 @@ dependencies = [
 
 [[package]]
 name = "writeable"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
+checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "yoke"
