@@ -2854,7 +2854,7 @@ fn display_function_type_with_effects(ty: &ResolvedType, effects: &[ResolvedType
 }
 
 fn closure_target_capabilities() -> &'static str {
-    "**Debug and native target capability:** Executable In Debug And Native Targets\n\n**PHP target capability:** PHP Compatibility Lands In Stage 30f"
+    "**Execution capability:** Executable In Debug, Native, And PHP Compatibility Targets"
 }
 
 fn invocation_mode_name(mode: FunctionInvocationMode) -> &'static str {
@@ -4814,8 +4814,7 @@ function main(): void
             "Owned taking capture of `$copy`",
             "Writable Repeatable",
             "Nonescaping",
-            "Executable In Debug And Native Targets",
-            "PHP Compatibility Lands In Stage 30f",
+            "Executable In Debug, Native, And PHP Compatibility Targets",
         ] {
             assert!(
                 operation.markdown.contains(expected),

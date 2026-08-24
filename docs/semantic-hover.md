@@ -43,13 +43,13 @@ captures, or calculate lifetimes from text.
 The compiler publishes precise capture and callable diagnostics with safe capture
 fixes. Ordinary language-server analysis is target-neutral, so valid closures and
 type-only function syntax do not receive `E0641`; invalid closures receive their
-specific semantic diagnostic without a redundant execution boundary. Stage 30e
-native closure execution is implemented. Semantic closure hovers describe target
-capabilities: valid closures execute in debug and native targets, while PHP
-compatibility lands in Stage 30f.
-This wording does not claim that a semantically invalid closure is executable. Target-specific
-`E0641` is emitted by explicit compiler requests for PHP output, not by editor
-analysis.
+specific semantic diagnostic without a redundant execution boundary. Stage 30f
+PHP compatibility closure execution is implemented. Semantic closure hovers
+describe target capabilities: valid closures execute in debug, native, and PHP
+compatibility targets. PHP remains a secondary compatibility backend with
+independent limitations. Stage 30g List algorithms are next, so Stage 30 remains
+incomplete. This wording does not claim that a semantically invalid closure is
+executable or that every Doria value family is PHP-compatible.
 
 Ownership hover text stays in Doria vocabulary: Owned Closure or Borrow-Bound Closure,
 Readonly/Writable/Owned taking capture, Readonly/Writable Repeatable or Consumes On
