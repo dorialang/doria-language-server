@@ -1876,6 +1876,37 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_closure_errors_do_not_hide_valid_target_capabilities() {
+        let source =
+            "let $outside = 1; let $valid = fn() => 42; let $invalid = fn() => $outside; $valid();";
+        let diagnostics = diagnostics_for_document("file:///mixed-hover.doria", source);
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "E0642"));
+
+        let valid = hover_at_offset(source, source.find("fn() => 42").expect("valid closure"))
+            .expect("valid closure hover");
+        let valid_text = valid["contents"]["value"].as_str().unwrap();
+        assert!(valid_text.contains("Executable In Debug And Native Targets"));
+
+        let call_offset = source.find("$valid()").expect("valid call") + "$valid".len() + 1;
+        let call = hover_at_offset(source, call_offset).expect("valid callable-value hover");
+        let call_text = call["contents"]["value"].as_str().unwrap();
+        assert!(
+            call_text.contains("Executable In Debug And Native Targets"),
+            "{diagnostics:#?}\n{call_text}"
+        );
+
+        let invalid = hover_at_offset(
+            source,
+            source.find("fn() => $outside").expect("invalid closure"),
+        )
+        .expect("invalid closure hover");
+        let invalid_text = invalid["contents"]["value"].as_str().unwrap();
+        assert!(!invalid_text.contains("Executable In Debug And Native Targets"));
+    }
+
+    #[test]
     fn completions_and_hover_expose_active_control_flow_foundations() {
         for (keyword, kind) in [
             ("when", TokenKind::When),

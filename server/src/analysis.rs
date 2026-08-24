@@ -625,16 +625,6 @@ impl<'a> SnapshotBuilder<'a> {
             return;
         };
         let mut hovers = Vec::new();
-        // Partial semantic facts remain useful, but they do not prove executability.
-        let target_capabilities = if self
-            .diagnostics
-            .iter()
-            .all(|diagnostic| diagnostic.severity != DiagnosticSeverity::Error)
-        {
-            format!("\n\n{}", closure_target_capabilities())
-        } else {
-            String::new()
-        };
 
         let mut function_types = info.function_types_by_span.iter().collect::<Vec<_>>();
         function_types.sort_by_key(|(span, _)| **span);
@@ -717,6 +707,8 @@ impl<'a> SnapshotBuilder<'a> {
         let mut closures = info.closures.values().collect::<Vec<_>>();
         closures.sort_by_key(|closure| (closure.closure_id.start, closure.closure_id.end));
         for closure in closures {
+            let closure_span = Span::new(closure.closure_id.start, closure.closure_id.end);
+            let target_capabilities = self.target_capabilities_for(closure_span);
             let ownership = info.closure_ownership.get(&closure.closure_id);
             let signature = display_function_type_with_effects(
                 &closure.function_type,
@@ -770,7 +762,7 @@ impl<'a> SnapshotBuilder<'a> {
                 |ownership| closure_escape_summary(info, ownership.escape, &ownership.provenance),
             );
             hovers.push(SemanticHover::new(
-                Span::new(closure.closure_id.start, closure.closure_id.end),
+                closure_span,
                 format!(
                     "```doria\n{signature}\n```\n\n**Inferred invocation mode:** `{}`\n\n**Inferred checked effects:** {effects}\n\n**Ownership:** {ownership_summary}\n\n**Invocation:** {invocation}\n\n**Escape:** {escape}\n\n**Captures:** {captures}{target_capabilities}",
                     invocation_mode_name(closure.inferred_invocation_mode),
@@ -808,8 +800,10 @@ impl<'a> SnapshotBuilder<'a> {
         let mut callable_calls = info.callable_value_calls.iter().collect::<Vec<_>>();
         callable_calls.sort_by_key(|(span, _)| **span);
         for ((start, end), call) in callable_calls {
+            let call_span = Span::new(*start, *end);
+            let target_capabilities = self.target_capabilities_for(call_span);
             hovers.push(SemanticHover::new(
-                Span::new(*start, *end),
+                call_span,
                 format!(
                     "```doria\n{}\n```\n\nSemantically checked callable-value invocation returning `{}`.{target_capabilities}",
                     display_function_type_with_effects(&call.function_type, &call.checked_effects),
@@ -819,6 +813,19 @@ impl<'a> SnapshotBuilder<'a> {
         }
 
         self.semantic_hovers.extend(hovers);
+    }
+
+    fn target_capabilities_for(&self, span: Span) -> String {
+        // Partial facts remain useful, but an error within this exact semantic
+        // construct means the compiler has not proved that construct executable.
+        if self.diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == DiagnosticSeverity::Error
+                && diagnostic_overlaps_span(diagnostic, span)
+        }) {
+            String::new()
+        } else {
+            format!("\n\n{}", closure_target_capabilities())
+        }
     }
 
     fn collect_declarations(&mut self, program: &Program) {
@@ -3173,6 +3180,17 @@ fn same_token_variant(left: &TokenKind, right: &TokenKind) -> bool {
 
 fn span_contains(span: Span, offset: usize) -> bool {
     span.start <= offset && offset <= span.end
+}
+
+fn spans_overlap(left: Span, right: Span) -> bool {
+    left.start < right.end && right.start < left.end
+}
+
+fn diagnostic_overlaps_span(diagnostic: &Diagnostic, span: Span) -> bool {
+    // `Diagnostic::span` is the current-source primary range. Secondary labels
+    // can identify enclosing or causally related constructs and must not make
+    // an otherwise valid closure inherit their capability suppression.
+    spans_overlap(diagnostic.span, span)
 }
 
 #[cfg(test)]
