@@ -43,15 +43,20 @@ captures, or calculate lifetimes from text.
 The compiler publishes precise capture and callable diagnostics with safe capture
 fixes. Ordinary language-server analysis is target-neutral, so valid closures and
 type-only function syntax do not receive `E0641`; invalid closures receive their
-specific semantic diagnostic without a redundant execution boundary. Stage 30f
-PHP compatibility closure execution is implemented. Semantic closure hovers
+specific semantic diagnostic without a redundant execution boundary. Stage 30g
+List algorithms are implemented. Semantic closure hovers
 identify debug and native execution for a valid closure. They describe explicit
 PHP closure lowering separately and condition it on the program's value families
 and operations being supported by the PHP backend; target-neutral analysis does
-not claim per-closure PHP compatibility. PHP remains a secondary compatibility
-backend with independent limitations. Stage 30g List algorithms are next, so
-Stage 30 remains incomplete. Semantically invalid closures receive no execution
-capability block.
+not claim per-closure PHP compatibility. On a resolved `List<T>`, completion
+offers `map`, `filter`, and `reduce`, and call hover renders the compiler's
+concrete specialized callback and result types, selected readonly or writable
+repeatable access, checked effects, unchanged-source contract, and owned result.
+The server consumes `ListAlgorithmCallInfo`; it does not infer callback effects
+or reconstruct an algorithm type checker. Other collection families do not
+receive these algorithms. PHP remains a secondary compatibility backend with
+independent limitations. Stage 30h is next, so Stage 30 remains incomplete.
+Semantically invalid closures receive no execution capability block.
 
 Ownership hover text stays in Doria vocabulary: Owned Closure or Borrow-Bound Closure,
 Readonly/Writable/Owned taking capture, Readonly/Writable Repeatable or Consumes On
