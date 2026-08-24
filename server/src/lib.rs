@@ -1829,7 +1829,10 @@ mod tests {
         assert!(closure_text.contains("function(int): int"));
         assert!(closure_text.contains("Inferred invocation mode"));
         assert!(closure_text.contains("Readonly capture of `$minimum`"));
-        assert!(closure_text.contains("Executable In Debug, Native, And PHP Compatibility Targets"));
+        assert!(closure_text.contains("Executable In Debug And Native Targets"));
+        assert!(closure_text.contains(
+            "Explicit closure lowering is available when the program's value families and operations are supported by the PHP backend"
+        ));
         assert!(!closure_text.contains("BindingId"));
         assert!(!closure_text.contains("ClosureId"));
 
@@ -1870,7 +1873,8 @@ mod tests {
             .expect("lexical closure hover remains available");
         let text = hover["contents"]["value"].as_str().unwrap();
 
-        assert!(!text.contains("Executable In Debug, Native, And PHP Compatibility Targets"));
+        assert!(!text.contains("**Execution capability:**"));
+        assert!(!text.contains("**PHP compatibility:**"));
     }
 
     #[test]
@@ -1885,13 +1889,15 @@ mod tests {
         let valid = hover_at_offset(source, source.find("fn() => 42").expect("valid closure"))
             .expect("valid closure hover");
         let valid_text = valid["contents"]["value"].as_str().unwrap();
-        assert!(valid_text.contains("Executable In Debug, Native, And PHP Compatibility Targets"));
+        assert!(valid_text.contains("Executable In Debug And Native Targets"));
+        assert!(valid_text.contains("**PHP compatibility:**"));
 
         let call_offset = source.find("$valid()").expect("valid call") + "$valid".len() + 1;
         let call = hover_at_offset(source, call_offset).expect("valid callable-value hover");
         let call_text = call["contents"]["value"].as_str().unwrap();
         assert!(
-            call_text.contains("Executable In Debug, Native, And PHP Compatibility Targets"),
+            call_text.contains("Executable In Debug And Native Targets")
+                && call_text.contains("**PHP compatibility:**"),
             "{diagnostics:#?}\n{call_text}"
         );
 
@@ -1902,7 +1908,8 @@ mod tests {
         .expect("invalid closure hover");
         let invalid_text = invalid["contents"]["value"].as_str().unwrap();
         assert!(
-            !invalid_text.contains("Executable In Debug, Native, And PHP Compatibility Targets")
+            !invalid_text.contains("**Execution capability:**")
+                && !invalid_text.contains("**PHP compatibility:**")
         );
     }
 

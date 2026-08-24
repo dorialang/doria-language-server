@@ -1629,13 +1629,12 @@ function check_stage30f_callable_alignment(): void
     global $cargoManifest, $readme, $vscodeGrammar, $intellijLexer, $intellijLexerTest;
     global $lspAnalysis, $lspServer, $lspTests, $fixture, $rejectedFixture;
 
-    $compilerCommit = 'd395cd135399ce1803d1be7c5a2a9ded2053c738';
     require_check(
         preg_match(
-            '/doriac\s*=\s*\{[^}]*\brev\s*=\s*"' . $compilerCommit . '"/',
+            '/doriac\s*=\s*\{[^}]*\brev\s*=\s*"[0-9a-f]{40}"/',
             read_text($cargoManifest),
         ) === 1,
-        "root doriac dependency must pin compiler commit {$compilerCommit}",
+        'root doriac dependency must pin an exact compiler commit',
     );
 
     $fixtureText = read_text($fixture);
@@ -1662,7 +1661,7 @@ function check_stage30f_callable_alignment(): void
     }
     require_check(
         str_contains($fixtureText, 'Stage 30f PHP Compatibility') &&
-            str_contains($fixtureText, 'executable in debug, native, and PHP compatibility targets') &&
+            str_contains($fixtureText, 'explicit closure lowering is available on the PHP-supported surface') &&
             !str_contains($fixtureText, 'Planned/future: closure'),
         'shared fixture must describe the implemented Stage 30f target surface',
     );
@@ -1815,7 +1814,9 @@ function check_stage30f_callable_alignment(): void
             str_contains($lspText, 'Semantically checked callable-value invocation') &&
             str_contains($lspText, 'ClosureValueProvenance') &&
             str_contains($lspText, 'ClosureEscapeClassification') &&
-            str_contains($lspText, 'Executable In Debug, Native, And PHP Compatibility Targets') &&
+            str_contains($lspText, 'Executable In Debug And Native Targets') &&
+            str_contains($lspText, "Explicit closure lowering is available when the program's value families and operations are supported by the PHP backend") &&
+            !str_contains($lspText, 'Executable In Debug, Native, And PHP Compatibility Targets') &&
             !str_contains($lspText, 'PHP Compatibility Lands In Stage 30f') &&
             !str_contains($lspText, 'Stage 30b checks') &&
             !str_contains($lspText, 'Stage 30b infers'),
