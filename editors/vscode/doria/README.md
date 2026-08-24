@@ -18,12 +18,14 @@ closures, anonymous `function` blocks, explicit `with` capture lists, structural
 function invocation modes, parameter ownership, checked effects, grouped nested
 types, and callable-value calls. `once` is an accepted invocation modifier;
 `writable` and `take` retain their context-sensitive modifier scopes. This is
-presentation only; `doria-lsp` publishes Stage 30f compiler-owned closure,
-ownership, lifetime, escape diagnostics, review-only fixes, and semantic hovers.
+presentation only; `doria-lsp` publishes compiler-owned closure ownership,
+lifetime, escape diagnostics, review-only fixes, and semantic hovers, together
+with Stage 30g List-algorithm diagnostics and semantic facts.
 Valid closures are diagnostic-free in ordinary target-neutral editor analysis and
 execute through the compiler's debug and native targets and its supported PHP
-compatibility surface. PHP remains secondary, and Stage 30g List algorithms are
-next. The grammar does not implement
+compatibility surface. Completion and concrete semantic hovers expose `map`,
+`filter`, and `reduce` on `List<T>` only; diagnostics remain compiler-owned.
+PHP remains secondary, and Stage 30h is next. The grammar does not implement
 capture, callable, or execution semantics.
 
 ## Install the VS Code extension

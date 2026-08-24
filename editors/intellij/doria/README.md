@@ -88,12 +88,14 @@ closures, anonymous `function` blocks, explicit `with` capture lists, structural
 function invocation modes, parameter ownership, checked effects, grouped nested
 types, and callable-value calls. It recognizes `once` as an accepted keyword,
 keeps parameter `writable` and `take` as modifiers, and leaves semantic authority
-to the compiler. `doria-lsp` publishes Stage 30f compiler-owned closure,
-ownership, lifetime, escape diagnostics, review-only fixes, and semantic hovers.
+to the compiler. `doria-lsp` publishes compiler-owned closure ownership,
+lifetime, escape diagnostics, review-only fixes, and semantic hovers, together
+with Stage 30g List-algorithm diagnostics and semantic facts.
 Valid closures are diagnostic-free in ordinary target-neutral editor analysis and
 execute through the compiler's debug and native targets and its supported PHP
-compatibility surface. PHP remains secondary, and Stage 30g List algorithms are
-next. The presentation lexer does not
+compatibility surface. Completion and concrete semantic hovers expose `map`,
+`filter`, and `reduce` on `List<T>` only; diagnostics remain compiler-owned.
+PHP remains secondary, and Stage 30h is next. The presentation lexer does not
 implement semantics.
 
 VS Code and IntelliJ / JetBrains highlighting should stay aligned. The shared smoke fixture is:

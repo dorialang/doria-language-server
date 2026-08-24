@@ -467,6 +467,24 @@ function transform(
     return fn(string $value) => 1;
 }
 
+// Stage 30g: compiler-known List algorithms preserve insertion order.
+function exerciseListAlgorithms(): void
+{
+    List<int> $values = [1, 2, 3];
+    List<int> $mapped = $values->map(
+        fn(int $value) => $value * 2
+    );
+    List<int> $filtered = $values->filter(
+        fn(int $value) => $value > 1
+    );
+    int $total = $values->reduce(
+        0,
+        function (writable int $sum, int $value): void {
+            $sum += $value;
+        },
+    );
+}
+
 // Planned/future: async and await.
 async function fetchUser(int $id): User
 {

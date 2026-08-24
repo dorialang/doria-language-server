@@ -6,6 +6,10 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Aligned `doria-lsp` with Stage 30g `List<T>::map`, `filter`, and `reduce`,
+  including receiver-scoped completion, compiler-specialized semantic hovers,
+  and compiler-owned algorithm diagnostics. Other collection families do not
+  receive these algorithms.
 - Aligned `doria-lsp` with Stage 30f PHP compatibility closure execution and the
   final Stage 30e compiler corrections. Valid closures are diagnostic-free in
   ordinary target-neutral editor analysis; semantic hovers identify guaranteed

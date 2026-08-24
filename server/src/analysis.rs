@@ -14,7 +14,10 @@ use doriac::ownership::{
     CaptureAcquisitionKind, ClosureBorrowRoot, ClosureEscapeClassification, ClosureValueProvenance,
     InvocationConsumption,
 };
-use doriac::semantics::{CallableTarget, EnumSemanticInfo, SemanticInfo};
+use doriac::semantics::{
+    CallableTarget, EnumSemanticInfo, ListAlgorithmCallInfo, ListAlgorithmKind, ListCallbackAccess,
+    SemanticInfo,
+};
 use doriac::source::Span;
 use doriac::symbols::{BindingKind, BindingOwnership};
 use doriac::types::{
@@ -304,6 +307,9 @@ impl AnalysisSnapshot {
                 context.writable_payload_access,
                 context,
             );
+        }
+        if let Some(completions) = list_algorithm_completions(receiver) {
+            return completions;
         }
         let ResolvedType::SharedHandle(kind, payload) = receiver else {
             return Vec::new();
@@ -1812,6 +1818,10 @@ impl<'a> SnapshotBuilder<'a> {
                     self.member_name_span(Span::new(object.span().end, span.end), method);
                 self.record_member_receiver(method_span, object, current_class);
                 let builtin_hover = self.semantic_info.and_then(|info| {
+                    if let Some(algorithm) = info.list_algorithm_calls.get(&(span.start, span.end))
+                    {
+                        return Some(list_algorithm_hover(algorithm));
+                    }
                     let receiver = info.expression_type(object.span())?;
                     compiler_known_method_hover(
                         receiver,
@@ -2410,7 +2420,91 @@ fn is_readonly_shared_projection(expression: &Expr, semantic_info: Option<&Seman
 
 struct CompilerKnownMethodHover {
     signature: String,
-    documentation: &'static str,
+    documentation: String,
+}
+
+fn list_algorithm_completions(receiver: &ResolvedType) -> Option<Vec<SemanticCompletion>> {
+    let receiver = match receiver {
+        ResolvedType::SharedHandle(kind, payload) if kind.is_access() => payload.as_ref(),
+        receiver => receiver,
+    };
+    let ResolvedType::List(element) = receiver else {
+        return None;
+    };
+    let element = display_resolved_type(element);
+    Some(
+        [
+            (
+                "map",
+                format!("function map<U>(function({element}): U): List<U>"),
+                "Transforms each element in insertion order and returns a new List. The source List remains unchanged.",
+            ),
+            (
+                "filter",
+                format!("function filter(function({element}): bool): List<{element}>"),
+                "Returns a new List containing selected Copy elements in insertion order. The source List remains unchanged.",
+            ),
+            (
+                "reduce",
+                format!(
+                    "function reduce<A>(take A, function(writable A, {element}): void): A"
+                ),
+                "Owns the initial accumulator, lends it writably to the reducer for each element, and returns the completed accumulator.",
+            ),
+        ]
+        .into_iter()
+        .map(|(label, detail, documentation)| SemanticCompletion {
+            label: label.to_string(),
+            kind: 2,
+            detail,
+            documentation: Some(documentation.to_string()),
+        })
+        .collect(),
+    )
+}
+
+fn list_algorithm_hover(algorithm: &ListAlgorithmCallInfo) -> CompilerKnownMethodHover {
+    let receiver = display_resolved_type(&algorithm.receiver_type);
+    let callback =
+        display_function_type_with_effects(&algorithm.callback_type, &algorithm.checked_effects);
+    let result = display_resolved_type(&algorithm.result_type);
+    let parameters = match algorithm.kind {
+        ListAlgorithmKind::Map | ListAlgorithmKind::Filter => callback,
+        ListAlgorithmKind::Reduce => format!(
+            "take {}, {callback}",
+            display_resolved_type(
+                algorithm
+                    .accumulator_type
+                    .as_ref()
+                    .expect("checked reduce algorithm has an accumulator type"),
+            )
+        ),
+    };
+    let method = match algorithm.kind {
+        ListAlgorithmKind::Map => "map",
+        ListAlgorithmKind::Filter => "filter",
+        ListAlgorithmKind::Reduce => "reduce",
+    };
+    let effects = if algorithm.checked_effects.is_empty() {
+        "none".to_string()
+    } else {
+        algorithm
+            .checked_effects
+            .iter()
+            .map(display_resolved_type)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let (access, invocation) = match algorithm.callback_access {
+        ListCallbackAccess::Readonly => ("readonly", "Readonly Repeatable"),
+        ListCallbackAccess::Writable => ("writable", "Writable Repeatable"),
+    };
+    CompilerKnownMethodHover {
+        signature: format!("{receiver}::{method}({parameters}): {result}"),
+        documentation: format!(
+            "**Callback access:** {access}\n\n**Callback invocation:** {invocation}\n\n**Checked effects:** {effects}\n\n**Source:** Unchanged\n\n**Result:** Owned `{result}`"
+        ),
+    }
 }
 
 fn shared_method_completion(receiver: &ResolvedType, method: &str) -> SemanticCompletion {
@@ -2450,7 +2544,7 @@ fn compiler_known_method_hover(
             "function {}::{method}({parameters}): {return_type}",
             display_resolved_type(receiver)
         ),
-        documentation,
+        documentation: documentation.to_string(),
     })
 }
 
@@ -4235,6 +4329,148 @@ function main(): void
                 .unwrap_or_else(|| panic!("missing hover for {needle}"));
             assert!(hover.markdown.contains(expected), "{}", hover.markdown);
         }
+    }
+
+    #[test]
+    fn stage_30g_list_completion_is_receiver_scoped() {
+        let source = r#"function main(): void
+{
+    List<int> $list = [1];
+    Set<int> $set = Set::from([1]);
+    let $mapped = $list->map(fn(int $value) => $value);
+    echo $set->contains(1);
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("stage30g-completion.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+
+        let list_offset = source.find("$list->map").unwrap() + "$list->".len();
+        let completions = snapshot
+            .member_completions_at_offset(list_offset)
+            .expect("List call should retain its resolved receiver");
+        let labels = completions
+            .iter()
+            .map(|completion| completion.label.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(labels, HashSet::from(["map", "filter", "reduce"]));
+        for (label, expected) in [
+            (
+                "map",
+                "Transforms each element in insertion order and returns a new List. The source List remains unchanged.",
+            ),
+            (
+                "filter",
+                "Returns a new List containing selected Copy elements in insertion order. The source List remains unchanged.",
+            ),
+            (
+                "reduce",
+                "Owns the initial accumulator, lends it writably to the reducer for each element, and returns the completed accumulator.",
+            ),
+        ] {
+            let completion = completions
+                .iter()
+                .find(|completion| completion.label == label)
+                .expect("algorithm completion");
+            assert_eq!(completion.documentation.as_deref(), Some(expected));
+            assert!(!completion.detail.contains("effects("));
+        }
+
+        let set_offset = source.find("$set->contains").unwrap() + "$set->".len();
+        let other = snapshot
+            .member_completions_at_offset(set_offset)
+            .expect("Set call should retain its resolved receiver");
+        assert!(other
+            .iter()
+            .all(|completion| !matches!(completion.label.as_str(), "map" | "filter" | "reduce")));
+
+        let int = Box::new(ResolvedType::Integer(doriac::numeric::IntegerType::Int64));
+        for receiver in [
+            ResolvedType::TypedArray(int.clone()),
+            ResolvedType::Dictionary(Box::new(ResolvedType::String), int.clone()),
+            ResolvedType::SortedDictionary(Box::new(ResolvedType::String), int.clone()),
+            ResolvedType::Set(int.clone()),
+            ResolvedType::SortedSet(int.clone()),
+            ResolvedType::PriorityQueue(int.clone()),
+            ResolvedType::Deque(int),
+        ] {
+            assert!(
+                list_algorithm_completions(&receiver).is_none(),
+                "non-List receiver received Stage 30g algorithms: {receiver:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn stage_30g_hover_uses_the_concrete_compiler_algorithm_plan() {
+        let source = r#"class Failure implements Error
+{
+    function __construct(string $message) {}
+}
+
+function transform(): void throws Failure
+{
+    List<int> $values = [1, 2];
+    let writable $calls = 0;
+    let writable $callback = function (int $value): string with (writable $calls) {
+        $calls += 1;
+        if ($value == 2) { throw new Failure("stop"); }
+        return "{$value}";
+    };
+    List<string> $mapped = $values->map($callback);
+    int $total = $values->reduce(0, function (writable int $sum, int $value): void {
+        $sum += $value;
+    });
+}
+
+function main(): void {}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("stage30g-hover.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+
+        let map_offset = source.find("$values->map").unwrap() + "$values->".len();
+        let map = snapshot
+            .hover_at_offset(map_offset)
+            .expect("map should have a semantic hover");
+        assert!(
+            map.markdown.contains(
+                "List<int>::map(function writable(int): string throws Failure): List<string>"
+            ),
+            "{}",
+            map.markdown
+        );
+        for expected in [
+            "**Callback access:** writable",
+            "**Callback invocation:** Writable Repeatable",
+            "**Checked effects:** Failure",
+            "**Source:** Unchanged",
+            "**Result:** Owned `List<string>`",
+        ] {
+            assert!(map.markdown.contains(expected), "{}", map.markdown);
+        }
+        for internal in ["FunctionTypeId", "plan ID", "descriptor", "__doria"] {
+            assert!(!map.markdown.contains(internal), "{}", map.markdown);
+        }
+
+        let reduce_offset = source.find("$values->reduce").unwrap() + "$values->".len();
+        let reduce = snapshot
+            .hover_at_offset(reduce_offset)
+            .expect("reduce should have a semantic hover");
+        assert!(
+            reduce
+                .markdown
+                .contains("List<int>::reduce(take int, function(writable int, int): void): int"),
+            "{}",
+            reduce.markdown
+        );
+        assert!(reduce.markdown.contains("**Checked effects:** none"));
     }
 
     #[test]

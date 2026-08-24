@@ -1814,6 +1814,9 @@ function check_stage30f_callable_alignment(): void
             str_contains($lspText, 'Semantically checked callable-value invocation') &&
             str_contains($lspText, 'ClosureValueProvenance') &&
             str_contains($lspText, 'ClosureEscapeClassification') &&
+            str_contains($lspText, 'ListAlgorithmCallInfo') &&
+            str_contains($lspText, 'list_algorithm_calls') &&
+            str_contains($lspText, 'Transforms each element in insertion order and returns a new List') &&
             str_contains($lspText, 'Executable In Debug And Native Targets') &&
             str_contains($lspText, "Explicit closure lowering is available when the program's value families and operations are supported by the PHP backend") &&
             !str_contains($lspText, 'Executable In Debug, Native, And PHP Compatibility Targets') &&
@@ -1838,6 +1841,9 @@ function check_stage30f_callable_alignment(): void
         'malformed_stage_30a_forms_remain_parser_diagnostics',
         'stage_30a_does_not_change_named_function_method_or_static_calls',
         'stage_30_diagnostics_preserve_compiler_source_order_without_redundant_e0641',
+        'stage_30g_list_completion_is_receiver_scoped',
+        'stage_30g_hover_uses_the_concrete_compiler_algorithm_plan',
+        'stage_30g_algorithm_diagnostics_remain_compiler_owned_and_source_ordered',
         'developmentOnly',
     ] as $coverage) {
         require_check(
@@ -1848,13 +1854,14 @@ function check_stage30f_callable_alignment(): void
 
     $readmeText = read_text($readme);
     require_check(
-        str_contains($readmeText, 'Stage 30f PHP compatibility closure execution is implemented') &&
+        str_contains($readmeText, 'Stage 30g List algorithms are implemented') &&
             str_contains($readmeText, 'E0641') &&
             str_contains($readmeText, 'supported compatibility surface') &&
-            str_contains($readmeText, 'Stage 30g') &&
+            str_contains($readmeText, 'Stage 30h is next') &&
+            str_contains($readmeText, '`map`, `filter`, and `reduce` only for resolved `List<T>` receivers') &&
             str_contains($readmeText, 'Stage 30 remains incomplete') &&
             !str_contains($readmeText, 'lowering remains the Stage 30f boundary'),
-        'README must state Stage 30f compatibility execution and Stage 30g next',
+        'README must state Stage 30g tooling alignment and Stage 30h next',
     );
 }
 

@@ -182,6 +182,80 @@ fn valid_stage_30f_closure_documents_are_target_neutral() {
 }
 
 #[test]
+fn stage_30g_algorithm_diagnostics_remain_compiler_owned_and_source_ordered() {
+    let cases = [
+        (
+            "once-list-callback.doria",
+            "class Token {} function main(): void { List<int> $values = [1]; let $token = new Token(); function once(int): int $callback = function (int $value): int with (take $token) { let $owned = $token; return $value; }; let $mapped = $values->map($callback); }",
+            "E0664",
+        ),
+        (
+            "readonly-writable-list-callback.doria",
+            "function main(): void { List<int> $values = [1]; let writable $calls = 0; let $callback = function (int $value): int with (writable $calls) { $calls += 1; return $value; }; let $mapped = $values->map($callback); }",
+            "E0668",
+        ),
+        (
+            "move-filter.doria",
+            "class Item {} function main(): void { List<Item> $items = [new Item()]; let $filtered = $items->filter(fn(Item $item) => true); }",
+            "E0666",
+        ),
+        (
+            "borrowed-map-result.doria",
+            "class Item {} function main(): void { List<Item> $items = [new Item()]; List<Item> $same = $items->map(fn(Item $item) => $item); }",
+            "E0667",
+        ),
+        (
+            "reduce-shape.doria",
+            "function main(): void { List<int> $values = [1]; let $result = $values->reduce(0, fn(int $sum, int $value) => $sum + $value); }",
+            "E0665",
+        ),
+        (
+            "checked-list-callback.doria",
+            "class Failure implements Error { function __construct(string $message) {} } function transform(): void { List<int> $values = [1]; let $mapped = $values->map(function (int $value): int { throw new Failure(\"stop\"); }); } function main(): void {}",
+            "E0631",
+        ),
+        (
+            "named-list-algorithm.doria",
+            "function main(): void { List<int> $values = [1]; let $mapped = $values->map(transform: fn(int $value) => $value); }",
+            "E0519",
+        ),
+        (
+            "other-collection-algorithm.doria",
+            "function main(): void { Set<int> $values = Set::from([1]); let $mapped = $values->map(fn(int $value) => $value); }",
+            "E0521",
+        ),
+    ];
+
+    for (name, source, code) in cases {
+        assert_lsp_diagnostic_matches_compiler(name, source, code);
+        let compiler = doriac::check_source(name, source)
+            .expect_err("Stage 30g diagnostic fixture must fail checking");
+        let lsp = diagnostics_for_document(&format!("file:///{name}"), source);
+        assert_eq!(
+            lsp.iter()
+                .filter_map(|diagnostic| diagnostic["code"].as_str())
+                .collect::<Vec<_>>(),
+            compiler
+                .iter()
+                .map(|diagnostic| diagnostic.code)
+                .collect::<Vec<_>>(),
+            "diagnostic order drift for {name}",
+        );
+        assert_eq!(
+            lsp.iter()
+                .filter(|diagnostic| diagnostic["code"] == code)
+                .count(),
+            1,
+            "algorithm diagnostic must not be duplicated for {name}: {lsp:#?}",
+        );
+        assert!(
+            lsp.iter().all(|diagnostic| diagnostic["code"] != "E0641"),
+            "valid Stage 30g syntax must not receive E0641: {lsp:#?}",
+        );
+    }
+}
+
+#[test]
 fn type_only_function_syntax_has_no_execution_boundary() {
     let cases = [
         (
