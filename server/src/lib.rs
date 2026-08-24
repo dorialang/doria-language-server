@@ -845,7 +845,7 @@ fn completion_items() -> Value {
         match keyword {
             "fn" => {
                 item["detail"] = json!("Doria arrow-closure keyword");
-                item["documentation"] = json!("Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. The compiler checks closure signatures, captures, ownership, invocation mode, checked effects, and escape. Closure execution is available through the explicit debug interpreter; native execution lands in Stage 30e and PHP compatibility lands in Stage 30f.");
+                item["documentation"] = json!("Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. The compiler checks closure signatures, captures, ownership, invocation mode, checked effects, and escape.");
             }
             "with" => {
                 item["detail"] = json!("Doria closure-capture keyword");
@@ -1377,10 +1377,10 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "Declares nominal conformance to a compiler-known contract such as `Displayable` or `Error`.",
         ),
         TokenKind::Function => Some(
-            "Declares a named function or method, an anonymous block closure, or a structural function type according to context. Function types preserve readonly, writable, or once invocation; parameter ownership; and checked effects. The compiler checks structural callable compatibility. Closure execution is available through the explicit debug interpreter; native execution lands in Stage 30e and PHP compatibility lands in Stage 30f.",
+            "Declares a named function or method, an anonymous block closure, or a structural function type according to context. Function types preserve readonly, writable, or once invocation; parameter ownership; and checked effects. The compiler checks structural callable compatibility.",
         ),
         TokenKind::Fn => Some(
-            "Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. The compiler checks closure signatures, captures, ownership, invocation mode, checked effects, and escape. Closure execution is available through the explicit debug interpreter; native execution lands in Stage 30e and PHP compatibility lands in Stage 30f.",
+            "Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. The compiler checks closure signatures, captures, ownership, invocation mode, checked effects, and escape.",
         ),
         TokenKind::With => Some(
             "Introduces an explicit closure capture list. A bare capture is readonly, `writable` requests exclusive writable access, and `take` transfers ownership. The compiler validates capture names, modes, ownership, lifetimes, and escape.",
@@ -1803,7 +1803,7 @@ mod tests {
             .is_some_and(|text| text.contains("The compiler checks closure signatures")));
         assert!(arrow["documentation"]
             .as_str()
-            .is_some_and(|text| text.contains("debug interpreter")));
+            .is_some_and(|text| !text.contains("target")));
 
         let capture = completion_item("with");
         assert_eq!(capture["detail"], "Doria closure-capture keyword");
@@ -1819,20 +1819,18 @@ mod tests {
 
         assert!(hover_description(&TokenKind::Fn)
             .is_some_and(|text| text.contains("The compiler checks closure signatures")));
-        assert!(hover_description(&TokenKind::Fn)
-            .is_some_and(|text| text.contains("native execution lands in Stage 30e")));
+        assert!(hover_description(&TokenKind::Fn).is_some_and(|text| !text.contains("target")));
         assert!(hover_description(&TokenKind::With).is_some_and(|text| text
             .contains("validates capture names, modes, ownership, lifetimes, and escape")));
 
-        let source = "let $minimum = 70; let $f = fn(int $value) with ($minimum) => $value; function accept(function once(): int $callback): void { $callback(); }";
+        let source = "let $minimum = 70; let $f = fn(int $value) with ($minimum) => $value; function accept(take function once(): int $callback): void { $callback(); }";
         let closure = hover_at_offset(source, source.find("fn(").unwrap()).expect("closure hover");
         let closure_text = closure["contents"]["value"].as_str().unwrap();
         assert!(closure_text.contains("function(int): int"));
         assert!(closure_text.contains("Inferred invocation mode"));
         assert!(closure_text.contains("Readonly capture of `$minimum`"));
-        assert!(closure_text.contains("Debug Interpreter Supports Closure Execution"));
-        assert!(closure_text.contains("Closure Execution Lands In Stage 30e"));
-        assert!(closure_text.contains("Closure Lowering Lands In Stage 30f"));
+        assert!(closure_text.contains("Executable In Debug And Native Targets"));
+        assert!(closure_text.contains("PHP Compatibility Lands In Stage 30f"));
         assert!(!closure_text.contains("BindingId"));
         assert!(!closure_text.contains("ClosureId"));
 
@@ -1860,6 +1858,52 @@ mod tests {
         assert!(call["contents"]["value"]
             .as_str()
             .is_some_and(|text| text.contains("Semantically checked callable-value invocation")));
+    }
+
+    #[test]
+    fn invalid_closure_hover_does_not_claim_target_execution() {
+        let source = "let $outside = 1; let $invalid = fn() => $outside;";
+        let diagnostics = diagnostics_for_document("file:///invalid-hover.doria", source);
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "E0642"));
+        let hover = hover_at_offset(source, source.find("fn()").expect("invalid closure"))
+            .expect("lexical closure hover remains available");
+        let text = hover["contents"]["value"].as_str().unwrap();
+
+        assert!(!text.contains("Executable In Debug And Native Targets"));
+        assert!(!text.contains("PHP Compatibility Lands In Stage 30f"));
+    }
+
+    #[test]
+    fn unrelated_closure_errors_do_not_hide_valid_target_capabilities() {
+        let source =
+            "let $outside = 1; let $valid = fn() => 42; let $invalid = fn() => $outside; $valid();";
+        let diagnostics = diagnostics_for_document("file:///mixed-hover.doria", source);
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "E0642"));
+
+        let valid = hover_at_offset(source, source.find("fn() => 42").expect("valid closure"))
+            .expect("valid closure hover");
+        let valid_text = valid["contents"]["value"].as_str().unwrap();
+        assert!(valid_text.contains("Executable In Debug And Native Targets"));
+
+        let call_offset = source.find("$valid()").expect("valid call") + "$valid".len() + 1;
+        let call = hover_at_offset(source, call_offset).expect("valid callable-value hover");
+        let call_text = call["contents"]["value"].as_str().unwrap();
+        assert!(
+            call_text.contains("Executable In Debug And Native Targets"),
+            "{diagnostics:#?}\n{call_text}"
+        );
+
+        let invalid = hover_at_offset(
+            source,
+            source.find("fn() => $outside").expect("invalid closure"),
+        )
+        .expect("invalid closure hover");
+        let invalid_text = invalid["contents"]["value"].as_str().unwrap();
+        assert!(!invalid_text.contains("Executable In Debug And Native Targets"));
     }
 
     #[test]

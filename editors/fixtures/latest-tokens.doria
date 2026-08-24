@@ -111,8 +111,8 @@ function inspectHistory(History<int> $history): void
 {
 }
 
-// Stage 30d: structural callables execute through the explicit debug target.
-// Native and PHP closure backends remain staged; editors present compiler facts.
+// Stage 30e: structural callables execute through debug and native targets.
+// PHP closure compatibility remains staged; editors present compiler facts.
 function(int): int $readonlyCallback = fn(int $value) => $value;
 
 function(writable Counter): void $writeCounter =
@@ -441,7 +441,7 @@ try {
     echo "done";
 }
 
-// Stage 30d Closure HIR/MIR And Interpreter Oracle: executable in the debug target.
+// Stage 30e Native Execution: executable in debug and native targets.
 let $double = fn(int $value) => $value * 2;
 
 let $minimum = 70;
