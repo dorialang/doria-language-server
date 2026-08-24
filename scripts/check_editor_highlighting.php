@@ -1624,18 +1624,17 @@ function check_fixture(): void
     }
 }
 
-function check_stage30a_callable_alignment(): void
+function check_stage30f_callable_alignment(): void
 {
     global $cargoManifest, $readme, $vscodeGrammar, $intellijLexer, $intellijLexerTest;
     global $lspAnalysis, $lspServer, $lspTests, $fixture, $rejectedFixture;
 
-    $compilerCommit = '329a0699d13375038c22ddac2756c6a33b8c5fdb';
     require_check(
         preg_match(
-            '/doriac\s*=\s*\{[^}]*\brev\s*=\s*"' . $compilerCommit . '"/',
+            '/doriac\s*=\s*\{[^}]*\brev\s*=\s*"[0-9a-f]{40}"/',
             read_text($cargoManifest),
         ) === 1,
-        "root doriac dependency must pin compiler commit {$compilerCommit}",
+        'root doriac dependency must pin an exact compiler commit',
     );
 
     $fixtureText = read_text($fixture);
@@ -1661,10 +1660,10 @@ function check_stage30a_callable_alignment(): void
         );
     }
     require_check(
-        str_contains($fixtureText, 'Stage 30e Native Execution') &&
-            str_contains($fixtureText, 'executable in debug and native targets') &&
+        str_contains($fixtureText, 'Stage 30f PHP Compatibility') &&
+            str_contains($fixtureText, 'explicit closure lowering is available on the PHP-supported surface') &&
             !str_contains($fixtureText, 'Planned/future: closure'),
-        'shared fixture must describe Stage 30e debug/native execution without claiming PHP execution',
+        'shared fixture must describe the implemented Stage 30f target surface',
     );
 
     $rejectedText = read_text($rejectedFixture);
@@ -1816,13 +1815,15 @@ function check_stage30a_callable_alignment(): void
             str_contains($lspText, 'ClosureValueProvenance') &&
             str_contains($lspText, 'ClosureEscapeClassification') &&
             str_contains($lspText, 'Executable In Debug And Native Targets') &&
-            str_contains($lspText, 'PHP Compatibility Lands In Stage 30f') &&
+            str_contains($lspText, "Explicit closure lowering is available when the program's value families and operations are supported by the PHP backend") &&
+            !str_contains($lspText, 'Executable In Debug, Native, And PHP Compatibility Targets') &&
+            !str_contains($lspText, 'PHP Compatibility Lands In Stage 30f') &&
             !str_contains($lspText, 'Stage 30b checks') &&
             !str_contains($lspText, 'Stage 30b infers'),
         'LSP must preserve compiler metadata and expose current closure target capabilities without stale stage claims',
     );
     foreach ([
-        'valid_stage_30e_closure_documents_are_target_neutral',
+        'valid_stage_30f_closure_documents_are_target_neutral',
         'missing_capture_diagnostic_stays_off_following_source',
         'malformed_capture_forms_remain_parser_diagnostics_not_stage_30_boundaries',
         'type_only_function_syntax_has_no_execution_boundary',
@@ -1847,11 +1848,13 @@ function check_stage30a_callable_alignment(): void
 
     $readmeText = read_text($readme);
     require_check(
-        str_contains($readmeText, 'Stage 30e native closure execution is implemented') &&
+        str_contains($readmeText, 'Stage 30f PHP compatibility closure execution is implemented') &&
             str_contains($readmeText, 'E0641') &&
-            str_contains($readmeText, 'debug and native targets') &&
-            str_contains($readmeText, 'Stage 30f'),
-        'README must state Stage 30e debug/native execution and the remaining PHP boundary',
+            str_contains($readmeText, 'supported compatibility surface') &&
+            str_contains($readmeText, 'Stage 30g') &&
+            str_contains($readmeText, 'Stage 30 remains incomplete') &&
+            !str_contains($readmeText, 'lowering remains the Stage 30f boundary'),
+        'README must state Stage 30f compatibility execution and Stage 30g next',
     );
 }
 
@@ -1898,7 +1901,7 @@ function main(): int
     check_lsp_completion_vocabulary();
     check_editor_fixture_diagnostics_are_skipped();
     check_fixture();
-    check_stage30a_callable_alignment();
+    check_stage30f_callable_alignment();
     check_inferred_main_effect_alignment();
     echo "Doria editor highlighting checks passed.\n";
     return 0;

@@ -18,11 +18,12 @@ closures, anonymous `function` blocks, explicit `with` capture lists, structural
 function invocation modes, parameter ownership, checked effects, grouped nested
 types, and callable-value calls. `once` is an accepted invocation modifier;
 `writable` and `take` retain their context-sensitive modifier scopes. This is
-presentation only; `doria-lsp` publishes Stage 30e compiler-owned closure,
+presentation only; `doria-lsp` publishes Stage 30f compiler-owned closure,
 ownership, lifetime, escape diagnostics, review-only fixes, and semantic hovers.
 Valid closures are diagnostic-free in ordinary target-neutral editor analysis and
-execute through the compiler's debug and native targets. PHP lowering remains
-Stage 30f. The grammar does not implement
+execute through the compiler's debug and native targets and its supported PHP
+compatibility surface. PHP remains secondary, and Stage 30g List algorithms are
+next. The grammar does not implement
 capture, callable, or execution semantics.
 
 ## Install the VS Code extension

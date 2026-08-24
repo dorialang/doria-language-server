@@ -6,9 +6,11 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
-- Aligned `doria-lsp` with Stage 30e native closure execution. Valid closures are
-  diagnostic-free in ordinary target-neutral editor analysis; semantic hovers
-  identify debug and native execution while retaining the Stage 30f PHP boundary.
+- Aligned `doria-lsp` with Stage 30f PHP compatibility closure execution and the
+  final Stage 30e compiler corrections. Valid closures are diagnostic-free in
+  ordinary target-neutral editor analysis; semantic hovers identify guaranteed
+  debug/native execution and describe PHP closure lowering without claiming that
+  target-neutral analysis proved every surrounding operation PHP-compatible.
 - Re-seed local-compiler runner lockfiles from the canonical workspace lock so
   installed-toolchain refreshes cannot reuse an incompatible generated lock.
 - Aligned `doria-lsp` with Stage 30c ownership, lifetime, and escape analysis,

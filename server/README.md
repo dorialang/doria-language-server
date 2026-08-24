@@ -4,11 +4,14 @@ This crate builds the standalone `doria-lsp` executable. It owns LSP transport, 
 
 Language behavior comes from the exact `doriac` revision pinned by the workspace manifest and lockfile. Do not copy compiler parsing or semantic rules into this crate.
 
-The pinned compiler supplies Stage 30e debug and native closure execution plus
-function-value ownership, lifetime, escape, diagnostic, fix, and hover facts. The
-server only adapts those structured facts to LSP. Ordinary editor analysis is
-target-neutral and does not publish `E0641` for valid closures; PHP lowering
-remains Stage 30f.
+The pinned compiler supplies Stage 30f closure execution plus function-value
+ownership, lifetime, escape, diagnostic, fix, and hover facts. The server only
+adapts those structured facts to LSP. Ordinary editor analysis is target-neutral:
+it identifies guaranteed debug/native execution for valid closures and describes
+PHP lowering as conditional on the program's independently supported PHP surface.
+It does not publish `E0641` for valid closures. PHP remains a secondary
+compatibility backend with independent limitations; Stage 30g List algorithms are
+next, and Stage 30 remains incomplete.
 
 From the repository root:
 

@@ -2854,7 +2854,7 @@ fn display_function_type_with_effects(ty: &ResolvedType, effects: &[ResolvedType
 }
 
 fn closure_target_capabilities() -> &'static str {
-    "**Debug and native target capability:** Executable In Debug And Native Targets\n\n**PHP target capability:** PHP Compatibility Lands In Stage 30f"
+    "**Execution capability:** Executable In Debug And Native Targets\n\n**PHP compatibility:** Explicit closure lowering is available when the program's value families and operations are supported by the PHP backend."
 }
 
 fn invocation_mode_name(mode: FunctionInvocationMode) -> &'static str {
@@ -4815,7 +4815,7 @@ function main(): void
             "Writable Repeatable",
             "Nonescaping",
             "Executable In Debug And Native Targets",
-            "PHP Compatibility Lands In Stage 30f",
+            "Explicit closure lowering is available when the program's value families and operations are supported by the PHP backend",
         ] {
             assert!(
                 operation.markdown.contains(expected),
