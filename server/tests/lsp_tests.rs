@@ -78,10 +78,10 @@ fn assert_lsp_diagnostic_matches_compiler(name: &str, source: &str, code: &str) 
     assert_eq!(lsp_related, compiler_related);
 }
 
-fn assert_stage_30d_closure_is_valid(name: &str, source: &str) {
+fn assert_stage_30_closure_is_valid(name: &str, source: &str) {
     doriac::parse_source(name, source).expect("accepted closure grammar must parse");
     doriac::check_source(name, source)
-        .unwrap_or_else(|diagnostics| panic!("valid Stage 30d source: {diagnostics:#?}"));
+        .unwrap_or_else(|diagnostics| panic!("valid Stage 30 source: {diagnostics:#?}"));
     let uri = format!("file:///{name}");
     let diagnostics = diagnostics_for_document(&uri, source);
     assert!(diagnostics.is_empty(), "{name}: {diagnostics:#?}");
@@ -140,7 +140,7 @@ $count = 1;
 }
 
 #[test]
-fn valid_stage_30d_closure_documents_are_target_neutral() {
+fn valid_stage_30e_closure_documents_are_target_neutral() {
     let cases = [
         (
             "no-capture.doria",
@@ -166,10 +166,18 @@ fn valid_stage_30d_closure_documents_are_target_neutral() {
             "function-property.doria",
             "class Runner { function(int): int $callback = fn(int $value) => $value + 1; } function main(): void { let $runner = new Runner(); int $result = $runner->callback(41); }",
         ),
+        (
+            "native-writable-capture.doria",
+            "function bind(writable int $value): function writable(): int { return function (): int with (writable $value) { $value += 1; return $value; }; } function main(): void { let writable $value = 41; writable function writable(): int $callback = bind($value); int $result = $callback(); }",
+        ),
+        (
+            "nullable-function.doria",
+            "function maybe(): ?function(): int { return fn() => 42; } function main(): void { let $callback = maybe(); if ($callback != null) { int $result = $callback(); } }",
+        ),
     ];
 
     for (name, source) in cases {
-        assert_stage_30d_closure_is_valid(name, source);
+        assert_stage_30_closure_is_valid(name, source);
     }
 }
 
@@ -384,7 +392,7 @@ fn publishes_the_complete_stage_30c_ownership_diagnostic_surface() {
         }
     }
 
-    assert_stage_30d_closure_is_valid(
+    assert_stage_30_closure_is_valid(
         "stage30d-valid.doria",
         "function main(): void { let $callback = fn() => 1; }",
     );

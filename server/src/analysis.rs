@@ -7,7 +7,7 @@ use doriac::ast::{
     MatchPattern, MemberAccess, Param, Program, StaticQualifier, Stmt, TryStmt, VarDecl,
     WhenExpression, WhileStmt,
 };
-use doriac::diagnostics::Diagnostic;
+use doriac::diagnostics::{Diagnostic, DiagnosticSeverity};
 use doriac::enums::{EnumBackingType, EnumBackingValue};
 use doriac::lexer::{Token, TokenKind};
 use doriac::ownership::{
@@ -625,6 +625,16 @@ impl<'a> SnapshotBuilder<'a> {
             return;
         };
         let mut hovers = Vec::new();
+        // Partial semantic facts remain useful, but they do not prove executability.
+        let target_capabilities = if self
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity != DiagnosticSeverity::Error)
+        {
+            format!("\n\n{}", closure_target_capabilities())
+        } else {
+            String::new()
+        };
 
         let mut function_types = info.function_types_by_span.iter().collect::<Vec<_>>();
         function_types.sort_by_key(|(span, _)| **span);
@@ -762,9 +772,8 @@ impl<'a> SnapshotBuilder<'a> {
             hovers.push(SemanticHover::new(
                 Span::new(closure.closure_id.start, closure.closure_id.end),
                 format!(
-                    "```doria\n{signature}\n```\n\n**Inferred invocation mode:** `{}`\n\n**Inferred checked effects:** {effects}\n\n**Ownership:** {ownership_summary}\n\n**Invocation:** {invocation}\n\n**Escape:** {escape}\n\n**Captures:** {captures}\n\n{}",
+                    "```doria\n{signature}\n```\n\n**Inferred invocation mode:** `{}`\n\n**Inferred checked effects:** {effects}\n\n**Ownership:** {ownership_summary}\n\n**Invocation:** {invocation}\n\n**Escape:** {escape}\n\n**Captures:** {captures}{target_capabilities}",
                     invocation_mode_name(closure.inferred_invocation_mode),
-                    closure_target_capabilities(),
                 ),
             ));
 
@@ -802,10 +811,9 @@ impl<'a> SnapshotBuilder<'a> {
             hovers.push(SemanticHover::new(
                 Span::new(*start, *end),
                 format!(
-                    "```doria\n{}\n```\n\nSemantically checked callable-value invocation returning `{}`.\n\n{}",
+                    "```doria\n{}\n```\n\nSemantically checked callable-value invocation returning `{}`.{target_capabilities}",
                     display_function_type_with_effects(&call.function_type, &call.checked_effects),
                     display_resolved_type(&call.return_type),
-                    closure_target_capabilities(),
                 ),
             ));
         }
@@ -2839,7 +2847,7 @@ fn display_function_type_with_effects(ty: &ResolvedType, effects: &[ResolvedType
 }
 
 fn closure_target_capabilities() -> &'static str {
-    "**Debug target capability:** Debug Interpreter Supports Closure Execution\n\n**Native target capability:** Closure Execution Lands In Stage 30e\n\n**PHP target capability:** Closure Lowering Lands In Stage 30f"
+    "**Debug and native target capability:** Executable In Debug And Native Targets\n\n**PHP target capability:** PHP Compatibility Lands In Stage 30f"
 }
 
 fn invocation_mode_name(mode: FunctionInvocationMode) -> &'static str {
@@ -4788,9 +4796,8 @@ function main(): void
             "Owned taking capture of `$copy`",
             "Writable Repeatable",
             "Nonescaping",
-            "Debug Interpreter Supports Closure Execution",
-            "Closure Execution Lands In Stage 30e",
-            "Closure Lowering Lands In Stage 30f",
+            "Executable In Debug And Native Targets",
+            "PHP Compatibility Lands In Stage 30f",
         ] {
             assert!(
                 operation.markdown.contains(expected),
