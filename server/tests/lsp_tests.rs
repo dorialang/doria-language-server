@@ -140,7 +140,7 @@ $count = 1;
 }
 
 #[test]
-fn valid_stage_30f_closure_documents_are_target_neutral() {
+fn accepted_stage_30h_closure_routes_are_compiler_owned_and_target_neutral() {
     let cases = [
         (
             "no-capture.doria",
@@ -173,6 +173,22 @@ fn valid_stage_30f_closure_documents_are_target_neutral() {
         (
             "nullable-function.doria",
             "function maybe(): ?function(): int { return fn() => 42; } function main(): void { let $callback = maybe(); if ($callback != null) { int $result = $callback(); } }",
+        ),
+        (
+            "mixed-function.doria",
+            "function inspect(mixed $value): void {} function boxed(): mixed { return fn() => 13; } function main(): void { let $callback = fn() => 42; inspect($callback); int $result = $callback(); mixed $returned = boxed(); }",
+        ),
+        (
+            "final-collection-storage.doria",
+            "function main(): void { (function(): int)[] $fixed = [fn() => 10]; writable SortedDictionary<string, function(): int> $sorted = SortedDictionary::from([]); $sorted->set(\"value\", fn() => 11); writable Deque<function(): int> $queue = Deque::from([]); $queue->pushBack(fn() => 12); function(): int $front = $queue->popFront() ?? fn() => 0; int $result = $fixed[0]() + $sorted[\"value\"]() + $front(); }",
+        ),
+        (
+            "payload-enum-storage.doria",
+            "enum Work { case Run(function(): int $callback); } function execute(take Work $work): int { return match (take $work) { Work::Run($callback) => $callback() }; } function main(): void { let $work = Work::Run(fn() => 42); int $result = execute($work); }",
+        ),
+        (
+            "invariant-generic-storage.doria",
+            "class Holder<T> { function __construct(take T $value) {} } function main(): void { let $callback = fn(int $value) => $value + 1; let $holder = new Holder<function(int): int>($callback); }",
         ),
     ];
 
@@ -429,11 +445,6 @@ fn publishes_the_complete_stage_30c_ownership_diagnostic_surface() {
             "incomplete-constructor-capture.doria",
             "class Box { int $value; function __construct() { let $read = fn() with ($this) => $this->value; $this->value = 1; } }",
             "E0503",
-        ),
-        (
-            "development-storage-boundary.doria",
-            "function main(): void { mixed $value = fn() => 1; }",
-            "E0661",
         ),
     ];
 

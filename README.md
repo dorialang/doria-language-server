@@ -24,23 +24,24 @@ Current editor support includes:
 - IntelliJ Platform support for RustRover, IntelliJ IDEA, PhpStorm, and compatible JetBrains IDEs, with local syntax highlighting and optional LSP integration.
 - Shared accepted and rejected-syntax fixtures used to keep both highlighters aligned.
 
-Stage 30g List algorithms are implemented. The editors recognize
+Stage 30 is complete. The editors recognize
 `fn` arrow closures, anonymous `function` closures, explicit `with` capture
 clauses, readonly/writable/once structural function types, parameter ownership,
 checked effects, grouped nested types, and callable-value invocation. The language
 server publishes the pinned compiler's semantic diagnostics and safe capture
 fixes, and its hovers show compiler-resolved function signatures, inferred closure
 facts, ownership, capture acquisition, consumption, and escape contracts. Ordinary
-language-server analysis no longer publishes `E0641` for valid closures. Closure
+language-server analysis publishes no `E0641` for valid closures because the
+pinned compiler has completed every accepted route; the server does not suppress
+that historical, reserved diagnostic. Closure
 programs execute through the compiler's debug and native targets and, for the
 supported compatibility surface, the PHP backend. PHP remains a secondary
 compatibility backend and its unrelated limitations remain in force. Completion
 offers `map`, `filter`, and `reduce` only for resolved `List<T>` receivers, while
 semantic hover presents the compiler's concrete callback, result, access, and
 checked-effect facts. Diagnostics remain compiler-owned. Other collection
-algorithms are not included. Stage 30h is next, so Stage 30 remains incomplete;
-ordinary analysis remains target-neutral, and highlighting remains presentation
-only.
+algorithms are not included. Stage 31 is next; ordinary analysis remains
+target-neutral, and highlighting remains presentation only.
 
 The compiler also accepts constructor-rooted mutation through definitely initialized
 writable property paths, owned initialization of instance properties, and replacement

@@ -1660,10 +1660,10 @@ function check_stage30f_callable_alignment(): void
         );
     }
     require_check(
-        str_contains($fixtureText, 'Stage 30f PHP Compatibility') &&
+        str_contains($fixtureText, 'Stage 30: explicit closure lowering') &&
             str_contains($fixtureText, 'explicit closure lowering is available on the PHP-supported surface') &&
             !str_contains($fixtureText, 'Planned/future: closure'),
-        'shared fixture must describe the implemented Stage 30f target surface',
+        'shared fixture must describe the completed Stage 30 target surface',
     );
 
     $rejectedText = read_text($rejectedFixture);
@@ -1826,7 +1826,7 @@ function check_stage30f_callable_alignment(): void
         'LSP must preserve compiler metadata and expose current closure target capabilities without stale stage claims',
     );
     foreach ([
-        'valid_stage_30f_closure_documents_are_target_neutral',
+        'accepted_stage_30h_closure_routes_are_compiler_owned_and_target_neutral',
         'missing_capture_diagnostic_stays_off_following_source',
         'malformed_capture_forms_remain_parser_diagnostics_not_stage_30_boundaries',
         'type_only_function_syntax_has_no_execution_boundary',
@@ -1854,14 +1854,17 @@ function check_stage30f_callable_alignment(): void
 
     $readmeText = read_text($readme);
     require_check(
-        str_contains($readmeText, 'Stage 30g List algorithms are implemented') &&
+        str_contains($readmeText, 'Stage 30 is complete') &&
             str_contains($readmeText, 'E0641') &&
+            str_contains($readmeText, 'historical, reserved diagnostic') &&
+            str_contains($readmeText, 'does not suppress') &&
             str_contains($readmeText, 'supported compatibility surface') &&
-            str_contains($readmeText, 'Stage 30h is next') &&
+            str_contains($readmeText, 'Stage 31 is next') &&
             str_contains($readmeText, '`map`, `filter`, and `reduce` only for resolved `List<T>` receivers') &&
-            str_contains($readmeText, 'Stage 30 remains incomplete') &&
+            !str_contains($readmeText, 'Stage 30 remains incomplete') &&
+            !str_contains($readmeText, 'Stage 30h is next') &&
             !str_contains($readmeText, 'lowering remains the Stage 30f boundary'),
-        'README must state Stage 30g tooling alignment and Stage 30h next',
+        'README must state Stage 30 completion, historical E0641 handling, and Stage 31 next',
     );
 }
 
