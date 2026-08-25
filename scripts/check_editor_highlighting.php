@@ -8,7 +8,7 @@ declare(strict_types=1);
  */
 
 $root = dirname(__DIR__);
-$requiredCompilerRevision = '266787326174ef6fa09489bf9ee531d4ce592232';
+$requiredCompilerRevision = 'd0c82330c072847f883d54a04906dc6d984c2554';
 
 $cargoManifest = $root . '/Cargo.toml';
 $cargoLock = $root . '/Cargo.lock';
