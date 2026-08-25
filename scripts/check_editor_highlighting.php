@@ -8,8 +8,10 @@ declare(strict_types=1);
  */
 
 $root = dirname(__DIR__);
+$requiredCompilerRevision = '2121e95a903aaeb6d1d8cb7c36b409da51252745';
 
 $cargoManifest = $root . '/Cargo.toml';
+$cargoLock = $root . '/Cargo.lock';
 $readme = $root . '/README.md';
 $vscodePackage = $root . '/editors/vscode/doria/package.json';
 $vscodeGrammar = $root . '/editors/vscode/doria/syntaxes/doria.tmLanguage.json';
@@ -1626,17 +1628,35 @@ function check_fixture(): void
 
 function check_stage30f_callable_alignment(): void
 {
-    global $cargoManifest, $readme, $vscodeGrammar, $intellijLexer, $intellijLexerTest;
+    global $cargoManifest, $cargoLock, $requiredCompilerRevision;
+    global $readme, $vscodeGrammar, $intellijLexer, $intellijLexerTest;
     global $lspAnalysis, $lspServer, $lspTests, $fixture, $rejectedFixture;
 
+    $cargoManifestText = read_text($cargoManifest);
+    $cargoLockText = read_text($cargoLock);
     require_check(
         preg_match(
-            '/doriac\s*=\s*\{[^}]*\brev\s*=\s*"[0-9a-f]{40}"/',
-            read_text($cargoManifest),
+            '/doriac\s*=\s*\{[^}]*\brev\s*=\s*"' . preg_quote($requiredCompilerRevision, '/') . '"/',
+            $cargoManifestText,
         ) === 1,
-        'root doriac dependency must pin an exact compiler commit',
+        'root doriac dependency must pin the integrated Stage 30 compiler commit',
     );
-
+    preg_match_all(
+        '/source = "git\+https:\/\/github\.com\/dorialang\/doria\?rev=([0-9a-f]{40})#([0-9a-f]{40})"/',
+        $cargoLockText,
+        $doriaSources,
+        PREG_SET_ORDER,
+    );
+    require_check(
+        count($doriaSources) >= 3,
+        'Cargo.lock must contain every Doria git package source',
+    );
+    foreach ($doriaSources as $source) {
+        require_check(
+            $source[1] === $requiredCompilerRevision && $source[2] === $requiredCompilerRevision,
+            'every Doria git package must resolve to the integrated Stage 30 compiler commit',
+        );
+    }
     $fixtureText = read_text($fixture);
     $acceptedFacts = [
         'arrow closure' => '/\bfn\s*\([^)]*\$[A-Za-z_][A-Za-z0-9_]*\)\s*=>/',
@@ -1660,10 +1680,10 @@ function check_stage30f_callable_alignment(): void
         );
     }
     require_check(
-        str_contains($fixtureText, 'Stage 30f PHP Compatibility') &&
+        str_contains($fixtureText, 'Stage 30: explicit closure lowering') &&
             str_contains($fixtureText, 'explicit closure lowering is available on the PHP-supported surface') &&
             !str_contains($fixtureText, 'Planned/future: closure'),
-        'shared fixture must describe the implemented Stage 30f target surface',
+        'shared fixture must describe the completed Stage 30 target surface',
     );
 
     $rejectedText = read_text($rejectedFixture);
@@ -1826,7 +1846,7 @@ function check_stage30f_callable_alignment(): void
         'LSP must preserve compiler metadata and expose current closure target capabilities without stale stage claims',
     );
     foreach ([
-        'valid_stage_30f_closure_documents_are_target_neutral',
+        'accepted_stage_30h_closure_routes_are_compiler_owned_and_target_neutral',
         'missing_capture_diagnostic_stays_off_following_source',
         'malformed_capture_forms_remain_parser_diagnostics_not_stage_30_boundaries',
         'type_only_function_syntax_has_no_execution_boundary',
@@ -1844,6 +1864,15 @@ function check_stage30f_callable_alignment(): void
         'stage_30g_list_completion_is_receiver_scoped',
         'stage_30g_hover_uses_the_concrete_compiler_algorithm_plan',
         'stage_30g_algorithm_diagnostics_remain_compiler_owned_and_source_ordered',
+        'mixed_function_narrowing_hovers_with_the_compiler_resolved_identity',
+        'captured_narrowed_functions_combine_flow_identity_and_capture_metadata',
+        'structural_function_hovers_preserve_every_identity_dimension',
+        'wrong_mixed_function_identity_stays_distinct_from_the_actual_value',
+        'nullable_function_values_through_mixed_hover_only_after_exact_narrowing',
+        'mixed_function_narrowing_hover_preserves_exact_compiler_identity',
+        'captured_mixed_function_hover_preserves_narrowing_and_capture_facts',
+        'mixed_function_identity_routes_are_compiler_owned_and_diagnostic_free',
+        'mixed_function_extraction_diagnostics_remain_compiler_owned',
         'developmentOnly',
     ] as $coverage) {
         require_check(
@@ -1854,14 +1883,17 @@ function check_stage30f_callable_alignment(): void
 
     $readmeText = read_text($readme);
     require_check(
-        str_contains($readmeText, 'Stage 30g List algorithms are implemented') &&
+        str_contains($readmeText, 'Stage 30 is complete') &&
             str_contains($readmeText, 'E0641') &&
+            str_contains($readmeText, 'historical, reserved diagnostic') &&
+            str_contains($readmeText, 'does not suppress') &&
             str_contains($readmeText, 'supported compatibility surface') &&
-            str_contains($readmeText, 'Stage 30h is next') &&
+            str_contains($readmeText, 'Stage 31 is next') &&
             str_contains($readmeText, '`map`, `filter`, and `reduce` only for resolved `List<T>` receivers') &&
-            str_contains($readmeText, 'Stage 30 remains incomplete') &&
+            !str_contains($readmeText, 'Stage 30 remains incomplete') &&
+            !str_contains($readmeText, 'Stage 30h is next') &&
             !str_contains($readmeText, 'lowering remains the Stage 30f boundary'),
-        'README must state Stage 30g tooling alignment and Stage 30h next',
+        'README must state Stage 30 completion, historical E0641 handling, and Stage 31 next',
     );
 }
 

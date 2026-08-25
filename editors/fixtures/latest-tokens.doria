@@ -441,7 +441,7 @@ try {
     echo "done";
 }
 
-// Stage 30f PHP Compatibility: explicit closure lowering is available on the PHP-supported surface.
+// Stage 30: explicit closure lowering is available on the PHP-supported surface.
 let $double = fn(int $value) => $value * 2;
 
 let $minimum = 70;
@@ -467,7 +467,7 @@ function transform(
     return fn(string $value) => 1;
 }
 
-// Stage 30g: compiler-known List algorithms preserve insertion order.
+// Stage 30: compiler-known List algorithms preserve insertion order.
 function exerciseListAlgorithms(): void
 {
     List<int> $values = [1, 2, 3];

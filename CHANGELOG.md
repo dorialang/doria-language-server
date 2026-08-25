@@ -6,6 +6,10 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Pinned `doria-lsp` to the final integrated Stage 30 compiler and preserved
+  exact structural function identity through `mixed` and nullable narrowing in
+  semantic hover, including captured bindings and compiler-owned ownership
+  diagnostics.
 - Aligned `doria-lsp` with Stage 30g `List<T>::map`, `filter`, and `reduce`,
   including receiver-scoped completion, compiler-specialized semantic hovers,
   and compiler-owned algorithm diagnostics. Other collection families do not

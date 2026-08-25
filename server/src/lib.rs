@@ -1863,6 +1863,69 @@ mod tests {
     }
 
     #[test]
+    fn mixed_function_narrowing_hover_preserves_exact_compiler_identity() {
+        let source = r#"function main(): void
+{
+    mixed $value = fn(int $number) => $number + 1;
+    if ($value is function(int): int) {
+        int $result = $value(41);
+    }
+}"#;
+
+        let declaration = hover_at_offset(source, source.find("$value").unwrap())
+            .expect("mixed declaration hover");
+        let declaration_text = declaration["contents"]["value"].as_str().unwrap();
+        assert!(declaration_text.contains("mixed $value"));
+        assert!(!declaration_text.contains("Execution capability"));
+
+        let narrowed_offset = source.rfind("$value").unwrap();
+        let narrowed = hover_at_offset(source, narrowed_offset).expect("narrowed function hover");
+        let narrowed_text = narrowed["contents"]["value"].as_str().unwrap();
+        assert!(narrowed_text.contains("function(int): int"));
+        assert!(narrowed_text.contains("Compiler-resolved function value after flow narrowing"));
+        assert!(narrowed_text.contains("Executable In Debug And Native Targets"));
+        assert!(!narrowed_text.contains("mixed $value"));
+
+        let call = hover_at_offset(source, source.rfind("41").unwrap())
+            .expect("narrowed callable invocation hover");
+        assert!(call["contents"]["value"]
+            .as_str()
+            .is_some_and(|text| text.contains("function(int): int")
+                && text.contains("Semantically checked callable-value invocation")));
+    }
+
+    #[test]
+    fn captured_mixed_function_hover_preserves_narrowing_and_capture_facts() {
+        let source = r#"function main(): void
+{
+    mixed $value = fn() => 42;
+    let $wrapper = function (): int with ($value) {
+        if ($value is function(): int) {
+            return $value();
+        }
+        return 0;
+    };
+    echo "{$wrapper()}";
+}
+"#;
+
+        let capture =
+            hover_at_offset(source, source.find("($value").unwrap() + 1).expect("capture hover");
+        let capture_text = capture["contents"]["value"].as_str().unwrap();
+        assert!(capture_text.contains("mixed $value"));
+        assert!(capture_text.contains("Readonly capture of `$value`"));
+
+        let use_offset = source.find("$value();").unwrap();
+        let narrowed = hover_at_offset(source, use_offset).expect("narrowed capture hover");
+        let narrowed_text = narrowed["contents"]["value"].as_str().unwrap();
+        assert!(narrowed_text.contains("function(): int $value"));
+        assert!(narrowed_text.contains("Readonly capture of `$value`"));
+        assert!(narrowed_text.contains("Compiler-resolved function value after flow narrowing"));
+        assert!(narrowed_text.contains("Execution capability"));
+        assert!(!narrowed_text.contains("mixed $value"));
+    }
+
+    #[test]
     fn invalid_closure_hover_does_not_claim_target_execution() {
         let source = "let $outside = 1; let $invalid = fn() => $outside;";
         let diagnostics = diagnostics_for_document("file:///invalid-hover.doria", source);

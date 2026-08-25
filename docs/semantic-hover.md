@@ -37,14 +37,20 @@ owned or borrow-bound provenance, capture acquisition, invocation consumption, a
 escape classification. Capture occurrences show their compiler-resolved acquisition
 mode. Callable-value calls show the checked function signature where the existing
 expression-hover route can identify the call. Authored effect order remains visible
-on source function types. The server does not rediscover free variables, infer
+on source function types. A function value narrowed from `mixed` or a nullable
+binding shows the compiler-resolved structural function type at that use, while
+the declaration retains its authored `mixed` or nullable type. Arity, parameter
+types and ownership, invocation mode, return type, checked effects, and nullability
+remain distinct; the server does not substitute a generic callable label. The
+server does not rediscover free variables, infer
 captures, or calculate lifetimes from text.
 
 The compiler publishes precise capture and callable diagnostics with safe capture
 fixes. Ordinary language-server analysis is target-neutral, so valid closures and
 type-only function syntax do not receive `E0641`; invalid closures receive their
-specific semantic diagnostic without a redundant execution boundary. Stage 30g
-List algorithms are implemented. Semantic closure hovers
+specific semantic diagnostic without a redundant execution boundary. `E0641`
+is historical and reserved; the server does not filter or suppress it. Stage 30
+is complete. Semantic closure hovers
 identify debug and native execution for a valid closure. They describe explicit
 PHP closure lowering separately and condition it on the program's value families
 and operations being supported by the PHP backend; target-neutral analysis does
@@ -55,8 +61,8 @@ repeatable access, checked effects, unchanged-source contract, and owned result.
 The server consumes `ListAlgorithmCallInfo`; it does not infer callback effects
 or reconstruct an algorithm type checker. Other collection families do not
 receive these algorithms. PHP remains a secondary compatibility backend with
-independent limitations. Stage 30h is next, so Stage 30 remains incomplete.
-Semantically invalid closures receive no execution capability block.
+independent limitations. Stage 31 is next. Semantically invalid closures receive
+no execution capability block.
 
 Ownership hover text stays in Doria vocabulary: Owned Closure or Borrow-Bound Closure,
 Readonly/Writable/Owned taking capture, Readonly/Writable Repeatable or Consumes On
