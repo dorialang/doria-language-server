@@ -647,6 +647,46 @@ impl<'a> SnapshotBuilder<'a> {
             ));
         }
 
+        let mut narrowed_function_uses = info
+            .expression_types
+            .iter()
+            .filter_map(|(span, ty)| {
+                if !matches!(ty, ResolvedType::Function(_)) {
+                    return None;
+                }
+                let binding = info.binding_resolution.uses_by_span.get(span)?;
+                let declared = info
+                    .binding_resolution
+                    .declarations_by_id
+                    .get(binding)?
+                    .source_type
+                    .as_ref()?;
+                let is_narrowable_source = match declared {
+                    ResolvedType::Mixed => true,
+                    ResolvedType::Nullable(inner) => {
+                        matches!(
+                            inner.as_ref(),
+                            ResolvedType::Mixed | ResolvedType::Function(_)
+                        )
+                    }
+                    _ => false,
+                };
+                is_narrowable_source.then_some((span, ty))
+            })
+            .collect::<Vec<_>>();
+        narrowed_function_uses.sort_by_key(|(span, _)| **span);
+        for ((start, end), ty) in narrowed_function_uses {
+            let span = Span::new(*start, *end);
+            let target_capabilities = self.target_capabilities_for(span);
+            hovers.push(SemanticHover::new(
+                span,
+                format!(
+                    "```doria\n{}\n```\n\nCompiler-resolved function value after flow narrowing.{target_capabilities}",
+                    display_resolved_type(ty),
+                ),
+            ));
+        }
+
         let mut bindings = info
             .binding_resolution
             .declarations_by_id
@@ -3837,6 +3877,189 @@ function label(mixed $value): string
         assert!(hover(source, "Document", 1)
             .markdown
             .contains("class Document"));
+    }
+
+    #[test]
+    fn mixed_function_narrowing_hovers_with_the_compiler_resolved_identity() {
+        let source = r#"function main(): void
+{
+    mixed $value = fn(int $number) => $number + 1;
+
+    if ($value is function(int): int) {
+        int $result = $value(41);
+    }
+}"#;
+        let snapshot = AnalysisSnapshot::analyze("mixed-function-hover.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+
+        let declaration = snapshot
+            .hover_at_offset(source.find("$value").expect("mixed declaration"))
+            .expect("mixed declaration hover");
+        assert!(declaration.markdown.contains("mixed $value"));
+        assert!(!declaration.markdown.contains("Execution capability"));
+
+        let narrowed_offset = source.rfind("$value").expect("narrowed callable use");
+        let narrowed = snapshot
+            .hover_at_offset(narrowed_offset)
+            .expect("narrowed function hover");
+        assert!(narrowed.markdown.contains("function(int): int"));
+        assert!(narrowed
+            .markdown
+            .contains("Compiler-resolved function value after flow narrowing"));
+        assert!(narrowed
+            .markdown
+            .contains("Executable In Debug And Native Targets"));
+        assert!(!narrowed.markdown.contains("mixed $value"));
+
+        let invocation = snapshot
+            .hover_at_offset(source.rfind("41").expect("call argument"))
+            .expect("narrowed invocation hover");
+        assert!(invocation.markdown.contains("function(int): int"));
+        assert!(invocation
+            .markdown
+            .contains("Semantically checked callable-value invocation"));
+    }
+
+    #[test]
+    fn structural_function_hovers_preserve_every_identity_dimension() {
+        let source = r#"class ParseError implements Error
+{
+    function __construct(string $message) {}
+}
+
+function inspect(
+    function(): int $plain,
+    function writable(writable int): string throws ParseError $writable,
+    function once(take string): int $once,
+    ?function(): int $nullable,
+    List<function(int): int> $callbacks,
+    Dictionary<string, function(): int throws ParseError> $handlers
+): void {}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("function-identities.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+
+        for (needle, expected) in [
+            ("function(): int $plain", "function(): int"),
+            (
+                "function writable(writable int): string throws ParseError",
+                "function writable(writable int): string throws ParseError",
+            ),
+            (
+                "function once(take string): int",
+                "function once(take string): int",
+            ),
+            ("?function(): int", "function(): int"),
+            ("function(int): int", "function(int): int"),
+            (
+                "function(): int throws ParseError",
+                "function(): int throws ParseError",
+            ),
+        ] {
+            let offset = source
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing `{needle}`"));
+            let hover = snapshot
+                .hover_at_offset(offset + usize::from(needle.starts_with('?')))
+                .unwrap_or_else(|| panic!("missing hover for `{needle}`"));
+            assert!(
+                hover.markdown.contains(expected),
+                "`{expected}` missing from {}",
+                hover.markdown
+            );
+            assert!(!hover.markdown.contains("callable\n"));
+        }
+
+        let nullable_binding = snapshot
+            .hover_at_offset(source.find("$nullable").expect("nullable binding"))
+            .expect("nullable binding hover");
+        assert!(nullable_binding
+            .markdown
+            .contains("?function(): int $nullable"));
+    }
+
+    #[test]
+    fn wrong_mixed_function_identity_stays_distinct_from_the_actual_value() {
+        let source = r#"function main(): void
+{
+    mixed $value = fn(int $number) => $number;
+    if ($value is function(): int) {
+        echo "wrong";
+    }
+    if ($value is function(int): int) {
+        int $result = $value(42);
+    }
+}"#;
+        let snapshot = AnalysisSnapshot::analyze("wrong-function-identity.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+
+        let value = snapshot
+            .hover_at_offset(source.find("fn(").expect("closure"))
+            .expect("closure hover");
+        assert!(value.markdown.contains("function(int): int"));
+
+        let wrong = snapshot
+            .hover_at_offset(source.find("function(): int").expect("wrong type test"))
+            .expect("wrong type-test hover");
+        assert!(wrong.markdown.contains("function(): int"));
+        assert!(!wrong.markdown.contains("function(int): int"));
+
+        let exact_use = snapshot
+            .hover_at_offset(source.rfind("$value").expect("exact narrowed use"))
+            .expect("exact narrowed hover");
+        assert!(exact_use.markdown.contains("function(int): int"));
+    }
+
+    #[test]
+    fn nullable_function_values_through_mixed_hover_only_after_exact_narrowing() {
+        let source = r#"function main(): void
+{
+    ?function(): int $present = fn() => 7;
+    mixed $boxedPresent = $present;
+    ?function(): int $absent = null;
+    mixed $boxedAbsent = $absent;
+
+    if ($boxedPresent is function(): int) {
+        int $presentValue = $boxedPresent();
+    }
+    if ($boxedAbsent is function(): int) {
+        int $absentValue = $boxedAbsent();
+    }
+}"#;
+        let snapshot = AnalysisSnapshot::analyze("nullable-mixed-functions.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+
+        let boxed_declaration = snapshot
+            .hover_at_offset(source.find("$boxedPresent").expect("boxed declaration"))
+            .expect("boxed declaration hover");
+        assert!(boxed_declaration.markdown.contains("mixed $boxedPresent"));
+        assert!(!boxed_declaration.markdown.contains("Execution capability"));
+
+        for variable in ["$boxedPresent", "$boxedAbsent"] {
+            let narrowed_offset = source.rfind(variable).expect("narrowed callable use");
+            let narrowed = snapshot
+                .hover_at_offset(narrowed_offset)
+                .expect("narrowed nullable function hover");
+            assert!(narrowed.markdown.contains("function(): int"));
+            assert!(!narrowed.markdown.contains("?function(): int"));
+            assert!(narrowed.markdown.contains("Execution capability"));
+        }
     }
 
     #[test]

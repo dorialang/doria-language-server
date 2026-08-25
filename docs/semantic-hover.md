@@ -37,7 +37,12 @@ owned or borrow-bound provenance, capture acquisition, invocation consumption, a
 escape classification. Capture occurrences show their compiler-resolved acquisition
 mode. Callable-value calls show the checked function signature where the existing
 expression-hover route can identify the call. Authored effect order remains visible
-on source function types. The server does not rediscover free variables, infer
+on source function types. A function value narrowed from `mixed` or a nullable
+binding shows the compiler-resolved structural function type at that use, while
+the declaration retains its authored `mixed` or nullable type. Arity, parameter
+types and ownership, invocation mode, return type, checked effects, and nullability
+remain distinct; the server does not substitute a generic callable label. The
+server does not rediscover free variables, infer
 captures, or calculate lifetimes from text.
 
 The compiler publishes precise capture and callable diagnostics with safe capture

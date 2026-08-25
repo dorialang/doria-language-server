@@ -8,8 +8,10 @@ declare(strict_types=1);
  */
 
 $root = dirname(__DIR__);
+$requiredCompilerRevision = '266787326174ef6fa09489bf9ee531d4ce592232';
 
 $cargoManifest = $root . '/Cargo.toml';
+$cargoLock = $root . '/Cargo.lock';
 $readme = $root . '/README.md';
 $vscodePackage = $root . '/editors/vscode/doria/package.json';
 $vscodeGrammar = $root . '/editors/vscode/doria/syntaxes/doria.tmLanguage.json';
@@ -1626,17 +1628,35 @@ function check_fixture(): void
 
 function check_stage30f_callable_alignment(): void
 {
-    global $cargoManifest, $readme, $vscodeGrammar, $intellijLexer, $intellijLexerTest;
+    global $cargoManifest, $cargoLock, $requiredCompilerRevision;
+    global $readme, $vscodeGrammar, $intellijLexer, $intellijLexerTest;
     global $lspAnalysis, $lspServer, $lspTests, $fixture, $rejectedFixture;
 
+    $cargoManifestText = read_text($cargoManifest);
+    $cargoLockText = read_text($cargoLock);
     require_check(
         preg_match(
-            '/doriac\s*=\s*\{[^}]*\brev\s*=\s*"[0-9a-f]{40}"/',
-            read_text($cargoManifest),
+            '/doriac\s*=\s*\{[^}]*\brev\s*=\s*"' . preg_quote($requiredCompilerRevision, '/') . '"/',
+            $cargoManifestText,
         ) === 1,
-        'root doriac dependency must pin an exact compiler commit',
+        'root doriac dependency must pin the integrated Stage 30 compiler commit',
     );
-
+    preg_match_all(
+        '/source = "git\+https:\/\/github\.com\/dorialang\/doria\?rev=([0-9a-f]{40})#([0-9a-f]{40})"/',
+        $cargoLockText,
+        $doriaSources,
+        PREG_SET_ORDER,
+    );
+    require_check(
+        count($doriaSources) >= 3,
+        'Cargo.lock must contain every Doria git package source',
+    );
+    foreach ($doriaSources as $source) {
+        require_check(
+            $source[1] === $requiredCompilerRevision && $source[2] === $requiredCompilerRevision,
+            'every Doria git package must resolve to the integrated Stage 30 compiler commit',
+        );
+    }
     $fixtureText = read_text($fixture);
     $acceptedFacts = [
         'arrow closure' => '/\bfn\s*\([^)]*\$[A-Za-z_][A-Za-z0-9_]*\)\s*=>/',
@@ -1844,6 +1864,13 @@ function check_stage30f_callable_alignment(): void
         'stage_30g_list_completion_is_receiver_scoped',
         'stage_30g_hover_uses_the_concrete_compiler_algorithm_plan',
         'stage_30g_algorithm_diagnostics_remain_compiler_owned_and_source_ordered',
+        'mixed_function_narrowing_hovers_with_the_compiler_resolved_identity',
+        'structural_function_hovers_preserve_every_identity_dimension',
+        'wrong_mixed_function_identity_stays_distinct_from_the_actual_value',
+        'nullable_function_values_through_mixed_hover_only_after_exact_narrowing',
+        'mixed_function_narrowing_hover_preserves_exact_compiler_identity',
+        'mixed_function_identity_routes_are_compiler_owned_and_diagnostic_free',
+        'mixed_function_extraction_diagnostics_remain_compiler_owned',
         'developmentOnly',
     ] as $coverage) {
         require_check(

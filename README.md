@@ -30,8 +30,11 @@ clauses, readonly/writable/once structural function types, parameter ownership,
 checked effects, grouped nested types, and callable-value invocation. The language
 server publishes the pinned compiler's semantic diagnostics and safe capture
 fixes, and its hovers show compiler-resolved function signatures, inferred closure
-facts, ownership, capture acquisition, consumption, and escape contracts. Ordinary
-language-server analysis publishes no `E0641` for valid closures because the
+facts, ownership, capture acquisition, consumption, and escape contracts. Analysis
+also preserves exact structural function identity when a `mixed` or
+nullable value is narrowed, including parameter ownership, invocation mode,
+checked effects, and nullability; it does not reduce those values to a generic
+callable label. Ordinary language-server analysis publishes no `E0641` for valid closures because the
 pinned compiler has completed every accepted route; the server does not suppress
 that historical, reserved diagnostic. Closure
 programs execute through the compiler's debug and native targets and, for the

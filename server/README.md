@@ -9,6 +9,9 @@ ownership, lifetime, escape, diagnostic, fix, and hover facts. The server only
 adapts those structured facts to LSP. On resolved `List<T>` receivers it offers
 `map`, `filter`, and `reduce` completion and renders concrete compiler-specialized
 call hovers. Other collection families do not receive those algorithms.
+Flow-narrowed function values retain the compiler's exact structural identity
+through `mixed` and nullable storage; the server displays that identity without
+reconstructing tags, effects, invocation modes, or ownership from source text.
 Ordinary editor analysis is target-neutral: it identifies guaranteed debug/native
 execution for valid closures and describes PHP lowering as conditional on the
 program's independently supported PHP surface. Valid closures receive no

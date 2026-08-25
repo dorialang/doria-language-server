@@ -198,6 +198,112 @@ fn accepted_stage_30h_closure_routes_are_compiler_owned_and_target_neutral() {
 }
 
 #[test]
+fn mixed_function_identity_routes_are_compiler_owned_and_diagnostic_free() {
+    let cases = [
+        (
+            "exact-mixed-function.doria",
+            r#"function main(): void
+{
+    mixed $value = fn(int $number) => $number + 1;
+    if ($value is function(int): int) {
+        int $result = $value(41);
+    }
+}"#,
+        ),
+        (
+            "wrong-mixed-function-identity.doria",
+            r#"function main(): void
+{
+    mixed $value = fn(int $number) => $number;
+    if ($value is function(): int) { echo "wrong"; }
+    if ($value is function(int): int) { int $result = $value(42); }
+}"#,
+        ),
+        (
+            "nullable-mixed-functions.doria",
+            r#"function main(): void
+{
+    ?function(): int $present = fn() => 7;
+    mixed $boxedPresent = $present;
+    ?function(): int $absent = null;
+    mixed $boxedAbsent = $absent;
+    if ($boxedPresent is function(): int) { int $value = $boxedPresent(); }
+    if ($boxedAbsent is function(): int) { int $value = $boxedAbsent(); }
+}"#,
+        ),
+        (
+            "mixed-function-modes-and-effects.doria",
+            r#"class Payload {}
+class ParseError implements Error { function __construct(string $message) {} }
+function inspect(take function writable(): int $callback): void
+{
+    writable mixed $value = $callback;
+    if ($value is function(): int) {}
+    if ($value is function writable(): int) { int $result = $value(); }
+}
+function main(): void
+{
+    let $payload = new Payload();
+    mixed $once = function (): Payload with (take $payload) { return $payload; };
+    if ($once is function(): Payload) {}
+    if ($once is function once(): Payload) {}
+
+    mixed $readonlyParameter = fn(Payload $value) => 1;
+    if ($readonlyParameter is function(take Payload): int) {}
+    if ($readonlyParameter is function(Payload): int) {}
+
+    mixed $plain = fn() => 1;
+    if ($plain is function(): int throws ParseError) {}
+
+    mixed $throwing = function (): int { throw new ParseError("failure"); };
+    if ($throwing is function(): int) {}
+    if ($throwing is function(): int throws ParseError) {}
+}"#,
+        ),
+    ];
+
+    for (name, source) in cases {
+        assert_stage_30_closure_is_valid(name, source);
+        assert!(diagnostics_for_document(&format!("file:///{name}"), source)
+            .iter()
+            .all(|diagnostic| diagnostic["code"] != "E0641"));
+    }
+}
+
+#[test]
+fn mixed_function_extraction_diagnostics_remain_compiler_owned() {
+    let name = "mixed-function-move.doria";
+    let source = r#"function consume(take mixed $value): int
+{
+    int $result = match (take $value) {
+        function(): int $callback => $callback(),
+        default => -1,
+    };
+    echo "{$value}";
+    return $result;
+}
+"#;
+    let compiler = doriac::check_source(name, source)
+        .expect_err("reusing the consumed mixed owner must fail checking");
+    assert!(!compiler.is_empty());
+    assert!(compiler.iter().all(|diagnostic| diagnostic.code != "E0641"));
+
+    let lsp = diagnostics_for_document(&format!("file:///{name}"), source);
+    let compiler_codes = compiler
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+    let lsp_codes = lsp
+        .iter()
+        .map(|diagnostic| diagnostic["code"].as_str().expect("diagnostic code"))
+        .collect::<Vec<_>>();
+    assert_eq!(lsp_codes, compiler_codes);
+    for diagnostic in &compiler {
+        assert_lsp_diagnostic_matches_compiler(name, source, diagnostic.code);
+    }
+}
+
+#[test]
 fn stage_30g_algorithm_diagnostics_remain_compiler_owned_and_source_ordered() {
     let cases = [
         (
