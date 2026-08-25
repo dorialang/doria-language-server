@@ -649,30 +649,8 @@ impl<'a> SnapshotBuilder<'a> {
 
         let mut narrowed_function_uses = info
             .expression_types
-            .iter()
-            .filter_map(|(span, ty)| {
-                if !matches!(ty, ResolvedType::Function(_)) {
-                    return None;
-                }
-                let binding = info.binding_resolution.uses_by_span.get(span)?;
-                let declared = info
-                    .binding_resolution
-                    .declarations_by_id
-                    .get(binding)?
-                    .source_type
-                    .as_ref()?;
-                let is_narrowable_source = match declared {
-                    ResolvedType::Mixed => true,
-                    ResolvedType::Nullable(inner) => {
-                        matches!(
-                            inner.as_ref(),
-                            ResolvedType::Mixed | ResolvedType::Function(_)
-                        )
-                    }
-                    _ => false,
-                };
-                is_narrowable_source.then_some((span, ty))
-            })
+            .keys()
+            .filter_map(|span| narrowed_function_type_for_use(info, span).map(|ty| (span, ty)))
             .collect::<Vec<_>>();
         narrowed_function_uses.sort_by_key(|(span, _)| **span);
         for ((start, end), ty) in narrowed_function_uses {
@@ -822,24 +800,36 @@ impl<'a> SnapshotBuilder<'a> {
                         acquisition.environment_binding_id == capture.environment_binding_id
                     })
                 });
-                let markdown = format!(
+                let capture_kind = acquisition.map_or("Compiler-resolved", |acquisition| {
+                    capture_acquisition_name(acquisition.kind)
+                });
+                let declaration_markdown = format!(
                     "```doria\n{} {}\n```\n\n{} capture of `{name}`.",
                     display_resolved_type(&capture.source_type),
                     name,
-                    acquisition.map_or("Compiler-resolved", |acquisition| {
-                        capture_acquisition_name(acquisition.kind)
-                    }),
+                    capture_kind,
                 );
                 hovers.push(SemanticHover::capture(
                     capture.declaration_span,
-                    markdown.clone(),
+                    declaration_markdown,
                 ));
-                hovers.extend(
-                    capture
-                        .use_spans
-                        .iter()
-                        .map(|span| SemanticHover::capture(*span, markdown.clone())),
-                );
+                for span in &capture.use_spans {
+                    let key = (span.start, span.end);
+                    let narrowed = narrowed_function_type_for_use(info, &key);
+                    let ty = narrowed.unwrap_or(&capture.source_type);
+                    let mut markdown = format!(
+                        "```doria\n{} {}\n```\n\n{} capture of `{name}`.",
+                        display_resolved_type(ty),
+                        name,
+                        capture_kind,
+                    );
+                    if narrowed.is_some() {
+                        markdown
+                            .push_str("\n\nCompiler-resolved function value after flow narrowing.");
+                        markdown.push_str(&self.target_capabilities_for(*span));
+                    }
+                    hovers.push(SemanticHover::capture(*span, markdown));
+                }
             }
         }
 
@@ -2873,6 +2863,36 @@ fn non_nullable_type(ty: &ResolvedType) -> &ResolvedType {
     match ty {
         ResolvedType::Nullable(inner) => inner,
         ty => ty,
+    }
+}
+
+fn narrowed_function_type_for_use<'a>(
+    info: &'a SemanticInfo,
+    span: &(usize, usize),
+) -> Option<&'a ResolvedType> {
+    let ty = info.expression_types.get(span)?;
+    if !matches!(ty, ResolvedType::Function(_)) {
+        return None;
+    }
+
+    let binding = info.binding_resolution.uses_by_span.get(span)?;
+    let declared = info
+        .binding_resolution
+        .declarations_by_id
+        .get(binding)?
+        .source_type
+        .as_ref()?;
+    match declared {
+        ResolvedType::Mixed => Some(ty),
+        ResolvedType::Nullable(inner)
+            if matches!(
+                inner.as_ref(),
+                ResolvedType::Mixed | ResolvedType::Function(_)
+            ) =>
+        {
+            Some(ty)
+        }
+        _ => None,
     }
 }
 
@@ -5238,6 +5258,75 @@ let $wrapper = fn() with ($callback) => $callback();
             .hover_at_offset(use_offset)
             .expect("captured use hover");
         assert!(usage.markdown.contains("Readonly capture of `$callback`"));
+    }
+
+    #[test]
+    fn captured_narrowed_functions_combine_flow_identity_and_capture_metadata() {
+        let source = r#"function main(): void
+{
+    mixed $mixed = fn() => 41;
+    ?function(): int $nullable = fn() => 1;
+    let $wrapper = function (): int with ($mixed, $nullable) {
+        let writable $result = 0;
+        if ($mixed is function(): int) {
+            $result += $mixed();
+        }
+        if ($nullable != null) {
+            $result += $nullable();
+        }
+        return $result;
+    };
+    echo "{$wrapper()}";
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("captured-narrowing-hover.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+
+        let mixed_capture = snapshot
+            .hover_at_offset(source.find("($mixed").expect("mixed capture") + 1)
+            .expect("mixed capture hover");
+        assert!(mixed_capture.markdown.contains("mixed $mixed"));
+        assert!(mixed_capture
+            .markdown
+            .contains("Readonly capture of `$mixed`"));
+
+        let mixed_use = snapshot
+            .hover_at_offset(source.find("$mixed();").expect("narrowed mixed use"))
+            .expect("narrowed mixed capture hover");
+        assert!(mixed_use.markdown.contains("function(): int $mixed"));
+        assert!(mixed_use.markdown.contains("Readonly capture of `$mixed`"));
+        assert!(mixed_use
+            .markdown
+            .contains("Compiler-resolved function value after flow narrowing"));
+        assert!(mixed_use.markdown.contains("Execution capability"));
+        assert!(!mixed_use.markdown.contains("mixed $mixed"));
+
+        let nullable_capture = snapshot
+            .hover_at_offset(
+                source
+                    .find("$nullable) {")
+                    .expect("nullable capture declaration"),
+            )
+            .expect("nullable capture hover");
+        assert!(nullable_capture
+            .markdown
+            .contains("?function(): int $nullable"));
+
+        let nullable_use = snapshot
+            .hover_at_offset(source.find("$nullable();").expect("narrowed nullable use"))
+            .expect("narrowed nullable capture hover");
+        assert!(nullable_use.markdown.contains("function(): int $nullable"));
+        assert!(nullable_use
+            .markdown
+            .contains("Readonly capture of `$nullable`"));
+        assert!(nullable_use
+            .markdown
+            .contains("Compiler-resolved function value after flow narrowing"));
+        assert!(!nullable_use.markdown.contains("?function(): int $nullable"));
     }
 
     #[test]
