@@ -1,6 +1,6 @@
 use std::process::Command;
 
-const REQUIRED_COMPILER_COMMIT: &str = "d0c82330c072847f883d54a04906dc6d984c2554";
+const REQUIRED_COMPILER_COMMIT: &str = "2121e95a903aaeb6d1d8cb7c36b409da51252745";
 
 #[test]
 fn reports_server_and_canonical_toolchain_versions() {
