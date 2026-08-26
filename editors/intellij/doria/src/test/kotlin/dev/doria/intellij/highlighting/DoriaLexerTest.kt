@@ -313,6 +313,13 @@ class DoriaLexerTest : TestCase() {
         )
     }
 
+    fun testSingleSegmentNamespaceUsesNamespacePresentationTokens() {
+        val tokens = lex("namespace First;")
+
+        assertEquals(DoriaTokenTypes.KEYWORD, tokens.first { it.text == "namespace" }.type)
+        assertEquals(DoriaTokenTypes.NAMESPACE_PATH, tokens.first { it.text == "First" }.type)
+    }
+
     fun testRejectedNamespaceDirectiveShapesAreNotPresentedAsImports() {
         for (source in listOf(
             "use \\Acme\\Http\\Client;",

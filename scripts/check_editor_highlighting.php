@@ -8,7 +8,7 @@ declare(strict_types=1);
  */
 
 $root = dirname(__DIR__);
-$requiredCompilerRevision = '8397e0e390003e7c91534a0a2fc802340df57225';
+$requiredCompilerRevision = '48d8351d364864640fda1871ec9cd45ba5c5d65e';
 
 $cargoManifest = $root . '/Cargo.toml';
 $cargoLock = $root . '/Cargo.lock';
@@ -834,7 +834,9 @@ function check_vscode_grammar(): void
     $importBegin = (string) ($importPatterns[0]['begin'] ?? '');
     $traitBegin = (string) ($traitPatterns[0]['begin'] ?? '');
     require_check(regex_matches($importBegin, 'use App\\Models\\User;'), 'VS Code import pattern must match namespace imports');
-    require_check(regex_matches($importBegin, 'use Doria\\Std\\Math\\{'), 'VS Code import pattern must match grouped namespace imports');
+    require_check(regex_matches($importBegin, 'use Doria\\Std\\Math\\{Vector2, Vector3 as Position3,};'), 'VS Code import pattern must match grouped namespace imports');
+    require_check(!regex_matches($importBegin, 'use Acme\\Model\\{};'), 'VS Code import pattern must reject empty grouped imports');
+    require_check(!regex_matches($importBegin, 'use Acme\\Model\\{*};'), 'VS Code import pattern must reject wildcard grouped imports');
     require_check(!regex_matches($importBegin, '    uses HasSlug;'), 'VS Code import pattern must not match class-body trait composition');
     require_check(regex_matches($traitBegin, '    uses HasSlug;'), 'VS Code trait-composition pattern must match class-body uses');
     require_check(!regex_matches($traitBegin, 'use App\\Models\\User;'), 'VS Code trait-composition pattern must not match namespace imports');

@@ -140,6 +140,22 @@ $count = 1;
 }
 
 #[test]
+fn namespace_naming_diagnostics_remain_compiler_owned_and_utf16_safe() {
+    let source = "// 😀\nnamespace acme\\HTTP; function main(): void {}";
+    assert_lsp_diagnostic_matches_compiler("namespace-naming.doria", source, "E0675");
+
+    let diagnostics = diagnostics_for_document("file:///namespace-naming.doria", source);
+    let naming = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic["code"] == "E0675")
+        .collect::<Vec<_>>();
+    assert_eq!(naming.len(), 2, "{diagnostics:#?}");
+    assert!(naming
+        .iter()
+        .all(|diagnostic| diagnostic["source"] == "doriac"));
+}
+
+#[test]
 fn accepted_stage_30h_closure_routes_are_compiler_owned_and_target_neutral() {
     let cases = [
         (

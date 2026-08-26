@@ -510,7 +510,7 @@ impl Server {
             .and_then(Value::as_u64)? as u32;
         let document = self.documents.get(uri)?;
         let offset = position_to_byte_offset(&document.text, line, character);
-        if let Some(hover) = self.document_index.hover(uri, offset) {
+        if let Some(hover) = document.analysis.namespace_hover_at_offset(offset) {
             return Some(json!({
                 "contents": {
                     "kind": "markdown",
@@ -519,7 +519,24 @@ impl Server {
                 "range": span_to_range(&document.text, hover.span),
             }));
         }
-        if let Some(hover) = document.analysis.namespace_hover_at_offset(offset) {
+        let indexed = self.document_index.hover(uri, offset);
+        if let Some(hover) = document.analysis.hover_at_offset(offset) {
+            let mut markdown = hover.markdown;
+            if let Some(indexed) = &indexed {
+                if !markdown.contains(&indexed.markdown) {
+                    markdown.push_str("\n\n---\n\n");
+                    markdown.push_str(&indexed.markdown);
+                }
+            }
+            return Some(json!({
+                "contents": {
+                    "kind": "markdown",
+                    "value": markdown,
+                },
+                "range": span_to_range(&document.text, hover.span),
+            }));
+        }
+        if let Some(hover) = indexed {
             return Some(json!({
                 "contents": {
                     "kind": "markdown",
@@ -4003,6 +4020,27 @@ function main(): void { let $user = new ModelUser(); inspect($user); }
             .expect("canonical import-target edit");
         assert_eq!(import_edits.len(), 1);
         assert_eq!(import_edits[0]["newText"], "Acme\\Model\\Account");
+    }
+
+    #[test]
+    fn stage31_index_augments_semantic_function_hover_without_replacing_it() {
+        let uri = "file:///workspace/app.doria";
+        let source = r#"namespace Acme;
+/** Returns the supplied value. */
+function inspect(int $value): int { return $value; }
+function main(): void { inspect(42); }
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+
+        let call = source.find("inspect").unwrap();
+        let hover = server
+            .hover(Some(&params_at(uri, source, call)))
+            .expect("indexed function hover");
+        let markdown = hover["contents"]["value"].as_str().unwrap();
+        assert!(markdown.contains("function inspect(int $value): int"));
+        assert!(markdown.contains("Returns the supplied value."));
+        assert!(markdown.contains("Function `Acme\\inspect`"));
     }
 
     #[test]

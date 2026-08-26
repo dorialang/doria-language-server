@@ -1109,6 +1109,9 @@ class DoriaLexer : LexerBase() {
         private val QUALIFIED_NAME =
             Regex("[A-Za-z_][A-Za-z0-9_]*(?:\\\\[A-Za-z_][A-Za-z0-9_]*)+")
 
+        private val NAMESPACE_NAME =
+            Regex("[A-Za-z_][A-Za-z0-9_]*(?:\\\\[A-Za-z_][A-Za-z0-9_]*)*")
+
         private val IMPORT_TARGET =
             Regex("${QUALIFIED_NAME.pattern}(?:\\s+as\\s+[A-Za-z_][A-Za-z0-9_]*)?")
 
@@ -1116,7 +1119,7 @@ class DoriaLexer : LexerBase() {
             Regex("[A-Za-z_][A-Za-z0-9_]*(?:\\s+as\\s+[A-Za-z_][A-Za-z0-9_]*)?")
 
         private val NAMESPACE_DECLARATION_LINE =
-            Regex("^namespace\\s+${QUALIFIED_NAME.pattern}\\s*;\\s*(?://.*)?$")
+            Regex("^namespace\\s+${NAMESPACE_NAME.pattern}\\s*;\\s*(?://.*)?$")
 
         private val PREPROCESSOR_DIRECTIVES = setOf(
             "include",
