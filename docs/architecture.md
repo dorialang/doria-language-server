@@ -44,15 +44,18 @@ diagnostics, symbols, and resolved source occurrences. Diagnostics and semantic
 features consume that shared snapshot so an individual hover request does not
 re-parse or re-check the document.
 
-Stage 31 Slice 1 adds a bounded open-document global index keyed by the
-compiler's canonical global symbol identity. Workspace roots provide stable,
-explicitly synthetic package identities; the longest matching root wins, and
-documents outside all roots receive standalone synthetic identities. Namespace
-text never determines package identity. Open, change, save, close, and workspace
-folder changes rebuild the affected session index deterministically. The index
-does not scan unopened files, parse Baton manifests, or claim cross-file semantic
-checking, so compiler-owned external-symbol and include boundaries remain
-published until Stage 31 Slice 2 supplies a build graph.
+Stage 31 uses one compiler `CompilationSession` for each stable synthetic
+workspace package. The longest matching root wins; documents outside all roots
+receive isolated standalone packages, and namespace text never determines
+package identity. Currently open text is supplied through an in-memory partial
+build plan with project-layout authority explicitly unavailable. The compiler
+graph owns canonical identities, cross-file resolution, include and semantic
+dependency edges, diagnostics, and incremental invalidation. The bounded index
+only projects those facts into definition, references, conservative rename,
+hover, completion, and source-aware fixes. Open, change, save, close, and
+workspace-folder events reanalyze the relevant open-source graph and republish
+affected URIs. No source is written to disk, no unopened directory is scanned,
+and no Baton manifest is parsed; Stage 33 owns complete project inventory.
 
 ### Editor clients
 

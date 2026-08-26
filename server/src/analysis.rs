@@ -19,7 +19,7 @@ use doriac::semantics::{
     CallableTarget, EnumSemanticInfo, ListAlgorithmCallInfo, ListAlgorithmKind, ListCallbackAccess,
     SemanticInfo,
 };
-use doriac::source::Span;
+use doriac::source::{SourceFile, SourceId, Span};
 use doriac::symbols::{BindingKind, BindingOwnership};
 use doriac::types::{
     FunctionInvocationMode, ResolvedType, SharedHandleKind, TypeRef, TypeRegistry,
@@ -70,7 +70,6 @@ pub(crate) struct AnalysisSnapshot {
     diagnostics: Vec<Diagnostic>,
     compilation_context: CompilationContext,
     global_symbols: GlobalSymbolFacts,
-    authored_qualified_names: HashMap<(usize, usize), String>,
     directive_semantic_tokens: Vec<(Span, u32)>,
     symbols: Vec<Symbol>,
     occurrences: Vec<Occurrence>,
@@ -203,18 +202,38 @@ impl AnalysisSnapshot {
             }
         };
         let global_symbols = analysis.info.global_symbols.clone();
-        let authored_qualified_names = program
-            .qualified_names
-            .iter()
-            .map(|name| ((name.span.start, name.span.end), name.canonical()))
-            .collect();
         let directive_semantic_tokens = directive_semantic_tokens(&program);
-        let mut snapshot =
-            SnapshotBuilder::new(text, &tokens, Some(&analysis.info), analysis.diagnostics)
-                .build(&program);
+        let mut snapshot = SnapshotBuilder::new(
+            text,
+            &tokens,
+            SourceId::default(),
+            Some(&analysis.info),
+            analysis.diagnostics,
+        )
+        .build(&program);
         snapshot.compilation_context = context;
         snapshot.global_symbols = global_symbols;
-        snapshot.authored_qualified_names = authored_qualified_names;
+        snapshot.directive_semantic_tokens = directive_semantic_tokens;
+        snapshot
+    }
+
+    pub(crate) fn from_graph_source(
+        text: &str,
+        source_id: SourceId,
+        context: CompilationContext,
+        program: &Program,
+        semantic_info: &SemanticInfo,
+        diagnostics: Vec<Diagnostic>,
+        global_symbols: GlobalSymbolFacts,
+    ) -> Self {
+        let source = SourceFile::with_id(source_id, context.source.0.clone(), text.to_string());
+        let tokens = doriac::lexer::Lexer::new(&source).lex().unwrap_or_default();
+        let directive_semantic_tokens = directive_semantic_tokens(program);
+        let mut snapshot =
+            SnapshotBuilder::new(text, &tokens, source_id, Some(semantic_info), diagnostics)
+                .build(program);
+        snapshot.compilation_context = context;
+        snapshot.global_symbols = global_symbols;
         snapshot.directive_semantic_tokens = directive_semantic_tokens;
         snapshot
     }
@@ -223,18 +242,16 @@ impl AnalysisSnapshot {
         &self.diagnostics
     }
 
+    pub(crate) fn extend_diagnostics(&mut self, diagnostics: Vec<Diagnostic>) {
+        self.diagnostics.extend(diagnostics);
+    }
+
     pub(crate) fn compilation_context(&self) -> &CompilationContext {
         &self.compilation_context
     }
 
     pub(crate) fn global_symbols(&self) -> &GlobalSymbolFacts {
         &self.global_symbols
-    }
-
-    pub(crate) fn authored_qualified_name(&self, span: Span) -> Option<&str> {
-        self.authored_qualified_names
-            .get(&(span.start, span.end))
-            .map(String::as_str)
     }
 
     pub(crate) fn namespace_hover_at_offset(&self, offset: usize) -> Option<SemanticHover> {
@@ -683,6 +700,7 @@ fn semantic_token_type(symbol: &Symbol) -> Option<u32> {
 struct SnapshotBuilder<'a> {
     text: &'a str,
     tokens: &'a [Token],
+    source_id: SourceId,
     semantic_info: Option<&'a SemanticInfo>,
     diagnostics: Vec<Diagnostic>,
     symbols: Vec<Symbol>,
@@ -712,12 +730,14 @@ impl<'a> SnapshotBuilder<'a> {
     fn new(
         text: &'a str,
         tokens: &'a [Token],
+        source_id: SourceId,
         semantic_info: Option<&'a SemanticInfo>,
         diagnostics: Vec<Diagnostic>,
     ) -> Self {
         Self {
             text,
             tokens,
+            source_id,
             semantic_info,
             diagnostics,
             symbols: Vec::new(),
@@ -753,7 +773,6 @@ impl<'a> SnapshotBuilder<'a> {
             diagnostics: self.diagnostics,
             compilation_context: CompilationContext::default(),
             global_symbols: GlobalSymbolFacts::default(),
-            authored_qualified_names: HashMap::new(),
             directive_semantic_tokens: Vec::new(),
             symbols: self.symbols,
             occurrences: self.occurrences,
@@ -777,9 +796,12 @@ impl<'a> SnapshotBuilder<'a> {
 
         let mut function_types = info.function_types_by_span.iter().collect::<Vec<_>>();
         function_types.sort_by_key(|(span, _)| **span);
-        for ((start, end), semantic) in function_types {
+        for (span, semantic) in function_types
+            .into_iter()
+            .filter(|(span, _)| span.source == self.source_id)
+        {
             hovers.push(SemanticHover::new(
-                Span::new(*start, *end),
+                *span,
                 format!(
                     "```doria\n{}\n```\n\nCanonical semantic function type.",
                     display_function_type_with_effects(
@@ -793,11 +815,12 @@ impl<'a> SnapshotBuilder<'a> {
         let mut narrowed_function_uses = info
             .expression_types
             .keys()
+            .filter(|span| span.source == self.source_id)
             .filter_map(|span| narrowed_function_type_for_use(info, span).map(|ty| (span, ty)))
             .collect::<Vec<_>>();
         narrowed_function_uses.sort_by_key(|(span, _)| **span);
-        for ((start, end), ty) in narrowed_function_uses {
-            let span = Span::new(*start, *end);
+        for (span, ty) in narrowed_function_uses {
+            let span = *span;
             let target_capabilities = self.target_capabilities_for(span);
             hovers.push(SemanticHover::new(
                 span,
@@ -815,7 +838,9 @@ impl<'a> SnapshotBuilder<'a> {
             .filter_map(|declaration| {
                 let span = declaration.span?;
                 let ty = declaration.source_type.as_ref()?;
-                matches!(non_nullable_type(ty), ResolvedType::Function(_)).then_some((
+                (span.source == self.source_id
+                    && matches!(non_nullable_type(ty), ResolvedType::Function(_)))
+                .then_some((
                     declaration.id,
                     span,
                     ty,
@@ -859,8 +884,8 @@ impl<'a> SnapshotBuilder<'a> {
                 .binding_resolution
                 .uses_by_span
                 .iter()
-                .filter_map(|((start, end), resolved)| {
-                    (*resolved == binding_id).then_some(Span::new(*start, *end))
+                .filter_map(|(span, resolved)| {
+                    (*resolved == binding_id && span.source == self.source_id).then_some(*span)
                 })
                 .collect::<Vec<_>>();
             use_spans.sort_by_key(|span| (span.start, span.end));
@@ -873,8 +898,15 @@ impl<'a> SnapshotBuilder<'a> {
 
         let mut closures = info.closures.values().collect::<Vec<_>>();
         closures.sort_by_key(|closure| (closure.closure_id.start, closure.closure_id.end));
-        for closure in closures {
-            let closure_span = Span::new(closure.closure_id.start, closure.closure_id.end);
+        for closure in closures
+            .into_iter()
+            .filter(|closure| closure.closure_id.source == self.source_id)
+        {
+            let closure_span = Span::in_source(
+                closure.closure_id.source,
+                closure.closure_id.start,
+                closure.closure_id.end,
+            );
             let target_capabilities = self.target_capabilities_for(closure_span);
             let ownership = info.closure_ownership.get(&closure.closure_id);
             let signature = display_function_type_with_effects(
@@ -957,8 +989,7 @@ impl<'a> SnapshotBuilder<'a> {
                     declaration_markdown,
                 ));
                 for span in &capture.use_spans {
-                    let key = (span.start, span.end);
-                    let narrowed = narrowed_function_type_for_use(info, &key);
+                    let narrowed = narrowed_function_type_for_use(info, span);
                     let ty = narrowed.unwrap_or(&capture.source_type);
                     let mut markdown = format!(
                         "```doria\n{} {}\n```\n\n{} capture of `{name}`.",
@@ -978,8 +1009,11 @@ impl<'a> SnapshotBuilder<'a> {
 
         let mut callable_calls = info.callable_value_calls.iter().collect::<Vec<_>>();
         callable_calls.sort_by_key(|(span, _)| **span);
-        for ((start, end), call) in callable_calls {
-            let call_span = Span::new(*start, *end);
+        for (span, call) in callable_calls
+            .into_iter()
+            .filter(|(span, _)| span.source == self.source_id)
+        {
+            let call_span = *span;
             let target_capabilities = self.target_capabilities_for(call_span);
             hovers.push(SemanticHover::new(
                 call_span,
@@ -1683,10 +1717,7 @@ impl<'a> SnapshotBuilder<'a> {
             if let Some(binding) = &catch.binding {
                 let ty = self
                     .semantic_info
-                    .and_then(|info| {
-                        info.catch_error_types
-                            .get(&(catch.span.start, catch.span.end))
-                    })
+                    .and_then(|info| info.catch_error_types.get(&catch.span))
                     .map(display_resolved_type)
                     .unwrap_or_else(|| catch.ty.to_string());
                 self.declare_local_binding_with_documentation(
@@ -1786,7 +1817,7 @@ impl<'a> SnapshotBuilder<'a> {
     ) {
         let predicate_indices = self
             .semantic_info
-            .and_then(|info| info.given_preludes.get(&(given.span.start, given.span.end)))
+            .and_then(|info| info.given_preludes.get(&given.span))
             .map(|info| {
                 info.predicate_statement_indices
                     .iter()
@@ -1991,8 +2022,7 @@ impl<'a> SnapshotBuilder<'a> {
                     self.member_name_span(Span::new(object.span().end, span.end), method);
                 self.record_member_receiver(method_span, object, current_class);
                 let builtin_hover = self.semantic_info.and_then(|info| {
-                    if let Some(algorithm) = info.list_algorithm_calls.get(&(span.start, span.end))
-                    {
+                    if let Some(algorithm) = info.list_algorithm_calls.get(span) {
                         return Some(list_algorithm_hover(algorithm));
                     }
                     let receiver = info.expression_type(object.span())?;
@@ -2289,7 +2319,7 @@ impl<'a> SnapshotBuilder<'a> {
                 self.visit_expr(scrutinee, current_class, parent_class);
                 let match_info = self
                     .semantic_info
-                    .and_then(|info| info.matches.get(&(span.start, span.end)))
+                    .and_then(|info| info.matches.get(span))
                     .cloned();
                 if *origin == MatchOrigin::Match {
                     if let (Some(info), Some(keyword)) = (
@@ -2394,7 +2424,7 @@ impl<'a> SnapshotBuilder<'a> {
         }
         if let (Some(info), Some(keyword)) = (
             self.semantic_info
-                .and_then(|semantic| semantic.whens.get(&(when.span.start, when.span.end))),
+                .and_then(|semantic| semantic.whens.get(&when.span)),
             tokens_in_span(self.tokens, when.span)
                 .find(|token| matches!(token.kind, TokenKind::When)),
         ) {
@@ -3011,7 +3041,7 @@ fn non_nullable_type(ty: &ResolvedType) -> &ResolvedType {
 
 fn narrowed_function_type_for_use<'a>(
     info: &'a SemanticInfo,
-    span: &(usize, usize),
+    span: &Span,
 ) -> Option<&'a ResolvedType> {
     let ty = info.expression_types.get(span)?;
     if !matches!(ty, ResolvedType::Function(_)) {

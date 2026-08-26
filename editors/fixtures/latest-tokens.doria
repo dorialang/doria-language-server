@@ -15,6 +15,28 @@ declare(strict_types: true);
 // Stage 20: statics and constant evaluation.
 const DEFAULT_LIMIT = 25;
 const int HARD_LIMIT = 100;
+internal const int PACKAGE_LIMIT = 10;
+
+internal class PackageHelper
+{
+}
+
+internal enum PackageState
+{
+    case Ready;
+}
+
+internal interface PackageContract
+{
+}
+
+internal trait PackageSupport
+{
+}
+
+internal function packageHelper(): void
+{
+}
 
 class ParserLimits
 {

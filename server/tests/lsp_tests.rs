@@ -2218,10 +2218,16 @@ class Child extends Vendor\Base implements Vendor\Contracts\Printable {}
     assert_eq!(
         diagnostics
             .iter()
-            .filter(|diagnostic| diagnostic["code"] == "E0671")
+            .filter(|diagnostic| {
+                diagnostic["code"] == "E0681"
+                    && diagnostic["data"]["kind"] == "compilerInput"
+                    && diagnostic["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("partial compilation graph"))
+            })
             .count(),
         2,
-        "both unresolved qualified inheritance names must retain the Stage 31 Slice 2 boundary: {diagnostics:#?}",
+        "both unresolved qualified inheritance names must retain the compiler-owned partial-graph diagnostic: {diagnostics:#?}",
     );
 }
 

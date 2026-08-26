@@ -1,8 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use doriac::names::{
-    GlobalReferenceRole, GlobalSymbolId, GlobalSymbolKind, GlobalSymbolOwner, PackageIdentity,
-};
+use doriac::names::{GlobalReferenceRole, GlobalSymbolId, GlobalSymbolKind, PackageIdentity};
 use doriac::source::Span;
 
 use crate::analysis::AnalysisSnapshot;
@@ -68,8 +66,9 @@ struct IndexedOccurrence {
 #[derive(Debug, Clone)]
 struct DocumentSummary {
     package: PackageIdentity,
+    namespace: Option<String>,
     declarations: Vec<(GlobalSymbolId, String, GlobalSymbolKind)>,
-    imports: Vec<(String, GlobalSymbolId)>,
+    imports: Vec<(String, String, Option<GlobalSymbolId>)>,
     compiler_known: Vec<(String, GlobalSymbolId, GlobalSymbolKind)>,
 }
 
@@ -79,6 +78,8 @@ pub(crate) struct OpenDocumentIndex {
     declaration_counts: HashMap<GlobalSymbolId, usize>,
     symbol_kinds: HashMap<GlobalSymbolId, GlobalSymbolKind>,
     implicit_imports: HashSet<GlobalSymbolId>,
+    incomplete_packages: HashSet<PackageIdentity>,
+    declaration_hovers: HashMap<GlobalSymbolId, String>,
     documents: HashMap<String, DocumentSummary>,
 }
 
@@ -105,6 +106,7 @@ impl OpenDocumentIndex {
         let package = snapshot.compilation_context().package.clone();
         let mut summary = DocumentSummary {
             package: package.clone(),
+            namespace: facts.namespace.clone(),
             declarations: Vec::new(),
             imports: Vec::new(),
             compiler_known: Vec::new(),
@@ -123,6 +125,11 @@ impl OpenDocumentIndex {
                 declaration.source_name.clone(),
                 declaration.kind,
             ));
+            if let Some(hover) = snapshot.hover_at_offset(declaration.name_span.start) {
+                self.declaration_hovers
+                    .entry(declaration.id.clone())
+                    .or_insert(hover.markdown);
+            }
             self.occurrences.push(IndexedOccurrence {
                 uri: uri.to_string(),
                 span: declaration.name_span,
@@ -153,14 +160,18 @@ impl OpenDocumentIndex {
                         reference.role == GlobalReferenceRole::ImportTarget
                             && reference.source_span == import.target_span
                     })
-                    .map(|reference| reference.symbol_id.clone())
-                    .unwrap_or_else(|| package_symbol(&package, &import.target));
+                    .map(|reference| reference.symbol_id.clone());
                 (import, target)
             })
             .collect::<Vec<_>>();
 
         for (import, target) in &imports {
-            summary.imports.push((import.alias.clone(), target.clone()));
+            summary
+                .imports
+                .push((import.alias.clone(), import.target.clone(), target.clone()));
+            let Some(target) = target else {
+                continue;
+            };
             let explicit = !span_contains(import.target_span, import.alias_span);
             if explicit {
                 self.occurrences.push(IndexedOccurrence {
@@ -206,37 +217,8 @@ impl OpenDocumentIndex {
             });
         }
 
-        for unresolved in &facts.unresolved {
-            let target = package_symbol(&package, &unresolved.source_spelling);
-            let authored = snapshot
-                .authored_qualified_name(unresolved.source_span)
-                .unwrap_or(&unresolved.source_spelling);
-            let alias = if unresolved.role == GlobalReferenceRole::ImportTarget {
-                None
-            } else {
-                unresolved
-                    .import_alias
-                    .as_ref()
-                    .map(|import_alias| AliasIdentity {
-                        uri: uri.to_string(),
-                        target: target.clone(),
-                        alias: import_alias.clone(),
-                    })
-            };
-            self.occurrences.push(IndexedOccurrence {
-                uri: uri.to_string(),
-                span: unresolved.source_span,
-                symbol: target,
-                role: if unresolved.role == GlobalReferenceRole::ImportTarget {
-                    IndexedRole::ImportTarget
-                } else if alias.is_some() {
-                    IndexedRole::AliasUse
-                } else {
-                    IndexedRole::Reference
-                },
-                source_spelling: authored.to_string(),
-                alias,
-            });
+        if !facts.unresolved.is_empty() {
+            self.incomplete_packages.insert(package);
         }
 
         self.documents.insert(uri.to_string(), summary);
@@ -290,6 +272,33 @@ impl OpenDocumentIndex {
             .collect()
     }
 
+    pub(crate) fn definition(&self, uri: &str, offset: usize) -> Option<IndexedLocation> {
+        let occurrence = self
+            .occurrences
+            .iter()
+            .filter(|occurrence| {
+                occurrence.uri == uri && span_contains_offset(occurrence.span, offset)
+            })
+            .min_by_key(|occurrence| occurrence.span.end.saturating_sub(occurrence.span.start))?;
+        if occurrence.role == IndexedRole::AliasUse {
+            let alias = occurrence.alias.as_ref()?;
+            return self
+                .occurrences
+                .iter()
+                .find(|candidate| {
+                    candidate.role == IndexedRole::AliasDeclaration
+                        && candidate.alias.as_ref() == Some(alias)
+                })
+                .map(indexed_location);
+        }
+        self.occurrences
+            .iter()
+            .find(|candidate| {
+                candidate.symbol == occurrence.symbol && candidate.role == IndexedRole::Declaration
+            })
+            .map(indexed_location)
+    }
+
     pub(crate) fn rename(&self, target: &SymbolTarget, new_name: &str) -> Option<Vec<IndexedEdit>> {
         if !is_identifier(new_name) {
             return None;
@@ -315,8 +324,10 @@ impl OpenDocumentIndex {
                 (!edits.is_empty()).then_some(edits)
             }
             SymbolTarget::Canonical(symbol) => {
+                let package = symbol_package(symbol)?;
                 if self.declaration_counts.get(symbol) != Some(&1)
                     || self.implicit_imports.contains(symbol)
+                    || self.incomplete_packages.contains(package)
                 {
                     return None;
                 }
@@ -367,6 +378,12 @@ impl OpenDocumentIndex {
             occurrence.uri == uri && span_contains_offset(occurrence.span, offset)
         })?;
         let mut markdown = format!("{} `{}`", kind_name(*kind), symbol.qualified_name);
+        if let Some(declaration) = self.declaration_hovers.get(&symbol) {
+            if !declaration.is_empty() && !markdown.contains(declaration) {
+                markdown.push_str("\n\n");
+                markdown.push_str(declaration);
+            }
+        }
         if let Some(alias) = alias {
             markdown.push_str(&format!("\n\nImported As `{alias}`"));
         }
@@ -387,18 +404,22 @@ impl OpenDocumentIndex {
                 completion(source_name.clone(), *kind, &symbol.qualified_name),
             );
         }
-        for (alias, target) in &document.imports {
-            let kind = self
-                .symbol_kinds
-                .get(target)
+        for (alias, source_target, target) in &document.imports {
+            let kind = target
+                .as_ref()
+                .and_then(|target| self.symbol_kinds.get(target))
                 .copied()
                 .unwrap_or(GlobalSymbolKind::Class);
+            let detail = target.as_ref().map_or_else(
+                || format!("Unresolved import `{source_target}`"),
+                |target| format!("Imported {} `{}`", kind_name(kind), target.qualified_name),
+            );
             completions.insert(
                 alias.clone(),
                 IndexedCompletion {
                     label: alias.clone(),
                     kind: completion_kind(kind),
-                    detail: format!("Imported {} `{}`", kind_name(kind), target.qualified_name),
+                    detail,
                 },
             );
         }
@@ -412,11 +433,19 @@ impl OpenDocumentIndex {
                 continue;
             }
             for (symbol, _, kind) in &summary.declarations {
+                let label = if summary.namespace == document.namespace {
+                    symbol
+                        .qualified_name
+                        .rsplit('\\')
+                        .next()
+                        .unwrap_or(&symbol.qualified_name)
+                        .to_string()
+                } else {
+                    symbol.qualified_name.clone()
+                };
                 completions
-                    .entry(symbol.qualified_name.clone())
-                    .or_insert_with(|| {
-                        completion(symbol.qualified_name.clone(), *kind, &symbol.qualified_name)
-                    });
+                    .entry(label.clone())
+                    .or_insert_with(|| completion(label, *kind, &symbol.qualified_name));
             }
         }
         let mut completions = completions.into_values().collect::<Vec<_>>();
@@ -425,10 +454,17 @@ impl OpenDocumentIndex {
     }
 }
 
-fn package_symbol(package: &PackageIdentity, qualified_name: &str) -> GlobalSymbolId {
-    GlobalSymbolId {
-        owner: GlobalSymbolOwner::Package(package.clone()),
-        qualified_name: qualified_name.to_string(),
+fn indexed_location(occurrence: &IndexedOccurrence) -> IndexedLocation {
+    IndexedLocation {
+        uri: occurrence.uri.clone(),
+        span: occurrence.span,
+    }
+}
+
+fn symbol_package(symbol: &GlobalSymbolId) -> Option<&PackageIdentity> {
+    match &symbol.owner {
+        doriac::names::GlobalSymbolOwner::Package(package) => Some(package),
+        doriac::names::GlobalSymbolOwner::CompilerKnown(_) => None,
     }
 }
 

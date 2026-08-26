@@ -17,17 +17,18 @@ execution for valid closures and describes PHP lowering as conditional on the
 program's independently supported PHP surface. Valid closures receive no
 `E0641` because the compiler has completed their accepted routes; the server does
 not suppress that historical, reserved diagnostic. PHP remains a secondary
-compatibility backend with independent limitations. Stage 30 is complete,
-Stage 31 Slice 1 is complete, and Stage 31 Slice 2 is next. Stage 31 remains in
-progress.
+compatibility backend with independent limitations. Stage 30 and Stage 31 are
+complete. Stage 32 attributes are next; Stage 33 project integration remains
+scheduled and unimplemented.
 
-For namespace-aware presentation, each open document receives a compiler
-`CompilationContext` with edition 2026, its source URI, and a synthetic package
-identity selected from the longest matching workspace root. A bounded index
-combines compiler-owned global declaration and reference facts across open
-documents for references, safe rename, hover, and completion. It does not scan
-files, read Baton manifests, suppress Slice 2 diagnostics, or perform cross-file
-semantic checking.
+For namespace-aware tooling, each longest-matching workspace root receives a
+stable synthetic package and one compiler `CompilationSession`. Open documents
+become an in-memory partial build plan and are checked as one compiler graph.
+Cross-file definitions, references, conservative rename, rich hover, completion,
+multi-source diagnostics, fixes, include edges, and incremental invalidation all
+consume compiler-owned identities and facts. The server does not scan files,
+read Baton manifests, or claim completeness for unopened sources; Stage 33 owns
+that project inventory integration.
 
 From the repository root:
 

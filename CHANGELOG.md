@@ -6,13 +6,20 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Completed Stage 31 tooling integration by pinning the final build-plan
+  compiler, analyzing each open workspace package through a reusable partial
+  compilation graph, and adding compiler-backed cross-file definition,
+  references, conservative rename, rich hover, same-namespace completion,
+  multi-source diagnostics and fixes, include facts, incremental invalidation,
+  and stale-result clearing. Project inventories remain open-document-only;
+  Baton parsing and unopened-file discovery remain Stage 33 work.
 - Completed Stage 31 Slice 1 editor alignment: pinned the namespace-aware
   compiler, assigned synthetic package identities by longest workspace root,
   indexed compiler-owned canonical symbols across open documents, and added
   namespace/import/include hover, completion, references, conservative rename,
   semantic tokens, highlighting, diagnostics, and UTF-16 regression coverage.
-  Filesystem discovery, Baton manifests, cross-file semantic checking, external
-  symbol resolution, and include resolution remain Stage 31 Slice 2 work.
+  This established the open-document index that Slice 2 subsequently moved onto
+  the compiler's partial compilation graph.
 - Pinned `doria-lsp` to the final integrated Stage 30 compiler and preserved
   exact structural function identity through `mixed` and nullable narrowing in
   semantic hover, including captured bindings and compiler-owned ownership
