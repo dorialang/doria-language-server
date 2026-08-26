@@ -4,6 +4,28 @@ import com.intellij.psi.tree.IElementType
 import junit.framework.TestCase
 
 class DoriaLexerTest : TestCase() {
+    fun testTopLevelInternalDeclarationsKeepModifierAndDeclarationHighlighting() {
+        val tokens = lex(
+            "internal class Helper {} " +
+                "internal enum State { case Ready; } " +
+                "internal interface Contract {} " +
+                "internal trait Support {} " +
+                "internal function helper(): void {} " +
+                "internal const int LIMIT = 10;",
+        )
+
+        for (token in tokens.filter { it.text == "internal" }) {
+            assertEquals(DoriaTokenTypes.MODIFIER, token.type)
+        }
+        for (name in listOf("Helper", "Contract", "Support")) {
+            assertEquals(DoriaTokenTypes.TYPE_NAME, tokens.first { it.text == name }.type)
+        }
+        assertEquals(DoriaTokenTypes.ENUM_DECLARATION, tokens.first { it.text == "State" }.type)
+        assertEquals(DoriaTokenTypes.FUNCTION_DECLARATION, tokens.first { it.text == "helper" }.type)
+        assertEquals(DoriaTokenTypes.CLASS_CONSTANT, tokens.first { it.text == "LIMIT" }.type)
+        assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
+    }
+
     fun testNestedAttributeBracketsDoNotCloseTheAttributeEarly() {
         val tokens = lex("#[Module(imports: [Factory::make(values: [])])] class App {}")
 

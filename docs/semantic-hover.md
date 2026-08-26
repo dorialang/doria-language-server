@@ -61,9 +61,9 @@ repeatable access, checked effects, unchanged-source contract, and owned result.
 The server consumes `ListAlgorithmCallInfo`; it does not infer callback effects
 or reconstruct an algorithm type checker. Other collection families do not
 receive these algorithms. PHP remains a secondary compatibility backend with
-independent limitations. Stage 31 Slice 1 is complete, Stage 31 Slice 2 is next,
-and Stage 31 remains in progress. Semantically invalid closures receive
-no execution capability block.
+independent limitations. Stage 31 is complete, Stage 32 attributes are next, and
+Stage 33 project integration remains scheduled. Semantically invalid closures
+receive no execution capability block.
 
 Ownership hover text stays in Doria vocabulary: Owned Closure or Borrow-Bound Closure,
 Readonly/Writable/Owned taking capture, Readonly/Writable Repeatable or Consumes On
@@ -138,19 +138,19 @@ snapshot from `doriac` parser and semantic-analysis results, maps byte spans to 
 positions, caches the snapshot by document version, and renders protocol Markdown.
 It does not infer a parallel Doria type system.
 
-The server combines compiler-owned global declaration and reference facts across
-currently open documents in one bounded index. Namespace and imported-symbol
-hover shows canonical qualified names, explicit aliases, edition-prelude
-provenance, or compiler-known provenance without exposing synthetic package IDs.
-References use canonical identity across open documents. Explicit alias rename
-is local to that file; canonical rename edits direct unambiguous open-document
-occurrences while preserving explicit aliases, and declines when an implicit
-alias or duplicate declaration would require an unsafe partial edit. Completion
-offers current-document declarations, explicit aliases, prelude/compiler-known
-names, and fully qualified open-document declarations, but never treats every
-open short name as imported.
+The server submits currently open documents to one compiler-owned partial graph
+per synthetic workspace package. Namespace and imported-symbol hover supplements
+the resulting rich semantic facts with canonical qualified names, explicit
+aliases, edition-prelude provenance, or compiler-known provenance without
+exposing synthetic package IDs. Definition and references use canonical identity
+across open documents. Explicit alias rename is local to that file; canonical
+rename edits direct unambiguous open-document occurrences while preserving
+explicit aliases, and declines for duplicates, implicit aliases, or incomplete
+inputs. Completion offers current-namespace declarations, explicit aliases,
+prelude/compiler-known names, and qualified open-document declarations without
+treating every dependency short name as imported.
 
-This index does not read unopened files or Baton manifests and does not suppress
-the compiler's Stage 31 Slice 2 boundaries for external symbols or `include`.
-Full build-graph semantic indexing, include resolution, inheritance across files,
-and definition navigation remain later work.
+The graph is intentionally bounded to supplied open text. It resolves explicit
+includes available through that in-memory source provider, but it does not read
+unopened files, scan directories, or parse Baton manifests. Stage 33 will supply
+authoritative project inventories and unopened-file completeness.

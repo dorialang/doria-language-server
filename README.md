@@ -43,17 +43,18 @@ compatibility backend and its unrelated limitations remain in force. Completion
 offers `map`, `filter`, and `reduce` only for resolved `List<T>` receivers, while
 semantic hover presents the compiler's concrete callback, result, access, and
 checked-effect facts. Diagnostics remain compiler-owned. Other collection
-algorithms are not included. Stage 31 Slice 1 is complete and Slice 2 is next;
-Stage 31 remains in progress. Ordinary analysis remains target-neutral, and
-highlighting remains presentation only.
+algorithms are not included. Stage 31 is complete, Stage 32 attributes are next,
+and Stage 33 project integration remains scheduled but unimplemented. Ordinary
+analysis remains target-neutral, and highlighting remains presentation only.
 
-Namespace-aware tooling uses compiler-owned canonical symbol identities. Each
-open document is analyzed with a stable synthetic package identity selected by
-its longest matching workspace root. The bounded open-document index provides
-cross-document references, explicit-alias hovers, qualified-name completion,
-and conservative rename without scanning unopened files or parsing Baton
-manifests. Compiler diagnostics for external symbols and `include` remain
-visible because build-graph and include resolution belong to Stage 31 Slice 2.
+Namespace-aware tooling analyzes the currently open sources under each workspace
+root as one compiler-owned partial compilation graph. The compiler supplies
+canonical identity, cross-file resolution, include edges, semantic diagnostics,
+and incremental invalidation; the LSP index supplies definition, references,
+conservative rename, rich hover, completion, and source-aware fixes over those
+facts. Changes and closes republish every affected open document and clear stale
+results. The server does not scan unopened files or parse `Baton.toml`, so full
+project inventory and unopened-file completeness wait for Stage 33.
 
 The compiler also accepts constructor-rooted mutation through definitely initialized
 writable property paths, owned initialization of instance properties, and replacement

@@ -25,9 +25,11 @@ Valid closures are diagnostic-free in ordinary target-neutral editor analysis an
 execute through the compiler's debug and native targets and its supported PHP
 compatibility surface. Completion and concrete semantic hovers expose `map`,
 `filter`, and `reduce` on `List<T>` only; diagnostics remain compiler-owned.
-PHP remains secondary. Stage 30 and Stage 31 Slice 1 are complete; Stage 31
-Slice 2 is next and Stage 31 remains in progress. The grammar
-does not implement capture, callable, or execution semantics.
+PHP remains secondary. Stage 30 and Stage 31 are complete; Stage 32 attributes
+are next, while Stage 33 project integration remains scheduled. Top-level
+`internal` declarations retain ordinary declaration scopes with `internal` as a
+modifier. The grammar does not implement package visibility, capture, callable,
+or execution semantics.
 
 ## Install the VS Code extension
 

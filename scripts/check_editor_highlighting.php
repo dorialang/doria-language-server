@@ -8,7 +8,7 @@ declare(strict_types=1);
  */
 
 $root = dirname(__DIR__);
-$requiredCompilerRevision = '48d8351d364864640fda1871ec9cd45ba5c5d65e';
+$requiredCompilerRevision = '8cfa433aa92dfdd1e3c6f1f7267f936ab5db04ee';
 
 $cargoManifest = $root . '/Cargo.toml';
 $cargoLock = $root . '/Cargo.lock';
@@ -1649,7 +1649,7 @@ function check_stage30f_callable_alignment(): void
             '/doriac\s*=\s*\{[^}]*\brev\s*=\s*"' . preg_quote($requiredCompilerRevision, '/') . '"/',
             $cargoManifestText,
         ) === 1,
-        'root doriac dependency must pin the integrated Stage 31 Slice 1 compiler commit',
+        'root doriac dependency must pin the final Stage 31 compiler commit',
     );
     preg_match_all(
         '/source = "git\+https:\/\/github\.com\/dorialang\/doria\?rev=([0-9a-f]{40})#([0-9a-f]{40})"/',
@@ -1664,7 +1664,7 @@ function check_stage30f_callable_alignment(): void
     foreach ($doriaSources as $source) {
         require_check(
             $source[1] === $requiredCompilerRevision && $source[2] === $requiredCompilerRevision,
-            'every Doria git package must resolve to the integrated Stage 31 Slice 1 compiler commit',
+            'every Doria git package must resolve to the final Stage 31 compiler commit',
         );
     }
     $fixtureText = read_text($fixture);
@@ -1682,6 +1682,12 @@ function check_stage30f_callable_alignment(): void
         'function-type checked effects' => '/\bfunction\s*\([^)]*\)\s*:\s*[^;=\n]+\bthrows\s+[A-Za-z_]/',
         'grouped nested function type' => '/\(\s*function\s*\(\s*\)\s*:\s*int\s+throws\s+ParseError\s*\)/',
         'callable-value invocation' => '/\$identity\s*\(\s*1\s*\)/',
+        'top-level internal class' => '/^internal\s+class\s+/m',
+        'top-level internal enum' => '/^internal\s+enum\s+/m',
+        'top-level internal interface' => '/^internal\s+interface\s+/m',
+        'top-level internal trait' => '/^internal\s+trait\s+/m',
+        'top-level internal function' => '/^internal\s+function\s+/m',
+        'top-level internal constant' => '/^internal\s+const\s+/m',
     ];
     foreach ($acceptedFacts as $fact => $pattern) {
         require_check(
@@ -1898,14 +1904,14 @@ function check_stage30f_callable_alignment(): void
             str_contains($readmeText, 'historical, reserved diagnostic') &&
             str_contains($readmeText, 'does not suppress') &&
             str_contains($readmeText, 'supported compatibility surface') &&
-            str_contains($readmeText, 'Stage 31 Slice 1 is complete') &&
-            str_contains($readmeText, 'Slice 2 is next') &&
-            str_contains($readmeText, 'Stage 31 remains in progress') &&
+            str_contains($readmeText, 'Stage 31 is complete') &&
+            str_contains($readmeText, 'Stage 32 attributes are next') &&
+            str_contains($readmeText, 'Stage 33 project integration remains scheduled') &&
             str_contains($readmeText, '`map`, `filter`, and `reduce` only for resolved `List<T>` receivers') &&
             !str_contains($readmeText, 'Stage 30 remains incomplete') &&
             !str_contains($readmeText, 'Stage 30h is next') &&
             !str_contains($readmeText, 'lowering remains the Stage 30f boundary'),
-        'README must state Stage 30 completion, historical E0641 handling, and Stage 31 Slice 1 status',
+        'README must state Stage 30 and Stage 31 completion plus the Stage 32/33 boundary',
     );
 }
 
@@ -1913,12 +1919,15 @@ function check_inferred_main_effect_alignment(): void
 {
     global $readme, $lspAnalysis, $lspServer, $lspTests;
 
-    $serverText = read_text($lspAnalysis) . read_text($lspServer);
-    $testText = read_text($lspAnalysis) . read_text($lspTests);
+    $analysisText = read_text($lspAnalysis);
+    $serverText = read_text($lspServer);
+    $productionText = explode("\n#[cfg(test)]\nmod tests", $analysisText, 2)[0]
+        . explode("\n#[cfg(test)]\nmod tests", $serverText, 2)[0];
+    $testText = $analysisText . $serverText . read_text($lspTests);
     $readmeText = read_text($readme);
 
     require_check(
-        !str_contains($serverText, 'E0631'),
+        !str_contains($productionText, 'E0631'),
         'LSP implementation must not infer or suppress compiler checked-effect diagnostics',
     );
     foreach ([
