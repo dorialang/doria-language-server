@@ -17,6 +17,7 @@ object DoriaTokenTypes {
     val RESERVED_TYPE = DoriaTokenType("DORIA_RESERVED_TYPE")
     val COLLECTION_TYPE = DoriaTokenType("DORIA_COLLECTION_TYPE")
     val TYPE_NAME = DoriaTokenType("DORIA_TYPE_NAME")
+    val NAMESPACE_PATH = DoriaTokenType("DORIA_NAMESPACE_PATH")
     val IMPORT_USE_KEYWORD = DoriaTokenType("DORIA_IMPORT_USE_KEYWORD")
     val IMPORT_PATH = DoriaTokenType("DORIA_IMPORT_PATH")
     val IMPORT_ALIAS_KEYWORD = DoriaTokenType("DORIA_IMPORT_ALIAS_KEYWORD")

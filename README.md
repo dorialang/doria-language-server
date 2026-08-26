@@ -43,8 +43,17 @@ compatibility backend and its unrelated limitations remain in force. Completion
 offers `map`, `filter`, and `reduce` only for resolved `List<T>` receivers, while
 semantic hover presents the compiler's concrete callback, result, access, and
 checked-effect facts. Diagnostics remain compiler-owned. Other collection
-algorithms are not included. Stage 31 is next; ordinary analysis remains
-target-neutral, and highlighting remains presentation only.
+algorithms are not included. Stage 31 Slice 1 is complete and Slice 2 is next;
+Stage 31 remains in progress. Ordinary analysis remains target-neutral, and
+highlighting remains presentation only.
+
+Namespace-aware tooling uses compiler-owned canonical symbol identities. Each
+open document is analyzed with a stable synthetic package identity selected by
+its longest matching workspace root. The bounded open-document index provides
+cross-document references, explicit-alias hovers, qualified-name completion,
+and conservative rename without scanning unopened files or parsing Baton
+manifests. Compiler diagnostics for external symbols and `include` remain
+visible because build-graph and include resolution belong to Stage 31 Slice 2.
 
 The compiler also accepts constructor-rooted mutation through definitely initialized
 writable property paths, owned initialization of instance properties, and replacement
@@ -190,12 +199,12 @@ into the universal Marketplace artifact.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow, [docs/architecture.md](docs/architecture.md) for component boundaries, and [docs/releasing.md](docs/releasing.md) for CalVer release coordination.
 
-Semantic hover uses compiler-resolved symbols for same-file classes, enums and enum
-cases, free functions, instance methods, and static methods. It displays signatures
+Semantic hover uses compiler-resolved symbols for classes, enums and enum
+cases, free functions, constants, instance methods, and static methods. It displays signatures
 and attached PHPDoc consistently in VS Code and JetBrains IDEs. Signature help uses
 the same callable records and includes source-ordered checked-error effects. See
 [docs/semantic-hover.md](docs/semantic-hover.md) for the behavior contract and
-planned workspace-wide extensions.
+the bounded open-document namespace behavior and its deliberate limits.
 
 When developing compiler syntax or semantics on a local Doria branch, build the
 server against that checkout so editor diagnostics use the same compiler:

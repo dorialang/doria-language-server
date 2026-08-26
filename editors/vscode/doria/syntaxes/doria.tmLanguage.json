@@ -629,7 +629,7 @@
         },
         {
           "name": "meta.import.doria",
-          "begin": "^(use)\\b(?=\\s+[A-Za-z_][A-Za-z0-9_]*(?:\\\\[A-Za-z_][A-Za-z0-9_]*)+)",
+          "begin": "^(use)\\b(?=\\s+(?:[A-Za-z_][A-Za-z0-9_]*(?:\\\\[A-Za-z_][A-Za-z0-9_]*)+(?:\\s+as\\s+[A-Za-z_][A-Za-z0-9_]*)?|[A-Za-z_][A-Za-z0-9_]*(?:\\\\[A-Za-z_][A-Za-z0-9_]*)+\\\\\\{\\s*[A-Za-z_][A-Za-z0-9_]*(?:\\s+as\\s+[A-Za-z_][A-Za-z0-9_]*)?(?:\\s*,\\s*[A-Za-z_][A-Za-z0-9_]*(?:\\s+as\\s+[A-Za-z_][A-Za-z0-9_]*)?)*\\s*,?\\s*\\})\\s*;)",
           "beginCaptures": {
             "1": {
               "name": "keyword.control.import.doria"
@@ -656,6 +656,18 @@
             {
               "name": "punctuation.separator.namespace.doria",
               "match": "\\\\"
+            },
+            {
+              "name": "punctuation.section.import.group.begin.doria",
+              "match": "\\{"
+            },
+            {
+              "name": "punctuation.section.import.group.end.doria",
+              "match": "\\}"
+            },
+            {
+              "name": "punctuation.separator.comma.doria",
+              "match": ","
             },
             {
               "name": "entity.name.namespace.doria",

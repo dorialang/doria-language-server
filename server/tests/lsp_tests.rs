@@ -140,6 +140,22 @@ $count = 1;
 }
 
 #[test]
+fn namespace_naming_diagnostics_remain_compiler_owned_and_utf16_safe() {
+    let source = "// 😀\nnamespace acme\\HTTP; function main(): void {}";
+    assert_lsp_diagnostic_matches_compiler("namespace-naming.doria", source, "E0675");
+
+    let diagnostics = diagnostics_for_document("file:///namespace-naming.doria", source);
+    let naming = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic["code"] == "E0675")
+        .collect::<Vec<_>>();
+    assert_eq!(naming.len(), 2, "{diagnostics:#?}");
+    assert!(naming
+        .iter()
+        .all(|diagnostic| diagnostic["source"] == "doriac"));
+}
+
+#[test]
 fn accepted_stage_30h_closure_routes_are_compiler_owned_and_target_neutral() {
     let cases = [
         (
@@ -2199,11 +2215,14 @@ class Child extends Vendor\Base implements Vendor\Contracts\Printable {}
             .as_str()
             .is_some_and(|code| code.starts_with('P'))
     }));
-    for code in ["E0475", "E0476", "E0464"] {
-        assert!(diagnostics
+    assert_eq!(
+        diagnostics
             .iter()
-            .any(|diagnostic| diagnostic["code"] == code));
-    }
+            .filter(|diagnostic| diagnostic["code"] == "E0671")
+            .count(),
+        2,
+        "both unresolved qualified inheritance names must retain the Stage 31 Slice 2 boundary: {diagnostics:#?}",
+    );
 }
 
 #[test]

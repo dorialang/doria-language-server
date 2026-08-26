@@ -10,6 +10,7 @@ use doriac::ast::{
 use doriac::diagnostics::{Diagnostic, DiagnosticSeverity};
 use doriac::enums::{EnumBackingType, EnumBackingValue};
 use doriac::lexer::{Token, TokenKind};
+use doriac::names::{CompilationContext, GlobalSymbolFacts};
 use doriac::ownership::{
     CaptureAcquisitionKind, ClosureBorrowRoot, ClosureEscapeClassification, ClosureValueProvenance,
     InvocationConsumption,
@@ -67,6 +68,10 @@ impl SemanticHover {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AnalysisSnapshot {
     diagnostics: Vec<Diagnostic>,
+    compilation_context: CompilationContext,
+    global_symbols: GlobalSymbolFacts,
+    authored_qualified_names: HashMap<(usize, usize), String>,
+    directive_semantic_tokens: Vec<(Span, u32)>,
     symbols: Vec<Symbol>,
     occurrences: Vec<Occurrence>,
     member_receivers: Vec<MemberReceiver>,
@@ -174,24 +179,84 @@ pub(crate) struct LocalCompletion {
 
 impl AnalysisSnapshot {
     pub(crate) fn analyze(path: &str, text: &str) -> Self {
-        let tokens = doriac::lex_source(path.to_string(), text.to_string()).unwrap_or_default();
-        let (program, analysis) =
-            match doriac::analyze_source_for_ide(path.to_string(), text.to_string()) {
-                Ok(analysis) => analysis,
-                Err(diagnostics) => {
-                    return Self {
-                        diagnostics,
-                        ..Self::default()
-                    };
-                }
-            };
+        Self::analyze_with_context(path, text, CompilationContext::standalone(path))
+    }
 
-        SnapshotBuilder::new(text, &tokens, Some(&analysis.info), analysis.diagnostics)
-            .build(&program)
+    pub(crate) fn analyze_with_context(
+        path: &str,
+        text: &str,
+        context: CompilationContext,
+    ) -> Self {
+        let tokens = doriac::lex_source(path.to_string(), text.to_string()).unwrap_or_default();
+        let (program, analysis) = match doriac::analyze_source_for_ide_with_context(
+            path.to_string(),
+            text.to_string(),
+            context.clone(),
+        ) {
+            Ok(analysis) => analysis,
+            Err(diagnostics) => {
+                return Self {
+                    diagnostics,
+                    compilation_context: context,
+                    ..Self::default()
+                };
+            }
+        };
+        let global_symbols = analysis.info.global_symbols.clone();
+        let authored_qualified_names = program
+            .qualified_names
+            .iter()
+            .map(|name| ((name.span.start, name.span.end), name.canonical()))
+            .collect();
+        let directive_semantic_tokens = directive_semantic_tokens(&program);
+        let mut snapshot =
+            SnapshotBuilder::new(text, &tokens, Some(&analysis.info), analysis.diagnostics)
+                .build(&program);
+        snapshot.compilation_context = context;
+        snapshot.global_symbols = global_symbols;
+        snapshot.authored_qualified_names = authored_qualified_names;
+        snapshot.directive_semantic_tokens = directive_semantic_tokens;
+        snapshot
     }
 
     pub(crate) fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
+    }
+
+    pub(crate) fn compilation_context(&self) -> &CompilationContext {
+        &self.compilation_context
+    }
+
+    pub(crate) fn global_symbols(&self) -> &GlobalSymbolFacts {
+        &self.global_symbols
+    }
+
+    pub(crate) fn authored_qualified_name(&self, span: Span) -> Option<&str> {
+        self.authored_qualified_names
+            .get(&(span.start, span.end))
+            .map(String::as_str)
+    }
+
+    pub(crate) fn namespace_hover_at_offset(&self, offset: usize) -> Option<SemanticHover> {
+        let namespace = self.global_symbols.namespace_declaration.as_ref()?;
+        let contains_offset = span_contains(namespace.keyword_span, offset)
+            || namespace
+                .name
+                .segments
+                .iter()
+                .any(|segment| span_contains(segment.span, offset))
+            || namespace
+                .name
+                .separator_spans
+                .iter()
+                .any(|span| span_contains(*span, offset));
+        if !contains_offset {
+            return None;
+        }
+        Some(SemanticHover::new(
+            namespace.name.span,
+            format!("Namespace `{}`", namespace.name.canonical()),
+        ))
     }
 
     pub(crate) fn signature_help_for_incomplete_call(
@@ -483,6 +548,7 @@ impl AnalysisSnapshot {
                 semantic_token_type(symbol).map(|token_type| (occurrence.span, token_type))
             })
             .collect::<Vec<_>>();
+        spans.extend(self.directive_semantic_tokens.iter().copied());
         spans.sort_by_key(|(span, _)| (span.start, span.end));
         spans.dedup_by_key(|(span, _)| (span.start, span.end));
         spans
@@ -509,6 +575,79 @@ impl AnalysisSnapshot {
             .min_by_key(|occurrence| occurrence.span.end.saturating_sub(occurrence.span.start))
             .map(|occurrence| occurrence.symbol)
     }
+}
+
+fn directive_semantic_tokens(program: &Program) -> Vec<(Span, u32)> {
+    const TYPE: u32 = 1;
+    const KEYWORD: u32 = 4;
+    const NAMESPACE: u32 = 5;
+    const STRING: u32 = 6;
+
+    let mut tokens = Vec::new();
+    if let Some(namespace) = &program.namespace {
+        tokens.push((namespace.keyword_span, KEYWORD));
+        tokens.extend(
+            namespace
+                .name
+                .segments
+                .iter()
+                .map(|segment| (segment.span, NAMESPACE)),
+        );
+        tokens.extend(
+            namespace
+                .name
+                .separator_spans
+                .iter()
+                .copied()
+                .map(|span| (span, NAMESPACE)),
+        );
+    }
+    for import in &program.imports {
+        tokens.push((import.keyword_span, KEYWORD));
+        if let Some(prefix) = &import.prefix {
+            tokens.extend(
+                prefix
+                    .segments
+                    .iter()
+                    .map(|segment| (segment.span, NAMESPACE)),
+            );
+            tokens.extend(
+                prefix
+                    .separator_spans
+                    .iter()
+                    .copied()
+                    .map(|span| (span, NAMESPACE)),
+            );
+        }
+        for entry in &import.entries {
+            tokens.extend(
+                entry
+                    .target
+                    .segments
+                    .iter()
+                    .map(|segment| (segment.span, TYPE)),
+            );
+            tokens.extend(
+                entry
+                    .target
+                    .separator_spans
+                    .iter()
+                    .copied()
+                    .map(|span| (span, NAMESPACE)),
+            );
+            if let Some(span) = entry.as_span {
+                tokens.push((span, KEYWORD));
+            }
+            if let Some(alias) = &entry.alias {
+                tokens.push((alias.span, TYPE));
+            }
+        }
+    }
+    for include in &program.includes {
+        tokens.push((include.keyword_span, KEYWORD));
+        tokens.push((include.literal_span, STRING));
+    }
+    tokens
 }
 
 fn semantic_token_type(symbol: &Symbol) -> Option<u32> {
@@ -612,6 +751,10 @@ impl<'a> SnapshotBuilder<'a> {
         self.collect_semantic_hovers();
         AnalysisSnapshot {
             diagnostics: self.diagnostics,
+            compilation_context: CompilationContext::default(),
+            global_symbols: GlobalSymbolFacts::default(),
+            authored_qualified_names: HashMap::new(),
+            directive_semantic_tokens: Vec::new(),
             symbols: self.symbols,
             occurrences: self.occurrences,
             member_receivers: self.member_receivers,

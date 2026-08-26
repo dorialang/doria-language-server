@@ -1,10 +1,14 @@
-namespace App\Models;
+namespace Acme\Editor;
 
 // Current source-organization direction.
-use App\Repositories\UserRepository;
-use App\Services\ReportService as Reports;
+use Acme\Model\User;
+use Acme\Http\Client as HttpClient;
+use Doria\Std\Math\{
+    Vector2,
+    Vector3 as Position3,
+};
 
-include "support/types.doria";
+include "generated/routes.doria";
 
 declare(strict_types: true);
 

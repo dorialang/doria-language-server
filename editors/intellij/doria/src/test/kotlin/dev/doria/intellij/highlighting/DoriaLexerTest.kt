@@ -280,6 +280,59 @@ class DoriaLexerTest : TestCase() {
         assertEquals(DoriaTokenTypes.INVALID, legacyUse.first { it.text == "use" }.type)
     }
 
+    fun testNamespaceIndividualAliasAndGroupedImportsUsePresentationTokens() {
+        val tokens = lex(
+            "namespace Acme\\Editor;\n" +
+                "use Acme\\Model\\User;\n" +
+                "use Acme\\Http\\Client as HttpClient;\n" +
+                "use Doria\\Std\\Math\\{\n" +
+                "Vector2,\n" +
+                "Vector3 as Position3,\n" +
+                "};\n" +
+                "include \"generated/routes.doria\";",
+        )
+
+        assertEquals(DoriaTokenTypes.KEYWORD, tokens.first { it.text == "namespace" }.type)
+        for (segment in listOf("Acme", "Editor")) {
+            assertEquals(
+                DoriaTokenTypes.NAMESPACE_PATH,
+                tokens.first { it.text == segment }.type,
+            )
+        }
+        assertEquals(3, tokens.count { it.type == DoriaTokenTypes.IMPORT_USE_KEYWORD })
+        for (alias in listOf("HttpClient", "Position3")) {
+            assertEquals(DoriaTokenTypes.IMPORT_ALIAS, tokens.first { it.text == alias }.type)
+        }
+        for (entry in listOf("Vector2", "Vector3")) {
+            assertEquals(DoriaTokenTypes.IMPORT_PATH, tokens.first { it.text == entry }.type)
+        }
+        assertEquals(DoriaTokenTypes.KEYWORD, tokens.first { it.text == "include" }.type)
+        assertEquals(
+            DoriaTokenTypes.STRING,
+            tokens.first { it.text == "\"generated/routes.doria\"" }.type,
+        )
+    }
+
+    fun testSingleSegmentNamespaceUsesNamespacePresentationTokens() {
+        val tokens = lex("namespace First;")
+
+        assertEquals(DoriaTokenTypes.KEYWORD, tokens.first { it.text == "namespace" }.type)
+        assertEquals(DoriaTokenTypes.NAMESPACE_PATH, tokens.first { it.text == "First" }.type)
+    }
+
+    fun testRejectedNamespaceDirectiveShapesAreNotPresentedAsImports() {
+        for (source in listOf(
+            "use \\Acme\\Http\\Client;",
+            "use Acme\\*;",
+            "use Acme\\{};",
+            "use function Acme\\makeValue;",
+            "use const Acme\\LIMIT;",
+            "function nested(): void {\n    use Acme\\Model\\User;\n}",
+        )) {
+            assertFalse(source, lex(source).any { it.type == DoriaTokenTypes.IMPORT_USE_KEYWORD })
+        }
+    }
+
     private fun lex(source: String): List<Token> {
         val lexer = DoriaLexer()
         lexer.start(source)
