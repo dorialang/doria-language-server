@@ -3,7 +3,7 @@
 
 declare(strict_types=1);
 
-const COMPILER_REVISION = 'da30aadc5c42a114aee3542edf1842eccf6791b3';
+const COMPILER_REVISION = '8397e0e390003e7c91534a0a2fc802340df57225';
 
 $root = dirname(__DIR__);
 
