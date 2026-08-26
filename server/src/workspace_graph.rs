@@ -8,7 +8,7 @@ use doriac::build_plan::{
 use doriac::compilation_graph::{
     compilation_context, GraphCompleteness, GraphLoadOptions, ProjectStructureAuthority,
 };
-use doriac::diagnostics::{Diagnostic, DiagnosticSource};
+use doriac::diagnostics::{Diagnostic, DiagnosticSource, LabelRole};
 use doriac::incremental::{CompilationSession, IncrementalFacts};
 use doriac::names::{GlobalSymbolFacts, SourceIdentity};
 use doriac::source::SourceId;
@@ -129,7 +129,7 @@ pub(crate) fn analyze_open_graph(
             .diagnostics
             .iter()
             .filter(|diagnostic| {
-                diagnostic_mentions_source(diagnostic, source.id, &source.display_path)
+                diagnostic_belongs_to_source(diagnostic, source.id, &source.display_path)
             })
             .cloned()
             .collect();
@@ -209,14 +209,17 @@ fn source_symbol_facts(facts: &GlobalSymbolFacts, source: &SourceIdentity) -> Gl
     }
 }
 
-fn diagnostic_mentions_source(
+fn diagnostic_belongs_to_source(
     diagnostic: &Diagnostic,
     source_id: SourceId,
     display_path: &str,
 ) -> bool {
-    diagnostic.span.source == source_id
-        || diagnostic.labels.iter().any(|label| {
-            label.span.source == source_id
-                || matches!(&label.source, DiagnosticSource::Path(path) if path == display_path)
-        })
+    let primary = diagnostic
+        .labels
+        .iter()
+        .find(|label| label.role == LabelRole::Primary);
+    let span = primary.map_or(diagnostic.span, |label| label.span);
+    let source = primary.map(|label| &label.source);
+    span.source == source_id
+        || matches!(source, Some(DiagnosticSource::Path(path)) if path == display_path)
 }

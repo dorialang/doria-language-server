@@ -531,14 +531,12 @@ impl Server {
             .labels
             .iter()
             .enumerate()
-            .filter(|(_, label)| {
-                self.diagnostic_location_uri(uri, &label.source, label.span)
-                    .as_deref()
-                    == Some(uri)
-            })
-            .min_by_key(|(_, label)| label.role != LabelRole::Primary)
+            .find(|(_, label)| label.role == LabelRole::Primary)
             .or_else(|| diagnostic.labels.iter().enumerate().next());
         let primary_span = selected.map_or(diagnostic.span, |(_, label)| label.span);
+        let primary_uri = selected
+            .and_then(|(_, label)| self.diagnostic_location_uri(uri, &label.source, label.span))
+            .unwrap_or_else(|| uri.to_string());
         let mut message = diagnostic.title.clone();
         if let Some((_, label)) = selected.filter(|(_, label)| !label.message.is_empty()) {
             message.push('\n');
@@ -554,7 +552,7 @@ impl Server {
         }
         let text = self
             .documents
-            .get(uri)
+            .get(&primary_uri)
             .map_or("", |document| document.text.as_str());
         let mut value = json!({
             "range": span_to_range(text, primary_span),
@@ -4842,7 +4840,7 @@ function inspect(): void {
     }
 
     #[test]
-    fn stage31_slice2_duplicate_diagnostics_publish_both_sources_and_decline_rename() {
+    fn stage31_slice2_duplicate_diagnostics_publish_once_with_related_source() {
         let first_uri = "file:///workspace/first.doria";
         let second_uri = "file:///workspace/second.doria";
         let first = "namespace Acme; /* 😀 */ class User {}";
@@ -4851,26 +4849,40 @@ function inspect(): void {
         open_stage31_document(&mut server, first_uri, first);
         open_stage31_document(&mut server, second_uri, second);
 
-        for uri in [first_uri, second_uri] {
-            let duplicate = server.documents[uri]
-                .analysis
-                .diagnostics()
+        let published = [first_uri, second_uri]
+            .into_iter()
+            .filter_map(|uri| {
+                server.documents[uri]
+                    .analysis
+                    .diagnostics()
+                    .iter()
+                    .find(|diagnostic| diagnostic.code == "E0684")
+                    .map(|diagnostic| (uri, diagnostic))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            published.len(),
+            1,
+            "a compiler diagnostic belongs only to its primary source"
+        );
+        let (primary_uri, duplicate) = published[0];
+        let related_uri = if primary_uri == first_uri {
+            second_uri
+        } else {
+            first_uri
+        };
+        let lsp = server.graph_diagnostic_to_lsp(primary_uri, duplicate);
+        assert_eq!(lsp["code"], "E0684");
+        assert!(lsp["relatedInformation"]
+            .as_array()
+            .is_some_and(|related| related
                 .iter()
-                .find(|diagnostic| diagnostic.code == "E0684")
-                .expect("compiler duplicate-FQN diagnostic in each source");
-            let lsp = server.graph_diagnostic_to_lsp(uri, duplicate);
-            assert_eq!(lsp["code"], "E0684");
-            assert!(lsp["relatedInformation"]
-                .as_array()
-                .is_some_and(|related| related.iter().any(|item| {
-                    item["location"]["uri"]
-                        == if uri == first_uri {
-                            second_uri
-                        } else {
-                            first_uri
-                        }
-                })));
-        }
+                .any(|item| { item["location"]["uri"] == related_uri })));
+        assert!(server.documents[related_uri]
+            .analysis
+            .diagnostics()
+            .iter()
+            .all(|diagnostic| diagnostic.code != "E0684"));
 
         let offset = first.rfind("User").unwrap();
         assert_eq!(

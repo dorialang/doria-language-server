@@ -3,7 +3,7 @@
 
 declare(strict_types=1);
 
-const COMPILER_REVISION = '8cfa433aa92dfdd1e3c6f1f7267f936ab5db04ee';
+const COMPILER_REVISION = '1c0989c861a7838098f8d04f04b300a57392b37f';
 
 $root = dirname(__DIR__);
 
@@ -157,7 +157,7 @@ foreach ([
     'stage31_open_document_index_uses_canonical_compiler_identity',
     'stage31_cross_document_ranges_are_utf16_safe',
     'stage31_slice2_graph_drives_cross_file_definition_and_global_kinds',
-    'stage31_slice2_duplicate_diagnostics_publish_both_sources_and_decline_rename',
+    'stage31_slice2_duplicate_diagnostics_publish_once_with_related_source',
     'stage31_slice2_session_invalidates_changes_and_removes_closed_sources',
     'stage31_slice2_open_graph_tracks_includes_without_scanning_or_baton',
     'stage31_slice2_cross_file_checked_effects_and_closure_types_are_semantic',
