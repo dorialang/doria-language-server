@@ -8,7 +8,7 @@ declare(strict_types=1);
  */
 
 $root = dirname(__DIR__);
-$requiredCompilerRevision = '3fa950207beae27a1d255d3662defa9acd728405';
+$requiredCompilerRevision = 'da30aadc5c42a114aee3542edf1842eccf6791b3';
 
 $cargoManifest = $root . '/Cargo.toml';
 $cargoLock = $root . '/Cargo.lock';
@@ -834,6 +834,7 @@ function check_vscode_grammar(): void
     $importBegin = (string) ($importPatterns[0]['begin'] ?? '');
     $traitBegin = (string) ($traitPatterns[0]['begin'] ?? '');
     require_check(regex_matches($importBegin, 'use App\\Models\\User;'), 'VS Code import pattern must match namespace imports');
+    require_check(regex_matches($importBegin, 'use Doria\\Std\\Math\\{'), 'VS Code import pattern must match grouped namespace imports');
     require_check(!regex_matches($importBegin, '    uses HasSlug;'), 'VS Code import pattern must not match class-body trait composition');
     require_check(regex_matches($traitBegin, '    uses HasSlug;'), 'VS Code trait-composition pattern must match class-body uses');
     require_check(!regex_matches($traitBegin, 'use App\\Models\\User;'), 'VS Code trait-composition pattern must not match namespace imports');
@@ -842,6 +843,8 @@ function check_vscode_grammar(): void
     foreach ([
         'keyword.control.import.doria',
         'keyword.operator.alias.doria',
+        'punctuation.section.import.group.begin.doria',
+        'punctuation.section.import.group.end.doria',
         'keyword.other.trait-uses.doria',
         'invalid.illegal.keyword.trait-use-old-spelling.doria',
         'entity.name.type.trait.doria',
@@ -1502,7 +1505,12 @@ function check_fixture(): void
         'if ($metadata is string)',
         '$maybeUser?->name ?? "anonymous"',
         '\n\t\r\s',
-        'use App\Repositories\UserRepository;',
+        'namespace Acme\Editor;',
+        'use Acme\Model\User;',
+        'use Acme\Http\Client as HttpClient;',
+        'use Doria\Std\Math\{',
+        'Vector3 as Position3,',
+        'include "generated/routes.doria";',
         'get_time()',
         'String::startsWith($name, "Dor")',
         'Int::wrappingAdd(1, 2)',
@@ -1639,7 +1647,7 @@ function check_stage30f_callable_alignment(): void
             '/doriac\s*=\s*\{[^}]*\brev\s*=\s*"' . preg_quote($requiredCompilerRevision, '/') . '"/',
             $cargoManifestText,
         ) === 1,
-        'root doriac dependency must pin the integrated Stage 30 compiler commit',
+        'root doriac dependency must pin the integrated Stage 31 Slice 1 compiler commit',
     );
     preg_match_all(
         '/source = "git\+https:\/\/github\.com\/dorialang\/doria\?rev=([0-9a-f]{40})#([0-9a-f]{40})"/',
@@ -1654,7 +1662,7 @@ function check_stage30f_callable_alignment(): void
     foreach ($doriaSources as $source) {
         require_check(
             $source[1] === $requiredCompilerRevision && $source[2] === $requiredCompilerRevision,
-            'every Doria git package must resolve to the integrated Stage 30 compiler commit',
+            'every Doria git package must resolve to the integrated Stage 31 Slice 1 compiler commit',
         );
     }
     $fixtureText = read_text($fixture);
@@ -1888,12 +1896,14 @@ function check_stage30f_callable_alignment(): void
             str_contains($readmeText, 'historical, reserved diagnostic') &&
             str_contains($readmeText, 'does not suppress') &&
             str_contains($readmeText, 'supported compatibility surface') &&
-            str_contains($readmeText, 'Stage 31 is next') &&
+            str_contains($readmeText, 'Stage 31 Slice 1 is complete') &&
+            str_contains($readmeText, 'Slice 2 is next') &&
+            str_contains($readmeText, 'Stage 31 remains in progress') &&
             str_contains($readmeText, '`map`, `filter`, and `reduce` only for resolved `List<T>` receivers') &&
             !str_contains($readmeText, 'Stage 30 remains incomplete') &&
             !str_contains($readmeText, 'Stage 30h is next') &&
             !str_contains($readmeText, 'lowering remains the Stage 30f boundary'),
-        'README must state Stage 30 completion, historical E0641 handling, and Stage 31 next',
+        'README must state Stage 30 completion, historical E0641 handling, and Stage 31 Slice 1 status',
     );
 }
 

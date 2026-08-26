@@ -44,6 +44,16 @@ diagnostics, symbols, and resolved source occurrences. Diagnostics and semantic
 features consume that shared snapshot so an individual hover request does not
 re-parse or re-check the document.
 
+Stage 31 Slice 1 adds a bounded open-document global index keyed by the
+compiler's canonical global symbol identity. Workspace roots provide stable,
+explicitly synthetic package identities; the longest matching root wins, and
+documents outside all roots receive standalone synthetic identities. Namespace
+text never determines package identity. Open, change, save, close, and workspace
+folder changes rebuild the affected session index deterministically. The index
+does not scan unopened files, parse Baton manifests, or claim cross-file semantic
+checking, so compiler-owned external-symbol and include boundaries remain
+published until Stage 31 Slice 2 supplies a build graph.
+
 ### Editor clients
 
 Clients start and supervise `doria-lsp`, translate native editor APIs to LSP
@@ -67,7 +77,7 @@ The TextMate grammar and IntelliJ lexer are deliberately local and fast. They cl
 
 ## Shared fixtures
 
-`editors/fixtures/latest-tokens.doria` exercises accepted and planned presentation vocabulary. `editors/fixtures/rejected-syntax.doria` ensures rejected PHP-shaped or preprocessor syntax does not accidentally look accepted.
+`editors/fixtures/latest-tokens.doria` exercises accepted and planned presentation vocabulary, including namespace, individual/aliased/grouped imports, and include syntax. `editors/fixtures/rejected-syntax.doria` ensures rejected PHP-shaped, preprocessor, wildcard-import, malformed-group, computed-include, and nested-directive syntax does not accidentally look accepted.
 
 Both editor implementations must be checked against the same fixtures and token inventory.
 

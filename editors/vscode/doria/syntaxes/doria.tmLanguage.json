@@ -658,6 +658,18 @@
               "match": "\\\\"
             },
             {
+              "name": "punctuation.section.import.group.begin.doria",
+              "match": "\\{"
+            },
+            {
+              "name": "punctuation.section.import.group.end.doria",
+              "match": "\\}"
+            },
+            {
+              "name": "punctuation.separator.comma.doria",
+              "match": ","
+            },
+            {
               "name": "entity.name.namespace.doria",
               "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
             }

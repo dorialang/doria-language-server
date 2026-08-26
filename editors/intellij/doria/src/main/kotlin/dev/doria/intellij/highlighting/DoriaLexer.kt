@@ -463,6 +463,8 @@ class DoriaLexer : LexerBase() {
     private fun contextualIdentifierTokenType(text: String): IElementType = when {
         isTraitUsesLine() && text.first().isUpperCase() -> DoriaTokenTypes.TRAIT_NAME
 
+        isNamespaceDeclarationLine() && text != "namespace" -> DoriaTokenTypes.NAMESPACE_PATH
+
         isImportAliasName() -> DoriaTokenTypes.IMPORT_ALIAS
 
         isImportUseLine() && text !in KEYWORDS -> DoriaTokenTypes.IMPORT_PATH
@@ -538,6 +540,8 @@ class DoriaLexer : LexerBase() {
             buffer[tokenStart] == '[' || buffer[tokenStart] == ']' -> DoriaTokenTypes.BRACKET
             buffer[tokenStart] == '(' || buffer[tokenStart] == ')' -> DoriaTokenTypes.PAREN
             buffer[tokenStart] == ';' || buffer[tokenStart] == ',' || buffer[tokenStart] == ':' -> DoriaTokenTypes.PUNCTUATION
+            buffer[tokenStart] == '\\' && (isNamespaceDeclarationLine() || isImportUseLine()) ->
+                DoriaTokenTypes.PUNCTUATION
             else -> DoriaTokenTypes.OPERATOR
         }
     }
@@ -582,7 +586,57 @@ class DoriaLexer : LexerBase() {
         LEGACY_CLOSURE_USE_LINE.matches(currentLine())
 
     private fun isImportUseLine(): Boolean =
-        IMPORT_USE_LINE.matches(currentLine())
+        currentImportStatement()?.let(::isAcceptedImportStatement) == true
+
+    private fun currentImportStatement(): String? {
+        val currentLineStart = lineStart(tokenStart)
+        val useStart = if (
+            currentLineStart + 4 <= endOffset &&
+            buffer.subSequence(currentLineStart, currentLineStart + 4).toString() == "use "
+        ) {
+            currentLineStart
+        } else {
+            val prefix = buffer.subSequence(startOffset, tokenStart).toString()
+            val lineStart = prefix.lastIndexOf("\nuse ").let { index ->
+                when {
+                    index >= 0 -> index + 1
+                    prefix.startsWith("use ") -> 0
+                    else -> return null
+                }
+            }
+            startOffset + lineStart
+        }
+        var semicolon = useStart
+        while (semicolon < endOffset && buffer[semicolon] != ';') {
+            semicolon++
+        }
+        if (semicolon >= endOffset || tokenStart > semicolon) {
+            return null
+        }
+        return buffer.subSequence(useStart, semicolon + 1).toString()
+    }
+
+    private fun isAcceptedImportStatement(statement: String): Boolean {
+        val body = statement.removePrefix("use ").removeSuffix(";").trim()
+        val group = body.indexOf("\\{")
+        if (group < 0) {
+            return IMPORT_TARGET.matches(body)
+        }
+        if (!QUALIFIED_NAME.matches(body.substring(0, group))) {
+            return false
+        }
+        val entries = body.substring(group + 2).trim()
+        if (!entries.endsWith('}')) {
+            return false
+        }
+        val entryList = entries.dropLast(1).trim().removeSuffix(",").trim()
+        return entryList.isNotEmpty() && entryList.split(',').all { entry ->
+            IMPORT_GROUP_ENTRY.matches(entry.trim())
+        }
+    }
+
+    private fun isNamespaceDeclarationLine(): Boolean =
+        NAMESPACE_DECLARATION_LINE.matches(currentLine())
 
     private fun isImportAliasName(): Boolean =
         isImportUseLine() && previousIdentifier() == "as"
@@ -1052,8 +1106,17 @@ class DoriaLexer : LexerBase() {
         private val LEGACY_CLOSURE_USE_LINE =
             Regex(".*\\)\\s+use\\s*\\(.*")
 
-        private val IMPORT_USE_LINE =
-            Regex("^use\\s+[A-Za-z_][A-Za-z0-9_]*(?:\\\\[A-Za-z_][A-Za-z0-9_]*)+(?:\\s+as\\s+[A-Za-z_][A-Za-z0-9_]*)?\\s*;?\\s*(?://.*)?$")
+        private val QUALIFIED_NAME =
+            Regex("[A-Za-z_][A-Za-z0-9_]*(?:\\\\[A-Za-z_][A-Za-z0-9_]*)+")
+
+        private val IMPORT_TARGET =
+            Regex("${QUALIFIED_NAME.pattern}(?:\\s+as\\s+[A-Za-z_][A-Za-z0-9_]*)?")
+
+        private val IMPORT_GROUP_ENTRY =
+            Regex("[A-Za-z_][A-Za-z0-9_]*(?:\\s+as\\s+[A-Za-z_][A-Za-z0-9_]*)?")
+
+        private val NAMESPACE_DECLARATION_LINE =
+            Regex("^namespace\\s+${QUALIFIED_NAME.pattern}\\s*;\\s*(?://.*)?$")
 
         private val PREPROCESSOR_DIRECTIVES = setOf(
             "include",

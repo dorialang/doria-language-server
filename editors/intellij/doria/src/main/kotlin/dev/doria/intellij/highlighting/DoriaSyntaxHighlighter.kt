@@ -18,6 +18,7 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
         DoriaTokenTypes.RESERVED_TYPE -> RESERVED_TYPE_KEYS
         DoriaTokenTypes.COLLECTION_TYPE -> COLLECTION_TYPE_KEYS
         DoriaTokenTypes.TYPE_NAME -> TYPE_NAME_KEYS
+        DoriaTokenTypes.NAMESPACE_PATH -> NAMESPACE_PATH_KEYS
         DoriaTokenTypes.IMPORT_USE_KEYWORD -> IMPORT_USE_KEYWORD_KEYS
         DoriaTokenTypes.IMPORT_PATH -> IMPORT_PATH_KEYS
         DoriaTokenTypes.IMPORT_ALIAS_KEYWORD -> IMPORT_ALIAS_KEYWORD_KEYS
@@ -85,6 +86,10 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
         )
         val TYPE_NAME: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
             "DORIA_TYPE_NAME",
+            DefaultLanguageHighlighterColors.CLASS_NAME,
+        )
+        val NAMESPACE_PATH: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
+            "DORIA_NAMESPACE_PATH",
             DefaultLanguageHighlighterColors.CLASS_NAME,
         )
         val IMPORT_USE_KEYWORD: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
@@ -240,6 +245,7 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
         private val RESERVED_TYPE_KEYS = arrayOf(RESERVED_TYPE)
         private val COLLECTION_TYPE_KEYS = arrayOf(COLLECTION_TYPE)
         private val TYPE_NAME_KEYS = arrayOf(TYPE_NAME)
+        private val NAMESPACE_PATH_KEYS = arrayOf(NAMESPACE_PATH)
         private val IMPORT_USE_KEYWORD_KEYS = arrayOf(IMPORT_USE_KEYWORD)
         private val IMPORT_PATH_KEYS = arrayOf(IMPORT_PATH)
         private val IMPORT_ALIAS_KEYWORD_KEYS = arrayOf(IMPORT_ALIAS_KEYWORD)

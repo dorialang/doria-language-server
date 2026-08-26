@@ -1,5 +1,23 @@
 // Negative editor fixture: these shapes must not be advertised as accepted Doria syntax.
 
+namespace Rejected {
+}
+
+use \Acme\Http\Client;
+use Acme\*;
+use Acme\{};
+use function Acme\makeValue;
+use const Acme\LIMIT;
+
+include $path;
+include "generated/{$name}.doria";
+
+function nestedDirectives(): void
+{
+    use Acme\Model\User;
+    include "generated/routes.doria";
+}
+
 class BadVisibility
 {
     public string $name;

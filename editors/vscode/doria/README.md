@@ -25,7 +25,8 @@ Valid closures are diagnostic-free in ordinary target-neutral editor analysis an
 execute through the compiler's debug and native targets and its supported PHP
 compatibility surface. Completion and concrete semantic hovers expose `map`,
 `filter`, and `reduce` on `List<T>` only; diagnostics remain compiler-owned.
-PHP remains secondary. Stage 30 is complete and Stage 31 is next. The grammar
+PHP remains secondary. Stage 30 and Stage 31 Slice 1 are complete; Stage 31
+Slice 2 is next and Stage 31 remains in progress. The grammar
 does not implement capture, callable, or execution semantics.
 
 ## Install the VS Code extension
@@ -132,4 +133,4 @@ php scripts/check_editor_highlighting.php
 
 Files under `editors/fixtures/` are shared syntax-highlighting smoke fixtures and are excluded from `doria-lsp` diagnostics.
 
-Doria uses distinct spellings for imports and trait composition: file/namespace-scope `use` imports names from namespaces, while class-body or trait-body `uses` composes traits. The TextMate grammar keeps these scopes separate as import use and trait-composition uses.
+Doria uses distinct spellings for imports and trait composition: file/namespace-scope `use` imports individual, aliased, or grouped names from namespaces, while class-body or trait-body `uses` composes traits. The TextMate grammar keeps these scopes separate as import use and trait-composition uses. It also presents namespace declarations and literal `include` directives; the compiler owns all resolution and diagnostics.

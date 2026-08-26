@@ -2199,11 +2199,14 @@ class Child extends Vendor\Base implements Vendor\Contracts\Printable {}
             .as_str()
             .is_some_and(|code| code.starts_with('P'))
     }));
-    for code in ["E0475", "E0476", "E0464"] {
-        assert!(diagnostics
+    assert_eq!(
+        diagnostics
             .iter()
-            .any(|diagnostic| diagnostic["code"] == code));
-    }
+            .filter(|diagnostic| diagnostic["code"] == "E0671")
+            .count(),
+        2,
+        "both unresolved qualified inheritance names must retain the Stage 31 Slice 2 boundary: {diagnostics:#?}",
+    );
 }
 
 #[test]

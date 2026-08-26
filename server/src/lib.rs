@@ -10,13 +10,16 @@ use doriac::diagnostics::{
     FixApplicability, FixEdit, LabelRole,
 };
 use doriac::lexer::{Token, TokenKind};
+use doriac::names::{CompilationContext, Edition, PackageIdentity, SourceIdentity};
 use doriac::source::Span;
 
 mod analysis;
 mod string_surface;
+mod workspace_index;
 
 use analysis::{AnalysisSnapshot, SemanticCompletion};
 use string_surface::{STRING_COMPANION_METHODS, STRING_PROPERTIES};
+use workspace_index::OpenDocumentIndex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LspPosition {
@@ -106,8 +109,18 @@ struct Document {
 }
 
 impl Document {
+    #[cfg(test)]
     fn new(uri: &str, text: String, version: Option<i64>) -> Self {
-        let analysis = AnalysisSnapshot::analyze(uri, &text);
+        Self::with_context(uri, text, version, CompilationContext::standalone(uri))
+    }
+
+    fn with_context(
+        uri: &str,
+        text: String,
+        version: Option<i64>,
+        context: CompilationContext,
+    ) -> Self {
+        let analysis = AnalysisSnapshot::analyze_with_context(uri, &text, context);
         Self {
             text,
             version,
@@ -116,9 +129,17 @@ impl Document {
     }
 }
 
+#[derive(Debug, Clone)]
+struct WorkspaceRoot {
+    uri: String,
+    package: PackageIdentity,
+}
+
 #[derive(Default)]
 struct Server {
     documents: HashMap<String, Document>,
+    workspace_roots: Vec<WorkspaceRoot>,
+    document_index: OpenDocumentIndex,
 }
 
 pub fn run_stdio() -> Result<(), String> {
@@ -277,6 +298,7 @@ impl Server {
         let id = message.get("id").cloned();
         match method {
             "initialize" => {
+                self.configure_workspace_roots(message.get("params"));
                 if let Some(id) = id {
                     send_response(writer, id, initialize_result())?;
                 }
@@ -292,6 +314,9 @@ impl Server {
             "textDocument/didChange" => self.did_change(message.get("params"), writer)?,
             "textDocument/didSave" => self.did_save(message.get("params"), writer)?,
             "textDocument/didClose" => self.did_close(message.get("params"), writer)?,
+            "workspace/didChangeWorkspaceFolders" => {
+                self.did_change_workspace_folders(message.get("params"), writer)?
+            }
             "textDocument/completion" => {
                 if let Some(id) = id {
                     send_response(writer, id, self.completion(message.get("params")))?;
@@ -356,10 +381,12 @@ impl Server {
         };
         let version = text_document.get("version").and_then(Value::as_i64);
 
+        let context = self.compilation_context(uri);
         self.documents.insert(
             uri.to_string(),
-            Document::new(uri, text.to_string(), version),
+            Document::with_context(uri, text.to_string(), version, context),
         );
+        self.rebuild_document_index();
         self.publish_diagnostics(uri, writer)
     }
 
@@ -389,10 +416,12 @@ impl Server {
             return Ok(());
         };
 
+        let context = self.compilation_context(uri);
         self.documents.insert(
             uri.to_string(),
-            Document::new(uri, text.to_string(), version),
+            Document::with_context(uri, text.to_string(), version, context),
         );
+        self.rebuild_document_index();
         self.publish_diagnostics(uri, writer)
     }
 
@@ -412,10 +441,12 @@ impl Server {
                 .documents
                 .get(uri)
                 .and_then(|document| document.version);
+            let context = self.compilation_context(uri);
             self.documents.insert(
                 uri.to_string(),
-                Document::new(uri, text.to_string(), version),
+                Document::with_context(uri, text.to_string(), version, context),
             );
+            self.rebuild_document_index();
         }
 
         self.publish_diagnostics(uri, writer)
@@ -434,6 +465,7 @@ impl Server {
         };
 
         self.documents.remove(uri);
+        self.rebuild_document_index();
         send_notification(
             writer,
             "textDocument/publishDiagnostics",
@@ -478,6 +510,24 @@ impl Server {
             .and_then(Value::as_u64)? as u32;
         let document = self.documents.get(uri)?;
         let offset = position_to_byte_offset(&document.text, line, character);
+        if let Some(hover) = self.document_index.hover(uri, offset) {
+            return Some(json!({
+                "contents": {
+                    "kind": "markdown",
+                    "value": hover.markdown,
+                },
+                "range": span_to_range(&document.text, hover.span),
+            }));
+        }
+        if let Some(hover) = document.analysis.namespace_hover_at_offset(offset) {
+            return Some(json!({
+                "contents": {
+                    "kind": "markdown",
+                    "value": hover.markdown,
+                },
+                "range": span_to_range(&document.text, hover.span),
+            }));
+        }
         hover_at_offset_with_analysis(&document.text, offset, &document.analysis)
     }
 
@@ -539,7 +589,24 @@ impl Server {
                 return semantic_completion_items(completions);
             }
         }
-        completion_items_with_analysis(&document.analysis, offset)
+        let mut completion = completion_items_with_analysis(&document.analysis, offset);
+        if let Some(items) = completion.get_mut("items").and_then(Value::as_array_mut) {
+            let mut labels = items
+                .iter()
+                .filter_map(|item| item.get("label").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect::<std::collections::HashSet<_>>();
+            for candidate in self.document_index.completions(&uri) {
+                if labels.insert(candidate.label.clone()) {
+                    items.push(json!({
+                        "label": candidate.label,
+                        "kind": candidate.kind,
+                        "detail": candidate.detail,
+                    }));
+                }
+            }
+        }
+        completion
     }
 
     fn references(&self, params: Option<&Value>) -> Value {
@@ -551,6 +618,21 @@ impl Server {
             .and_then(|context| context.get("includeDeclaration"))
             .and_then(Value::as_bool)
             .unwrap_or(true);
+        if let Some(target) = self.document_index.target_at(&uri, offset) {
+            return Value::Array(
+                self.document_index
+                    .references(&target, include_declaration)
+                    .into_iter()
+                    .filter_map(|location| {
+                        let target_document = self.documents.get(&location.uri)?;
+                        Some(json!({
+                            "uri": location.uri,
+                            "range": span_to_range(&target_document.text, location.span),
+                        }))
+                    })
+                    .collect(),
+            );
+        }
         Value::Array(
             document
                 .analysis
@@ -571,6 +653,27 @@ impl Server {
         else {
             return Value::Null;
         };
+        if let Some(target) = self.document_index.target_at(&uri, offset) {
+            let Some(edits) = self.document_index.rename(&target, new_name) else {
+                return Value::Null;
+            };
+            let mut changes = serde_json::Map::new();
+            for edit in edits {
+                let Some(target_document) = self.documents.get(&edit.uri) else {
+                    return Value::Null;
+                };
+                changes
+                    .entry(edit.uri)
+                    .or_insert_with(|| Value::Array(Vec::new()))
+                    .as_array_mut()
+                    .expect("workspace rename changes are arrays")
+                    .push(json!({
+                        "range": span_to_range(&target_document.text, edit.span),
+                        "newText": edit.replacement,
+                    }));
+            }
+            return json!({ "changes": changes });
+        }
         let Some(replacement) = document
             .analysis
             .rename_replacement_at_offset(offset, new_name)
@@ -668,6 +771,127 @@ impl Server {
 
         Value::Array(code_actions_for_document(uri, &document.text))
     }
+
+    fn configure_workspace_roots(&mut self, params: Option<&Value>) {
+        let mut uris = params
+            .and_then(|params| params.get("workspaceFolders"))
+            .and_then(Value::as_array)
+            .map(|folders| {
+                folders
+                    .iter()
+                    .filter_map(|folder| folder.get("uri").and_then(Value::as_str))
+                    .map(normalize_root_uri)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if uris.is_empty() {
+            if let Some(uri) = params
+                .and_then(|params| params.get("rootUri"))
+                .and_then(Value::as_str)
+            {
+                uris.push(normalize_root_uri(uri));
+            }
+        }
+        uris.sort();
+        uris.dedup();
+        self.workspace_roots = uris
+            .into_iter()
+            .map(|uri| WorkspaceRoot {
+                package: PackageIdentity::SyntheticTooling(format!("lsp-workspace:{uri}")),
+                uri,
+            })
+            .collect();
+        self.reanalyze_documents();
+    }
+
+    fn did_change_workspace_folders<W: Write>(
+        &mut self,
+        params: Option<&Value>,
+        writer: &mut W,
+    ) -> Result<(), String> {
+        let Some(event) = params.and_then(|params| params.get("event")) else {
+            return Ok(());
+        };
+        if let Some(removed) = event.get("removed").and_then(Value::as_array) {
+            let removed = removed
+                .iter()
+                .filter_map(|folder| folder.get("uri").and_then(Value::as_str))
+                .map(normalize_root_uri)
+                .collect::<std::collections::HashSet<_>>();
+            self.workspace_roots
+                .retain(|root| !removed.contains(&root.uri));
+        }
+        if let Some(added) = event.get("added").and_then(Value::as_array) {
+            for uri in added
+                .iter()
+                .filter_map(|folder| folder.get("uri").and_then(Value::as_str))
+                .map(normalize_root_uri)
+            {
+                if self.workspace_roots.iter().any(|root| root.uri == uri) {
+                    continue;
+                }
+                self.workspace_roots.push(WorkspaceRoot {
+                    package: PackageIdentity::SyntheticTooling(format!("lsp-workspace:{uri}")),
+                    uri,
+                });
+            }
+        }
+        self.workspace_roots
+            .sort_by(|left, right| left.uri.cmp(&right.uri));
+        self.reanalyze_documents();
+        for uri in self.documents.keys() {
+            self.publish_diagnostics(uri, writer)?;
+        }
+        Ok(())
+    }
+
+    fn compilation_context(&self, uri: &str) -> CompilationContext {
+        let package = self
+            .workspace_roots
+            .iter()
+            .filter(|root| uri_is_within(uri, &root.uri))
+            .max_by_key(|root| root.uri.len())
+            .map(|root| root.package.clone())
+            .unwrap_or_else(|| PackageIdentity::SyntheticTooling(format!("lsp-standalone:{uri}")));
+        CompilationContext {
+            edition: Edition::Doria2026,
+            package,
+            source: SourceIdentity(uri.to_string()),
+        }
+    }
+
+    fn reanalyze_documents(&mut self) {
+        let documents = std::mem::take(&mut self.documents);
+        self.documents = documents
+            .into_iter()
+            .map(|(uri, document)| {
+                let context = self.compilation_context(&uri);
+                let document =
+                    Document::with_context(&uri, document.text, document.version, context);
+                (uri, document)
+            })
+            .collect();
+        self.rebuild_document_index();
+    }
+
+    fn rebuild_document_index(&mut self) {
+        self.document_index = OpenDocumentIndex::rebuild(
+            self.documents
+                .iter()
+                .map(|(uri, document)| (uri.as_str(), &document.analysis)),
+        );
+    }
+}
+
+fn normalize_root_uri(uri: &str) -> String {
+    uri.trim_end_matches('/').to_string()
+}
+
+fn uri_is_within(uri: &str, root: &str) -> bool {
+    uri == root
+        || uri
+            .strip_prefix(root)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn initialize_result() -> Value {
@@ -691,12 +915,18 @@ fn initialize_result() -> Value {
             "renameProvider": true,
             "semanticTokensProvider": {
                 "legend": {
-                    "tokenTypes": ["variable", "type", "enumMember", "function", "keyword"],
+                    "tokenTypes": ["variable", "type", "enumMember", "function", "keyword", "namespace", "string"],
                     "tokenModifiers": []
                 },
                 "full": true
             },
-            "codeActionProvider": true
+            "codeActionProvider": true,
+            "workspace": {
+                "workspaceFolders": {
+                    "supported": true,
+                    "changeNotifications": true
+                }
+            }
         },
         "serverInfo": {
             "name": "doria-lsp",
@@ -3372,7 +3602,15 @@ function main(): void
         assert_eq!(provider["full"], true);
         assert_eq!(
             provider["legend"]["tokenTypes"],
-            json!(["variable", "type", "enumMember", "function", "keyword"])
+            json!([
+                "variable",
+                "type",
+                "enumMember",
+                "function",
+                "keyword",
+                "namespace",
+                "string"
+            ])
         );
     }
 
@@ -3668,5 +3906,469 @@ function relay(take Failure $failure): void throws Failure
             );
             assert_eq!(signature["activeParameter"], active_parameter);
         }
+    }
+
+    fn stage31_server(roots: &[&str]) -> Server {
+        let mut server = Server::default();
+        server.configure_workspace_roots(Some(&json!({
+            "workspaceFolders": roots
+                .iter()
+                .map(|uri| json!({ "uri": uri, "name": uri }))
+                .collect::<Vec<_>>(),
+        })));
+        server
+    }
+
+    fn open_stage31_document(server: &mut Server, uri: &str, source: &str) {
+        let context = server.compilation_context(uri);
+        server.documents.insert(
+            uri.to_string(),
+            Document::with_context(uri, source.to_string(), Some(1), context),
+        );
+        server.rebuild_document_index();
+    }
+
+    fn params_at(uri: &str, source: &str, offset: usize) -> Value {
+        let position = byte_offset_to_position(source, offset);
+        json!({
+            "textDocument": { "uri": uri },
+            "position": {
+                "line": position.line,
+                "character": position.character,
+            },
+        })
+    }
+
+    #[test]
+    fn stage31_open_document_index_uses_canonical_compiler_identity() {
+        let root = "file:///workspace";
+        let declaration_uri = "file:///workspace/model.doria";
+        let consumer_uri = "file:///workspace/app.doria";
+        let declaration = "namespace Acme\\Model; class User {}";
+        let consumer = r#"namespace Acme\App;
+use Acme\Model\User as ModelUser;
+function inspect(ModelUser $user): void {}
+function main(): void { let $user = new ModelUser(); inspect($user); }
+"#;
+        let mut server = stage31_server(&[root]);
+        open_stage31_document(&mut server, declaration_uri, declaration);
+        open_stage31_document(&mut server, consumer_uri, consumer);
+
+        let declaration_offset = declaration.find("User").unwrap();
+        let references = server.references(Some(&json!({
+            "textDocument": { "uri": declaration_uri },
+            "position": params_at(declaration_uri, declaration, declaration_offset)["position"].clone(),
+            "context": { "includeDeclaration": true },
+        })));
+        let locations = references.as_array().expect("cross-document references");
+        assert_eq!(locations.len(), 4, "{locations:#?}");
+        assert!(locations
+            .iter()
+            .any(|location| location["uri"] == consumer_uri));
+
+        let alias_use = consumer.rfind("ModelUser").unwrap();
+        let hover = server
+            .hover(Some(&params_at(consumer_uri, consumer, alias_use)))
+            .expect("import alias hover");
+        let markdown = hover["contents"]["value"].as_str().unwrap();
+        assert!(markdown.contains("Class `Acme\\Model\\User`"));
+        assert!(markdown.contains("Imported As `ModelUser`"));
+
+        let alias_declaration = consumer.find("ModelUser").unwrap();
+        let alias_rename = server.rename(Some(&json!({
+            "textDocument": { "uri": consumer_uri },
+            "position": params_at(consumer_uri, consumer, alias_declaration)["position"].clone(),
+            "newName": "Person",
+        })));
+        let alias_edits = alias_rename["changes"][consumer_uri]
+            .as_array()
+            .expect("alias-local rename");
+        assert_eq!(alias_edits.len(), 3);
+        assert!(alias_edits.iter().all(|edit| edit["newText"] == "Person"));
+        assert!(alias_rename["changes"].get(declaration_uri).is_none());
+
+        let canonical_rename = server.rename(Some(&json!({
+            "textDocument": { "uri": declaration_uri },
+            "position": params_at(declaration_uri, declaration, declaration_offset)["position"].clone(),
+            "newName": "Account",
+        })));
+        assert_eq!(
+            canonical_rename["changes"][declaration_uri]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        let import_edits = canonical_rename["changes"][consumer_uri]
+            .as_array()
+            .expect("canonical import-target edit");
+        assert_eq!(import_edits.len(), 1);
+        assert_eq!(import_edits[0]["newText"], "Acme\\Model\\Account");
+    }
+
+    #[test]
+    fn stage31_index_isolates_namespaces_workspace_roots_and_local_bindings() {
+        let mut server = stage31_server(&["file:///one", "file:///two"]);
+        let first_uri = "file:///one/first.doria";
+        let second_uri = "file:///one/second.doria";
+        let other_root_uri = "file:///two/first.doria";
+        let first = "namespace First; class User {}";
+        let second = "namespace Second; class User {}";
+        let other_root = "namespace First; class User {}";
+        open_stage31_document(&mut server, first_uri, first);
+        open_stage31_document(&mut server, second_uri, second);
+        open_stage31_document(&mut server, other_root_uri, other_root);
+
+        for (uri, source) in [
+            (first_uri, first),
+            (second_uri, second),
+            (other_root_uri, other_root),
+        ] {
+            let offset = source.find("User").unwrap();
+            let references = server.references(Some(&params_at(uri, source, offset)));
+            assert_eq!(references.as_array().map(Vec::len), Some(1));
+            assert_eq!(references[0]["uri"], uri);
+        }
+
+        let local_uri = "file:///one/local.doria";
+        let local = r#"namespace First;
+class Value {}
+function main(): void { let $Value = 1; echo $Value; let $item = new Value(); }
+"#;
+        open_stage31_document(&mut server, local_uri, local);
+        let local_offset = local.find("$Value").unwrap();
+        let local_references = server.references(Some(&params_at(local_uri, local, local_offset)));
+        assert_eq!(local_references.as_array().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn stage31_index_tracks_classes_functions_and_constants_by_canonical_identity() {
+        let declarations_uri = "file:///workspace/support.doria";
+        let consumer_uri = "file:///workspace/app.doria";
+        let declarations = r#"namespace Acme\Support;
+class Formatter {}
+function formatName(): void {}
+const int VERSION = 31;
+"#;
+        let consumer = r#"namespace Acme\App;
+function main(): void {
+    let $formatter = new Acme\Support\Formatter();
+    Acme\Support\formatName();
+    echo Acme\Support\VERSION;
+}
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, declarations_uri, declarations);
+        open_stage31_document(&mut server, consumer_uri, consumer);
+
+        for name in ["Formatter", "formatName", "VERSION"] {
+            let declaration = declarations.find(name).unwrap();
+            let references = server.references(Some(&params_at(
+                declarations_uri,
+                declarations,
+                declaration,
+            )));
+            let locations = references.as_array().expect("global references");
+            assert_eq!(locations.len(), 2, "{name}: {locations:#?}");
+            assert!(locations
+                .iter()
+                .any(|location| location["uri"] == consumer_uri));
+        }
+    }
+
+    #[test]
+    fn stage31_workspace_context_uses_the_longest_root_and_never_the_namespace() {
+        let mut server = stage31_server(&["file:///workspace", "file:///workspace/vendor"]);
+        let nested_uri = "file:///workspace/vendor/model.doria";
+        let outside_uri = "file:///outside/model.doria";
+        open_stage31_document(&mut server, nested_uri, "namespace Same; class Model {}");
+        open_stage31_document(&mut server, outside_uri, "namespace Same; class Model {}");
+
+        assert_eq!(
+            server.documents[nested_uri]
+                .analysis
+                .compilation_context()
+                .package,
+            PackageIdentity::SyntheticTooling("lsp-workspace:file:///workspace/vendor".to_string())
+        );
+        assert_eq!(
+            server.documents[outside_uri]
+                .analysis
+                .compilation_context()
+                .package,
+            PackageIdentity::SyntheticTooling(format!("lsp-standalone:{outside_uri}"))
+        );
+
+        let nested_name = server.documents[nested_uri]
+            .analysis
+            .global_symbols()
+            .declarations[0]
+            .id
+            .qualified_name
+            .clone();
+        let outside_name = server.documents[outside_uri]
+            .analysis
+            .global_symbols()
+            .declarations[0]
+            .id
+            .qualified_name
+            .clone();
+        assert_eq!(nested_name, r"Same\Model");
+        assert_eq!(outside_name, nested_name);
+        assert_ne!(
+            server.documents[nested_uri]
+                .analysis
+                .compilation_context()
+                .package,
+            server.documents[outside_uri]
+                .analysis
+                .compilation_context()
+                .package
+        );
+    }
+
+    #[test]
+    fn stage31_rename_declines_ambiguous_and_implicit_alias_edits() {
+        let root = "file:///workspace";
+        let mut server = stage31_server(&[root]);
+        let one_uri = "file:///workspace/one.doria";
+        let two_uri = "file:///workspace/two.doria";
+        let import_uri = "file:///workspace/import.doria";
+        let declaration = "namespace Acme; class User {}";
+        let implicit = "namespace App; use Acme\\User; function inspect(User $user): void {}";
+        open_stage31_document(&mut server, one_uri, declaration);
+        open_stage31_document(&mut server, import_uri, implicit);
+
+        let declaration_offset = declaration.find("User").unwrap();
+        assert_eq!(
+            server.rename(Some(&json!({
+                "textDocument": { "uri": one_uri },
+                "position": params_at(one_uri, declaration, declaration_offset)["position"].clone(),
+                "newName": "Person",
+            }))),
+            Value::Null,
+            "implicit alias preservation requires a nontrivial insertion"
+        );
+        let implicit_use = implicit.rfind("User").unwrap();
+        assert_eq!(
+            server.rename(Some(&json!({
+                "textDocument": { "uri": import_uri },
+                "position": params_at(import_uri, implicit, implicit_use)["position"].clone(),
+                "newName": "Person",
+            }))),
+            Value::Null,
+            "rename from an implicit alias use must not produce a partial edit"
+        );
+
+        open_stage31_document(&mut server, two_uri, declaration);
+        assert_eq!(
+            server.rename(Some(&json!({
+                "textDocument": { "uri": one_uri },
+                "position": params_at(one_uri, declaration, declaration_offset)["position"].clone(),
+                "newName": "Person",
+            }))),
+            Value::Null,
+            "duplicate canonical declarations must make rename unavailable"
+        );
+    }
+
+    #[test]
+    fn stage31_reindexing_removes_changed_and_closed_occurrences() {
+        let uri = "file:///workspace/value.doria";
+        let source = "namespace Acme; class Value {} function use(Value $value): void {}";
+        let changed = "namespace Acme; class Value {} function use(int $value): void {}";
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+        let declaration = source.find("Value").unwrap();
+        assert_eq!(
+            server
+                .references(Some(&params_at(uri, source, declaration)))
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+
+        let mut output = Vec::new();
+        server
+            .did_change(
+                Some(&json!({
+                    "textDocument": { "uri": uri, "version": 2 },
+                    "contentChanges": [{ "text": changed }],
+                })),
+                &mut output,
+            )
+            .unwrap();
+        let changed_declaration = changed.find("Value").unwrap();
+        assert_eq!(
+            server
+                .references(Some(&params_at(uri, changed, changed_declaration)))
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+
+        let saved = "namespace Acme; class Value {} function use(Value $value): void {}";
+        server
+            .did_save(
+                Some(&json!({
+                    "textDocument": { "uri": uri },
+                    "text": saved,
+                })),
+                &mut output,
+            )
+            .unwrap();
+        let saved_declaration = saved.find("Value").unwrap();
+        assert_eq!(
+            server
+                .references(Some(&params_at(uri, saved, saved_declaration)))
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+
+        server
+            .did_close(
+                Some(&json!({ "textDocument": { "uri": uri } })),
+                &mut output,
+            )
+            .unwrap();
+        assert!(!server.documents.contains_key(uri));
+        assert!(server.document_index.completions(uri).is_empty());
+    }
+
+    #[test]
+    fn stage31_hover_completion_tokens_and_boundaries_remain_compiler_owned() {
+        let uri = "file:///workspace/app.doria";
+        let source = r#"namespace Acme\App;
+use Other\Model\User as ExternalUser;
+include "generated/routes.doria";
+function local(): void { List<int> $values = []; }
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+
+        let namespace = source.find("Acme").unwrap();
+        let namespace_hover = server
+            .hover(Some(&params_at(uri, source, namespace)))
+            .expect("namespace hover");
+        assert!(namespace_hover["contents"]["value"]
+            .as_str()
+            .is_some_and(|value| value.contains("Namespace `Acme\\App`")));
+
+        let prelude = source.find("List").unwrap();
+        let prelude_hover = server
+            .hover(Some(&params_at(uri, source, prelude)))
+            .expect("prelude hover");
+        assert!(prelude_hover["contents"]["value"]
+            .as_str()
+            .is_some_and(|value| value.contains("Compiler-Known Type `List`")));
+
+        let completion = server.completion(Some(&params_at(uri, source, source.len())));
+        let labels = completion["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["label"].as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert!(labels.contains("ExternalUser"));
+        assert!(labels.contains("local"));
+        assert!(labels.contains("List"));
+
+        let diagnostics = &server.documents[uri].analysis.diagnostics();
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0671"));
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0672"));
+        assert!(diagnostics
+            .iter()
+            .all(|diagnostic| !diagnostic.code.starts_with('P')));
+
+        let semantic = server.semantic_tokens(Some(&json!({
+            "textDocument": { "uri": uri },
+        })));
+        let types = semantic["data"]
+            .as_array()
+            .unwrap()
+            .as_chunks::<5>()
+            .0
+            .iter()
+            .filter_map(|token| token[3].as_u64())
+            .collect::<std::collections::HashSet<_>>();
+        assert!(types.contains(&5), "namespace semantic token missing");
+        assert!(types.contains(&6), "include-path string token missing");
+    }
+
+    #[test]
+    fn stage31_cross_document_ranges_are_utf16_safe() {
+        let declaration_uri = "file:///workspace/model.doria";
+        let consumer_uri = "file:///workspace/use.doria";
+        let declaration = "namespace Acme; class User {}";
+        let consumer = "namespace App; use Acme\\User as Person; function use(): void { echo \"😀\"; let $user = new Person(); }";
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, declaration_uri, declaration);
+        open_stage31_document(&mut server, consumer_uri, consumer);
+        let expected =
+            byte_offset_to_position(consumer, consumer.rfind("Person").unwrap()).character;
+        assert_ne!(
+            expected as usize,
+            consumer.rfind("Person").unwrap(),
+            "the emoji must make the UTF-16 column differ from the byte offset"
+        );
+
+        let alias_position = params_at(consumer_uri, consumer, consumer.rfind("Person").unwrap());
+        let alias_references = server.references(Some(&alias_position));
+        let runtime_use = alias_references
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|location| {
+                location["range"]["start"]["character"].as_u64() == Some(expected as u64)
+            })
+            .expect("UTF-16 alias use range");
+        assert_eq!(runtime_use["range"]["start"]["character"], expected);
+
+        let rename = server.rename(Some(&json!({
+            "textDocument": { "uri": consumer_uri },
+            "position": alias_position["position"].clone(),
+            "newName": "Account",
+        })));
+        let runtime_edit = rename["changes"][consumer_uri]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|edit| edit["range"]["start"]["character"].as_u64() == Some(expected as u64))
+            .expect("UTF-16 alias rename edit");
+        assert_eq!(runtime_edit["newText"], "Account");
+    }
+
+    #[test]
+    fn stage31_open_document_index_scales_structurally_and_deterministically() {
+        let mut server = stage31_server(&["file:///workspace"]);
+        for index in 0..128 {
+            let uri = format!("file:///workspace/model-{index}.doria");
+            let source = format!("namespace Package{index}; class SharedName {{}}");
+            open_stage31_document(&mut server, &uri, &source);
+        }
+
+        let target_uri = "file:///workspace/model-73.doria";
+        let source = &server.documents[target_uri].text;
+        let offset = source.find("SharedName").unwrap();
+        let references = server.references(Some(&params_at(target_uri, source, offset)));
+        assert_eq!(references.as_array().map(Vec::len), Some(1));
+
+        let first = server.document_index.completions(target_uri);
+        let second = server.document_index.completions(target_uri);
+        assert_eq!(first, second);
+        assert_eq!(
+            first
+                .iter()
+                .filter(|completion| completion.label.ends_with("\\SharedName"))
+                .count(),
+            128
+        );
+        assert!(!first.iter().any(|completion| {
+            completion.label == "SharedName" && completion.detail.contains("Package72\\SharedName")
+        }));
     }
 }
