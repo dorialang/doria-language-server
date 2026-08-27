@@ -9,6 +9,7 @@ It provides:
 - `.doria` file recognition.
 - Basic syntax highlighting for Doria keywords, variables, types, attributes, strings, string interpolation, comments, numbers, operators, punctuation, accepted OOP declaration vocabulary, namespace/import/include/directive vocabulary, and rejected strict-comparison/preprocessor spellings.
 - Doria code-style settings and formatting for tabs, indentation, continuation indentation, spacing, braces, and preserved blank lines.
+- Separate **New > Doria File** and **New > Doria Class** workflows. The class dialog can create a class, interface, trait, or enum and exposes class inheritance controls only for class templates. Namespace suggestions first use the nearest `Baton.toml` `[autoload.namespaces]` and `[autoload-dev.namespaces]` roots, then fall back to nearby Doria declarations and their directory layout. IntelliJ move-file refactoring uses the same model to update a moved Doria file's namespace declaration when the destination is unambiguous.
 - A Doria settings page for configuring the language server path.
 - `doria-lsp` integration through the IntelliJ Platform LSP API.
 

@@ -1,0 +1,4 @@
+${NAMESPACE_DECLARATION}enum ${TYPE_NAME}
+{
+    case Value;
+}

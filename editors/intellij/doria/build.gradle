@@ -8,6 +8,7 @@ group = 'dev.doria'
 version = '2026.03.1-canary'
 
 dependencies {
+    implementation 'org.tomlj:tomlj:1.1.1'
     testImplementation 'junit:junit:4.13.2'
 
     intellijPlatform {

@@ -1,0 +1,3 @@
+${NAMESPACE_DECLARATION}interface ${TYPE_NAME}
+{
+}
