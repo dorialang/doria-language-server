@@ -101,6 +101,12 @@ are next, while Stage 33 project integration remains scheduled. Top-level
 presentation with `internal` as a modifier. The presentation lexer does not
 implement package visibility or other semantics.
 
+Compiler-backed hover separates required source `throws` effects from the exact
+ambient canonical I/O effects transported at runtime. Ambient I/O does not require
+source declarations, including in source `finally` blocks; escaping finalizer
+errors follow compiler-owned precedence rules. `E0632` is historical and reserved.
+The presentation lexer performs no effect classification or finalizer analysis.
+
 VS Code and IntelliJ / JetBrains highlighting should stay aligned. The shared smoke fixture is:
 
 ```text

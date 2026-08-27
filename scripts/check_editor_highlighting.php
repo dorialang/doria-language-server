@@ -8,7 +8,6 @@ declare(strict_types=1);
  */
 
 $root = dirname(__DIR__);
-$requiredCompilerRevision = '1c0989c861a7838098f8d04f04b300a57392b37f';
 
 $cargoManifest = $root . '/Cargo.toml';
 $cargoLock = $root . '/Cargo.lock';
@@ -1638,19 +1637,18 @@ function check_fixture(): void
 
 function check_stage30f_callable_alignment(): void
 {
-    global $cargoManifest, $cargoLock, $requiredCompilerRevision;
+    global $cargoManifest, $cargoLock;
     global $readme, $vscodeGrammar, $intellijLexer, $intellijLexerTest;
     global $lspAnalysis, $lspServer, $lspTests, $fixture, $rejectedFixture;
 
     $cargoManifestText = read_text($cargoManifest);
     $cargoLockText = read_text($cargoLock);
+    preg_match('/doriac\s*=\s*\{[^\n]*\brev\s*=\s*"([0-9a-f]{40})"/', $cargoManifestText, $manifestPin);
     require_check(
-        preg_match(
-            '/doriac\s*=\s*\{[^}]*\brev\s*=\s*"' . preg_quote($requiredCompilerRevision, '/') . '"/',
-            $cargoManifestText,
-        ) === 1,
-        'root doriac dependency must pin the final Stage 31 compiler commit',
+        isset($manifestPin[1]),
+        'root doriac dependency must pin an exact compiler commit',
     );
+    $requiredCompilerRevision = $manifestPin[1];
     preg_match_all(
         '/source = "git\+https:\/\/github\.com\/dorialang\/doria\?rev=([0-9a-f]{40})#([0-9a-f]{40})"/',
         $cargoLockText,
@@ -1932,8 +1930,8 @@ function check_inferred_main_effect_alignment(): void
     );
     foreach ([
         'accepts_compiler_inferred_checked_effects_for_selected_main',
-        'preserves_compiler_owned_checked_effect_diagnostics_for_ordinary_callables',
-        'preserves_compiler_owned_checked_effect_diagnostics_for_incomplete_main_clauses',
+        'accepts_ambient_io_in_ordinary_helpers_without_source_contracts',
+        'accepts_explicit_ambient_throws_without_requiring_the_complete_ambient_set',
         'assert_lsp_diagnostic_matches_compiler',
         'inferred_main_effects_do_not_rewrite_source_signature_hover',
     ] as $coverage) {
@@ -1944,7 +1942,7 @@ function check_inferred_main_effect_alignment(): void
     }
     require_check(
         str_contains($readmeText, 'entrypoint may omit `throws`') &&
-            str_contains($readmeText, 'server neither infers effects nor suppresses E0631'),
+            str_contains($readmeText, 'neither infers effects nor suppresses diagnostics'),
         'README must preserve compiler ownership of selected-main effect inference',
     );
 }

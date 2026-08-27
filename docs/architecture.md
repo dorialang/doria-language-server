@@ -21,10 +21,14 @@ VS Code launch profile -> baton run -> project entry selected from Baton.toml
 
 The compiler owns tokenization, parsing, semantic and type checking, diagnostic codes and spans, machine-applicable fixes, and the truth about whether a language feature is implemented.
 
-This includes checked-effect contracts. Ordinary reusable callables declare
-their escaping effects, while the selected program entrypoint may infer its
-effective escaping set. The server does not reproduce that analysis or suppress
-its diagnostics.
+This includes checked-effect contracts and classification. Ordinary reusable
+callables declare escaping required effects, while the selected program
+entrypoint may infer its effective escaping set. Canonical I/O effects are
+ambient: they keep checked runtime transport without creating a source
+catch-or-declare obligation. Source finalizers may replace a pending nonfatal
+outcome with a checked Error, which then flows to an outer context. `E0632` is
+historical and reserved. The server consumes the compiler's required/ambient
+profiles and does not reproduce that analysis or suppress its diagnostics.
 
 ### `doria-lsp`
 
