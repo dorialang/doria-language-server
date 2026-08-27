@@ -96,8 +96,12 @@ Valid closures are diagnostic-free in ordinary target-neutral editor analysis an
 execute through the compiler's debug and native targets and its supported PHP
 compatibility surface. Completion and concrete semantic hovers expose `map`,
 `filter`, and `reduce` on `List<T>` only; diagnostics remain compiler-owned.
-PHP remains secondary. Stage 30 and Stage 31 are complete; Stage 32 attributes
-are next, while Stage 33 project integration remains scheduled. Top-level
+PHP remains secondary. Stages 30, 31, and 32 are complete; Stage 33 project
+integration is next. Attribute colors remain presentation-only, while
+`doria-lsp` supplies compiler-owned schema completion, typed metadata hover,
+semantic tokens, navigation, references, rename, and diagnostics. The plugin
+does not parse attribute semantics, provide runtime reflection, run tests, or
+activate PHP exports. Top-level
 `internal` declarations retain their type, function, enum, and constant
 presentation with `internal` as a modifier. The presentation lexer does not
 implement package visibility or other semantics.

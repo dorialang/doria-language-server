@@ -61,6 +61,17 @@ workspace-folder events reanalyze the relevant open-source graph and republish
 affected URIs. No source is written to disk, no unopened directory is scanned,
 and no Baton manifest is parsed; Stage 33 owns complete project inventory.
 
+Stage 32 attribute tooling is another projection of that compiler graph. The
+server indexes compiler-owned attribute schemas, canonical class references,
+constructor-parameter identities, bound constant values, targets, and source
+spans. It does not parse or bind attributes independently and does not evaluate
+their expressions. Completion therefore lists only visible marked schemas and
+their remaining constructor parameters; hover presents typed metadata; and
+definition, references, and rename retain the same Stage 31 graph-safety rules.
+Compiler-known markers have no invented source definition and cannot be renamed.
+Attributes remain metadata only: there is no runtime reflection, `#[Test]` does
+not execute tests, and `#[PHPExport]` does not activate a bridge.
+
 ### Editor clients
 
 Clients start and supervise `doria-lsp`, translate native editor APIs to LSP
@@ -84,7 +95,7 @@ The TextMate grammar and IntelliJ lexer are deliberately local and fast. They cl
 
 ## Shared fixtures
 
-`editors/fixtures/latest-tokens.doria` exercises accepted and planned presentation vocabulary, including namespace, individual/aliased/grouped imports, and include syntax. `editors/fixtures/rejected-syntax.doria` ensures rejected PHP-shaped, preprocessor, wildcard-import, malformed-group, computed-include, and nested-directive syntax does not accidentally look accepted.
+`editors/fixtures/latest-tokens.doria` exercises accepted and planned presentation vocabulary, including namespace, individual/aliased/grouped imports, and include syntax. `editors/fixtures/stage32-attributes.doria` and `stage32-attributes-rejected.doria` preserve the accepted attribute/comment boundary and malformed or semantically rejected examples. `editors/fixtures/rejected-syntax.doria` ensures rejected PHP-shaped, preprocessor, wildcard-import, malformed-group, computed-include, and nested-directive syntax does not accidentally look accepted.
 
 Both editor implementations must be checked against the same fixtures and token inventory.
 

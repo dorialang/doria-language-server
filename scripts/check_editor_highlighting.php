@@ -1712,7 +1712,7 @@ function check_stage30f_callable_alignment(): void
     foreach ($doriaSources as $source) {
         require_check(
             $source[1] === $requiredCompilerRevision && $source[2] === $requiredCompilerRevision,
-            'every Doria git package must resolve to the final Stage 31 compiler commit',
+            'every Doria git package must resolve to the pinned compiler commit',
         );
     }
     $fixtureText = read_text($fixture);
@@ -1953,13 +1953,13 @@ function check_stage30f_callable_alignment(): void
             str_contains($readmeText, 'does not suppress') &&
             str_contains($readmeText, 'supported compatibility surface') &&
             str_contains($readmeText, 'Stage 31 is complete') &&
-            str_contains($readmeText, 'Stage 32 attributes are next') &&
-            str_contains($readmeText, 'Stage 33 project integration remains scheduled') &&
+            str_contains($readmeText, 'Stage 32 is complete') &&
+            str_contains($readmeText, 'Stage 33 project integration is next') &&
             str_contains($readmeText, '`map`, `filter`, and `reduce` only for resolved `List<T>` receivers') &&
             !str_contains($readmeText, 'Stage 30 remains incomplete') &&
             !str_contains($readmeText, 'Stage 30h is next') &&
             !str_contains($readmeText, 'lowering remains the Stage 30f boundary'),
-        'README must state Stage 30 and Stage 31 completion plus the Stage 32/33 boundary',
+        'README must state Stage 30 through Stage 32 completion plus the Stage 33 boundary',
     );
 }
 

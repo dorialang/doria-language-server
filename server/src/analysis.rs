@@ -7,10 +7,14 @@ use doriac::ast::{
     MatchPattern, MemberAccess, Param, Program, StaticQualifier, Stmt, TryStmt, VarDecl,
     WhenExpression, WhileStmt,
 };
+use doriac::attributes::{
+    AttributeApplication, AttributeClassIdentity, AttributeClassSchema, AttributeSemanticInfo,
+    AttributeTarget, AttributeValue, AttributeValueKind,
+};
 use doriac::diagnostics::{Diagnostic, DiagnosticSeverity};
 use doriac::enums::{EnumBackingType, EnumBackingValue};
 use doriac::lexer::{Token, TokenKind};
-use doriac::names::{CompilationContext, GlobalSymbolFacts};
+use doriac::names::{CompilationContext, GlobalSymbolFacts, GlobalSymbolId};
 use doriac::ownership::{
     CaptureAcquisitionKind, ClosureBorrowRoot, ClosureEscapeClassification, ClosureValueProvenance,
     InvocationConsumption,
@@ -71,6 +75,9 @@ pub(crate) struct AnalysisSnapshot {
     compilation_context: CompilationContext,
     global_symbols: GlobalSymbolFacts,
     directive_semantic_tokens: Vec<(Span, u32)>,
+    attribute_semantic_tokens: Vec<(Span, u32)>,
+    attribute_info: AttributeSemanticInfo,
+    attribute_parameter_occurrences: Vec<AttributeParameterOccurrence>,
     symbols: Vec<Symbol>,
     occurrences: Vec<Occurrence>,
     member_receivers: Vec<MemberReceiver>,
@@ -82,6 +89,27 @@ pub(crate) struct AnalysisSnapshot {
     local_visibilities: Vec<LocalVisibility>,
     call_signatures: Vec<CallSignatureContext>,
     semantic_hovers: Vec<SemanticHover>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct AttributeParameterIdentity {
+    pub(crate) class: GlobalSymbolId,
+    pub(crate) index: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AttributeParameterOccurrence {
+    pub(crate) identity: AttributeParameterIdentity,
+    pub(crate) name: String,
+    pub(crate) span: Span,
+    pub(crate) declaration: bool,
+    pub(crate) spelling: AttributeParameterSpelling,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttributeParameterSpelling {
+    Variable,
+    Label,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,6 +280,14 @@ impl AnalysisSnapshot {
 
     pub(crate) fn global_symbols(&self) -> &GlobalSymbolFacts {
         &self.global_symbols
+    }
+
+    pub(crate) fn attribute_info(&self) -> &AttributeSemanticInfo {
+        &self.attribute_info
+    }
+
+    pub(crate) fn attribute_parameter_occurrences(&self) -> &[AttributeParameterOccurrence] {
+        &self.attribute_parameter_occurrences
     }
 
     pub(crate) fn namespace_hover_at_offset(&self, offset: usize) -> Option<SemanticHover> {
@@ -565,7 +601,14 @@ impl AnalysisSnapshot {
                 semantic_token_type(symbol).map(|token_type| (occurrence.span, token_type))
             })
             .collect::<Vec<_>>();
+        spans.retain(|(span, _)| {
+            !self
+                .attribute_semantic_tokens
+                .iter()
+                .any(|(attribute_span, _)| spans_overlap(*span, *attribute_span))
+        });
         spans.extend(self.directive_semantic_tokens.iter().copied());
+        spans.extend(self.attribute_semantic_tokens.iter().copied());
         spans.sort_by_key(|(span, _)| (span.start, span.end));
         spans.dedup_by_key(|(span, _)| (span.start, span.end));
         spans
@@ -723,6 +766,8 @@ struct SnapshotBuilder<'a> {
     local_visibilities: Vec<LocalVisibility>,
     call_signatures: Vec<CallSignatureContext>,
     semantic_hovers: Vec<SemanticHover>,
+    attribute_semantic_tokens: Vec<(Span, u32)>,
+    attribute_parameter_occurrences: Vec<AttributeParameterOccurrence>,
     when_depth: usize,
 }
 
@@ -760,6 +805,8 @@ impl<'a> SnapshotBuilder<'a> {
             local_visibilities: Vec::new(),
             call_signatures: Vec::new(),
             semantic_hovers: Vec::new(),
+            attribute_semantic_tokens: Vec::new(),
+            attribute_parameter_occurrences: Vec::new(),
             when_depth: 0,
         }
     }
@@ -768,12 +815,21 @@ impl<'a> SnapshotBuilder<'a> {
         self.collect_declarations(program);
         self.collect_semantic_only_declarations();
         self.collect_references(program);
+        self.collect_attribute_facts(program);
         self.collect_semantic_hovers();
+        let attribute_info = self
+            .semantic_info
+            .map_or_else(AttributeSemanticInfo::default, |info| {
+                info.attributes.clone()
+            });
         AnalysisSnapshot {
             diagnostics: self.diagnostics,
             compilation_context: CompilationContext::default(),
             global_symbols: GlobalSymbolFacts::default(),
             directive_semantic_tokens: Vec::new(),
+            attribute_semantic_tokens: self.attribute_semantic_tokens,
+            attribute_info,
+            attribute_parameter_occurrences: self.attribute_parameter_occurrences,
             symbols: self.symbols,
             occurrences: self.occurrences,
             member_receivers: self.member_receivers,
@@ -785,6 +841,187 @@ impl<'a> SnapshotBuilder<'a> {
             local_visibilities: self.local_visibilities,
             call_signatures: self.call_signatures,
             semantic_hovers: self.semantic_hovers,
+        }
+    }
+
+    fn collect_attribute_facts(&mut self, program: &Program) {
+        const VARIABLE: u32 = 0;
+        const TYPE: u32 = 1;
+        const KEYWORD: u32 = 4;
+        const NAMESPACE: u32 = 5;
+
+        for attachment in &program.attributes {
+            for group in &attachment.groups {
+                self.attribute_semantic_tokens
+                    .push((group.open_span, KEYWORD));
+                self.attribute_semantic_tokens
+                    .push((group.close_span, KEYWORD));
+                for attribute in &group.attributes {
+                    let last_segment = attribute.name.segments.len().saturating_sub(1);
+                    for (index, segment) in attribute.name.segments.iter().enumerate() {
+                        self.attribute_semantic_tokens.push((
+                            segment.span,
+                            if index == last_segment {
+                                TYPE
+                            } else {
+                                NAMESPACE
+                            },
+                        ));
+                    }
+                    self.attribute_semantic_tokens.extend(
+                        attribute
+                            .name
+                            .separator_spans
+                            .iter()
+                            .copied()
+                            .map(|span| (span, NAMESPACE)),
+                    );
+                    if let Some(arguments) = &attribute.argument_list {
+                        for argument in &arguments.arguments {
+                            if let Some(name) = &argument.name {
+                                self.attribute_semantic_tokens.push((name.span, VARIABLE));
+                            }
+                            self.visit_expr(&argument.value, None, None);
+                        }
+                    }
+                    if attribute.name.canonical() == "Attribute" {
+                        self.semantic_hovers.push(SemanticHover::new(
+                            attribute.name.span,
+                            "**Attribute - Compiler-Known Attribute Metadata**\n\nMarks a readonly, non-generic class as a typed attribute schema. Attribute constructors are not executed while metadata is produced.\n\n**Metadata Only**\n\n**No Runtime Reflection**".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        let Some(info) = self.semantic_info else {
+            return;
+        };
+
+        for schema in &info.attributes.schemas {
+            let AttributeClassIdentity::User(class) = &schema.identity else {
+                continue;
+            };
+            let Some(declaration) = info
+                .global_symbols
+                .declarations
+                .iter()
+                .find(|declaration| declaration.id == *class)
+                .filter(|declaration| declaration.name_span.source == self.source_id)
+            else {
+                continue;
+            };
+            if let Some(occurrence) = self.occurrences.iter().find(|occurrence| {
+                occurrence.role == OccurrenceRole::Declaration
+                    && occurrence.span == declaration.name_span
+            }) {
+                let documentation = attribute_schema_documentation(schema);
+                append_documentation(
+                    &mut self.symbols[occurrence.symbol].documentation,
+                    &documentation,
+                );
+            }
+
+            for parameter in &schema.parameters {
+                if parameter.span.source != self.source_id {
+                    continue;
+                }
+                let Some(name_span) = self.tokens.iter().find_map(|token| {
+                    (parameter.span.start <= token.span.start
+                        && token.span.end <= parameter.span.end
+                        && matches!(&token.kind, TokenKind::Variable(name) if name == &parameter.name))
+                    .then_some(token.span)
+                }) else {
+                    continue;
+                };
+                let identity = AttributeParameterIdentity {
+                    class: class.clone(),
+                    index: parameter.index,
+                };
+                let symbol = self
+                    .occurrences
+                    .iter()
+                    .find(|occurrence| {
+                        occurrence.role == OccurrenceRole::Declaration
+                            && occurrence.span == name_span
+                    })
+                    .map(|occurrence| occurrence.symbol);
+                if let Some(symbol) = symbol {
+                    self.attribute_parameter_occurrences.extend(
+                        self.occurrences
+                            .iter()
+                            .filter(|occurrence| occurrence.symbol == symbol)
+                            .map(|occurrence| AttributeParameterOccurrence {
+                                identity: identity.clone(),
+                                name: parameter.name.clone(),
+                                span: occurrence.span,
+                                declaration: occurrence.role == OccurrenceRole::Declaration,
+                                spelling: AttributeParameterSpelling::Variable,
+                            }),
+                    );
+                } else {
+                    self.attribute_parameter_occurrences
+                        .push(AttributeParameterOccurrence {
+                            identity,
+                            name: parameter.name.clone(),
+                            span: name_span,
+                            declaration: true,
+                            spelling: AttributeParameterSpelling::Variable,
+                        });
+                }
+            }
+        }
+
+        for application in info
+            .attributes
+            .applications
+            .iter()
+            .filter(|application| application.span.source == self.source_id)
+        {
+            let authored = program
+                .attributes
+                .iter()
+                .flat_map(|attachment| &attachment.groups)
+                .flat_map(|group| &group.attributes)
+                .find(|attribute| attribute.span == application.span);
+            let Some(authored) = authored else {
+                continue;
+            };
+            self.semantic_hovers.push(SemanticHover::new(
+                authored.name.span,
+                attribute_application_documentation(application),
+            ));
+
+            let AttributeClassIdentity::User(class) = &application.class_identity else {
+                continue;
+            };
+            let Some(arguments) = &authored.argument_list else {
+                continue;
+            };
+            for authored_argument in &application.authored_arguments {
+                let Some(parameter_name) = authored_argument.name.as_ref() else {
+                    continue;
+                };
+                let Some(name_span) = arguments
+                    .arguments
+                    .get(authored_argument.index)
+                    .and_then(|argument| argument.name.as_ref())
+                    .map(|name| name.span)
+                else {
+                    continue;
+                };
+                self.attribute_parameter_occurrences
+                    .push(AttributeParameterOccurrence {
+                        identity: AttributeParameterIdentity {
+                            class: class.clone(),
+                            index: authored_argument.bound_parameter_index,
+                        },
+                        name: parameter_name.clone(),
+                        span: name_span,
+                        declaration: false,
+                        spelling: AttributeParameterSpelling::Label,
+                    });
+            }
         }
     }
 
@@ -3177,6 +3414,135 @@ fn enum_documentation(info: &EnumSemanticInfo) -> String {
     format!("Nominal {ownership} enum. Each value records one declared case and that case's data.")
 }
 
+fn attribute_schema_documentation(schema: &AttributeClassSchema) -> String {
+    let parameters = if schema.parameters.is_empty() {
+        "None".to_string()
+    } else {
+        schema
+            .parameters
+            .iter()
+            .map(|parameter| {
+                let default = if parameter.has_default {
+                    " = default"
+                } else {
+                    ""
+                };
+                format!(
+                    "- `{}`: `{}`{default}",
+                    parameter.name,
+                    doriac::attributes::metadata_type_name(&parameter.ty)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "**Typed Attribute Schema**\n\nConstructor Parameters:\n{parameters}\n\n**Metadata Only**\n\nAttribute constructors are not executed while metadata is produced. Doria does not provide runtime reflection for attributes."
+    )
+}
+
+fn attribute_application_documentation(application: &AttributeApplication) -> String {
+    let arguments = if application.bound_arguments.is_empty() {
+        "None".to_string()
+    } else {
+        application
+            .bound_arguments
+            .iter()
+            .map(|argument| {
+                let defaulted = if argument.defaulted { " (default)" } else { "" };
+                format!(
+                    "- `{}`: `{}` = `{}`{defaulted}",
+                    argument.parameter_name,
+                    doriac::attributes::metadata_type_name(&argument.ty),
+                    attribute_value_display(&argument.value)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let (heading, compiler_note) = match application.canonical_class_name.as_str() {
+        "Test" => (
+            "Test - Compiler-Known Attribute Metadata".to_string(),
+            "\n\n**Execution Lands In Stage 33 Baton Test Orchestration**",
+        ),
+        "PHPExport" => (
+            "PHPExport - Compiler-Known Attribute Metadata".to_string(),
+            "\n\n**Bridge Semantics Land In Stage 41**",
+        ),
+        _ => (
+            format!("Attribute `{}`", application.canonical_class_name),
+            "",
+        ),
+    };
+    format!(
+        "**{heading}**\n\nTarget: {}\n\nArguments:\n{arguments}\n\n**Metadata Only**\n\n**No Runtime Reflection**{compiler_note}",
+        attribute_target_display(&application.target),
+    )
+}
+
+fn attribute_target_display(target: &AttributeTarget) -> String {
+    match target {
+        AttributeTarget::GlobalDeclaration { declaration, kind } => {
+            format!("{} `{}`", kind.protocol_name(), declaration.qualified_name)
+        }
+        AttributeTarget::ClassMember {
+            class, kind, name, ..
+        } => format!(
+            "{} `{}::{name}`",
+            kind.protocol_name(),
+            class.qualified_name
+        ),
+        AttributeTarget::CallableParameter {
+            callable,
+            parameter_name,
+            roles,
+            ..
+        } => format!(
+            "{} `{callable}(${parameter_name})`",
+            roles
+                .iter()
+                .map(|role| role.protocol_name())
+                .collect::<Vec<_>>()
+                .join("+")
+        ),
+        AttributeTarget::EnumCase {
+            enumeration,
+            case_name,
+            ..
+        } => format!("enum case `{}::{case_name}`", enumeration.qualified_name),
+        AttributeTarget::EnumPayloadField {
+            enumeration,
+            case_index,
+            field_name,
+            ..
+        } => format!(
+            "enum payload field `{}::case#{case_index}(${field_name})`",
+            enumeration.qualified_name,
+        ),
+    }
+}
+
+fn attribute_value_display(value: &AttributeValue) -> String {
+    match &value.value {
+        AttributeValueKind::Integer { value } | AttributeValueKind::Float { value } => {
+            value.clone()
+        }
+        AttributeValueKind::String(value) => format!("\"{}\"", value.escape_default()),
+        AttributeValueKind::Bool(value) => value.to_string(),
+        AttributeValueKind::Null => "null".to_string(),
+        AttributeValueKind::Enum { case } => case.clone(),
+        AttributeValueKind::PayloadEnum { case, fields } => format!(
+            "{}({})",
+            case,
+            fields
+                .iter()
+                .map(attribute_value_display)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 fn append_documentation(documentation: &mut Option<String>, addition: &str) {
     match documentation {
         Some(documentation) => {
@@ -3952,6 +4318,37 @@ function inspect(): void
                 "enum case at {span:?} must retain the enum-member token type"
             );
         }
+    }
+
+    #[test]
+    fn semantic_tokens_traverse_attribute_argument_values() {
+        let source = r#"enum HttpMethod { case Get; case Post; }
+#[Attribute]
+class Route
+{
+    function __construct(HttpMethod $method) {}
+}
+#[Route(method: HttpMethod::Post)]
+function main(): void {}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("attributes.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+        let tokens = snapshot.semantic_token_spans();
+        let value_start = source.rfind("HttpMethod::Post").unwrap();
+        let type_span = Span::new(value_start, value_start + "HttpMethod".len());
+        let case_start = value_start + "HttpMethod::".len();
+        let case_span = Span::new(case_start, case_start + "Post".len());
+
+        assert!(tokens
+            .iter()
+            .any(|(span, token_type)| *span == type_span && *token_type == 1));
+        assert!(tokens
+            .iter()
+            .any(|(span, token_type)| *span == case_span && *token_type == 2));
     }
 
     #[test]

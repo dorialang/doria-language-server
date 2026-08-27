@@ -17,9 +17,12 @@ execution for valid closures and describes PHP lowering as conditional on the
 program's independently supported PHP surface. Valid closures receive no
 `E0641` because the compiler has completed their accepted routes; the server does
 not suppress that historical, reserved diagnostic. PHP remains a secondary
-compatibility backend with independent limitations. Stage 30 and Stage 31 are
-complete. Stage 32 attributes are next; Stage 33 project integration remains
-scheduled and unimplemented.
+compatibility backend with independent limitations. Stage 30 is complete. Stage
+31 is complete. Stage 32 is complete. Attribute completion, hover, navigation, references, rename, semantic
+tokens, and diagnostics consume compiler-owned schemas, canonical identities,
+bound constant values, and source spans. The server does not execute attribute
+constructors, provide runtime reflection, run `#[Test]`, or activate
+`#[PHPExport]`. Stage 33 project integration is next.
 
 The compiler classifies checked effects into source-required effects and ambient
 canonical I/O effects. Hovers keep source signatures focused on required

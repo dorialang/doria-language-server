@@ -57,7 +57,8 @@ echo ParserLimits::next;
 echo ParserLimits::MAX_DEPTH;
 echo HARD_LIMIT;
 
-// Attributes remain syntax-ahead; named arguments are compiler-supported.
+// Stage 32 typed attributes are compiler-supported metadata. This broad editor
+// fixture also retains planned expression shapes for presentation coverage.
 #[Module(host: "localhost", port: 3306)]
 #[App\Routing\Route(path: "/parser", name: "parser.show")]
 #[Test]

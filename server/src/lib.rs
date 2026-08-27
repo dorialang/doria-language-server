@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
 
@@ -786,6 +786,24 @@ impl Server {
         let Some((uri, document, offset)) = self.uri_document_and_offset(params) else {
             return completion_items();
         };
+        if let Some(context) = attribute_completion_context(&document.text, offset) {
+            let completions = match context {
+                AttributeCompletionContext::Name => self.document_index.attribute_completions(&uri),
+                AttributeCompletionContext::Arguments {
+                    attribute,
+                    positional_count,
+                    supplied_names,
+                    named_started,
+                } => self.document_index.attribute_argument_completions(
+                    &uri,
+                    &attribute,
+                    positional_count,
+                    &supplied_names,
+                    named_started,
+                ),
+            };
+            return indexed_completion_items(completions);
+        }
         if let Some(completions) = document.analysis.member_completions_at_offset(offset) {
             return semantic_completion_items(completions);
         }
@@ -833,6 +851,7 @@ impl Server {
                         "label": candidate.label,
                         "kind": candidate.kind,
                         "detail": candidate.detail,
+                        "documentation": candidate.documentation,
                     }));
                 }
             }
@@ -1604,6 +1623,160 @@ fn semantic_completion_items(completions: Vec<SemanticCompletion>) -> Value {
         "isIncomplete": false,
         "items": items,
     })
+}
+
+fn indexed_completion_items(completions: Vec<workspace_index::IndexedCompletion>) -> Value {
+    let items = completions
+        .into_iter()
+        .map(|completion| {
+            json!({
+                "label": completion.label,
+                "kind": completion.kind,
+                "detail": completion.detail,
+                "documentation": completion.documentation,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "isIncomplete": false,
+        "items": items,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AttributeCompletionContext {
+    Name,
+    Arguments {
+        attribute: String,
+        positional_count: usize,
+        supplied_names: HashSet<String>,
+        named_started: bool,
+    },
+}
+
+fn attribute_completion_context(text: &str, offset: usize) -> Option<AttributeCompletionContext> {
+    let prefix = text.get(..offset)?;
+    let source = doriac::source::SourceFile::with_id(
+        SourceId::default(),
+        "<attribute-completion>",
+        prefix.to_string(),
+    );
+    let tokens = doriac::lexer::Lexer::new(&source).lex().ok()?;
+    let open = tokens
+        .iter()
+        .rposition(|token| token.kind == TokenKind::AttributeOpen)?;
+    let mut application_start = open + 1;
+    let mut paren_depth = 0_usize;
+    for (index, token) in tokens.iter().enumerate().skip(application_start) {
+        match token.kind {
+            TokenKind::LeftParen => paren_depth += 1,
+            TokenKind::RightParen => paren_depth = paren_depth.saturating_sub(1),
+            TokenKind::RightBracket if paren_depth == 0 => return None,
+            TokenKind::Comma if paren_depth == 0 => application_start = index + 1,
+            _ => {}
+        }
+    }
+
+    let application_tokens = tokens
+        .get(application_start..)
+        .unwrap_or_default()
+        .iter()
+        .filter(|token| token.kind != TokenKind::Eof)
+        .collect::<Vec<_>>();
+    let Some(left_paren) = application_tokens
+        .iter()
+        .position(|token| token.kind == TokenKind::LeftParen)
+    else {
+        return Some(AttributeCompletionContext::Name);
+    };
+    let name_tokens = &application_tokens[..left_paren];
+    let first = name_tokens.first()?.span.start;
+    let last = name_tokens.last()?.span.end;
+    let attribute = prefix.get(first..last)?.to_string();
+
+    let mut positional_count = 0_usize;
+    let mut supplied_names = HashSet::new();
+    let mut named_started = false;
+    let mut argument_tokens = Vec::<&Token>::new();
+    let mut depth = 1_usize;
+    for token in application_tokens.iter().skip(left_paren + 1) {
+        match token.kind {
+            TokenKind::LeftParen | TokenKind::LeftBracket | TokenKind::LeftBrace => depth += 1,
+            TokenKind::RightParen | TokenKind::RightBracket | TokenKind::RightBrace => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    break;
+                }
+            }
+            TokenKind::Comma if depth == 1 => {
+                record_attribute_argument(
+                    &argument_tokens,
+                    &mut positional_count,
+                    &mut supplied_names,
+                    &mut named_started,
+                    true,
+                );
+                argument_tokens.clear();
+            }
+            _ => argument_tokens.push(token),
+        }
+    }
+    record_attribute_argument(
+        &argument_tokens,
+        &mut positional_count,
+        &mut supplied_names,
+        &mut named_started,
+        false,
+    );
+    if !matches!(
+        argument_tokens.as_slice(),
+        [] | [Token {
+            kind: TokenKind::Identifier(_),
+            ..
+        }]
+    ) {
+        return None;
+    }
+    Some(AttributeCompletionContext::Arguments {
+        attribute,
+        positional_count,
+        supplied_names,
+        named_started,
+    })
+}
+
+fn record_attribute_argument(
+    tokens: &[&Token],
+    positional_count: &mut usize,
+    supplied_names: &mut HashSet<String>,
+    named_started: &mut bool,
+    complete: bool,
+) {
+    if tokens.is_empty() {
+        return;
+    }
+    if let [Token {
+        kind: TokenKind::Identifier(name),
+        ..
+    }, Token {
+        kind: TokenKind::Colon,
+        ..
+    }, ..] = tokens
+    {
+        supplied_names.insert(name.clone());
+        *named_started = true;
+    } else if (complete
+        || !matches!(
+            tokens,
+            [Token {
+                kind: TokenKind::Identifier(_),
+                ..
+            }]
+        ))
+        && !*named_started
+    {
+        *positional_count += 1;
+    }
 }
 
 fn completion_items_with_analysis(analysis: &AnalysisSnapshot, offset: usize) -> Value {
@@ -5124,5 +5297,276 @@ function run(): int
         assert!(!first.iter().any(|completion| {
             completion.label == "SharedName" && completion.detail.contains("Package72\\SharedName")
         }));
+    }
+
+    #[test]
+    fn stage32_attribute_completion_context_uses_compiler_lexing_boundaries() {
+        assert_eq!(
+            attribute_completion_context("#[Rou", 5),
+            Some(AttributeCompletionContext::Name)
+        );
+        assert!(attribute_completion_context("# [Route]", 9).is_none());
+        assert!(attribute_completion_context("# #[Route]", 10).is_none());
+        assert!(attribute_completion_context("\"#[Route]\"", 10).is_none());
+        assert!(attribute_completion_context("#[Route]", 8).is_none());
+        let value_prefix = "#[Route(method: HttpMethod::";
+        assert!(attribute_completion_context(value_prefix, value_prefix.len()).is_none());
+        let context = attribute_completion_context(
+            "#[Route(path: \"/posts\", ",
+            "#[Route(path: \"/posts\", ".len(),
+        )
+        .expect("attribute arguments remain active");
+        let AttributeCompletionContext::Arguments {
+            attribute,
+            supplied_names,
+            named_started,
+            ..
+        } = context
+        else {
+            panic!("expected argument completion context");
+        };
+        assert_eq!(attribute, "Route");
+        assert_eq!(supplied_names, HashSet::from(["path".to_string()]));
+        assert!(named_started);
+
+        let uri = "file:///workspace/new.doria";
+        let source = "#[";
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+        let completion = server.completion(Some(&params_at(uri, source, source.len())));
+        let labels = completion["items"]
+            .as_array()
+            .expect("compiler-known completion in incomplete source")
+            .iter()
+            .filter_map(|item| item["label"].as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(labels, HashSet::from(["Attribute", "PHPExport", "Test"]));
+    }
+
+    #[test]
+    fn stage32_completion_is_scoped_to_visible_attribute_schemas_and_parameters() {
+        let root = "file:///workspace";
+        let schema_uri = "file:///workspace/route.doria";
+        let app_uri = "file:///workspace/app.doria";
+        let schema = r#"namespace Acme\Metadata;
+#[Attribute]
+class Route
+{
+    function __construct(string $path, int $status = 200) {}
+}
+class Ordinary {}
+"#;
+        let app = r#"namespace Acme\App;
+use Acme\Metadata\Route;
+#[Route(path: "/posts", status: 201)]
+function main(): void {}
+"#;
+        let mut server = stage31_server(&[root]);
+        open_stage31_document(&mut server, schema_uri, schema);
+        open_stage31_document(&mut server, app_uri, app);
+
+        let name_offset = app.find("Route(path").unwrap() + "Ro".len();
+        let names = server.completion(Some(&params_at(app_uri, app, name_offset)))["items"]
+            .as_array()
+            .expect("attribute completion items")
+            .iter()
+            .filter_map(|item| item["label"].as_str().map(str::to_string))
+            .collect::<HashSet<_>>();
+        assert!(names.contains("Attribute"));
+        assert!(names.contains("Test"));
+        assert!(names.contains("PHPExport"));
+        assert!(names.contains("Route"));
+        assert!(!names.contains("Ordinary"));
+
+        let first_argument = app.find("Route(").unwrap() + "Route(".len();
+        let arguments = server.completion(Some(&params_at(app_uri, app, first_argument)))["items"]
+            .as_array()
+            .expect("attribute argument completion")
+            .iter()
+            .filter_map(|item| item["label"].as_str().map(str::to_string))
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            arguments,
+            HashSet::from(["path".to_string(), "status".to_string()])
+        );
+
+        let second_argument = app.find(", status").unwrap() + 2;
+        let remaining = server.completion(Some(&params_at(app_uri, app, second_argument)))["items"]
+            .as_array()
+            .expect("remaining attribute arguments")
+            .iter()
+            .filter_map(|item| item["label"].as_str().map(str::to_string))
+            .collect::<HashSet<_>>();
+        assert_eq!(remaining, HashSet::from(["status".to_string()]));
+    }
+
+    #[test]
+    fn stage32_attribute_values_retain_expression_completion() {
+        let uri = "file:///workspace/route.doria";
+        let source = r#"enum HttpMethod { case Get; case Post; }
+#[Attribute]
+class Route
+{
+    function __construct(HttpMethod $method) {}
+}
+#[Route(method: HttpMethod::Post)]
+function main(): void {}
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+
+        let offset = source.find("HttpMethod::Post").unwrap() + "HttpMethod::".len();
+        let completion = server.completion(Some(&params_at(uri, source, offset)));
+        let labels = completion["items"]
+            .as_array()
+            .expect("enum case completions inside attribute value")
+            .iter()
+            .filter_map(|item| item["label"].as_str().map(str::to_string))
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            labels,
+            HashSet::from(["Get".to_string(), "Post".to_string()])
+        );
+    }
+
+    #[test]
+    fn stage32_hovers_navigation_references_and_rename_share_compiler_identities() {
+        let root = "file:///workspace";
+        let schema_uri = "file:///workspace/route.doria";
+        let app_uri = "file:///workspace/app.doria";
+        let schema = r#"namespace Acme\Metadata;
+#[Attribute]
+class Route
+{
+    function __construct(string $path) { echo $path; }
+}
+"#;
+        let app = r#"namespace Acme\App;
+use Acme\Metadata\Route as WebRoute;
+#[WebRoute(path: "/posts")]
+#[Test]
+#[PHPExport]
+function main(): void {}
+"#;
+        let mut server = stage31_server(&[root]);
+        open_stage31_document(&mut server, schema_uri, schema);
+        open_stage31_document(&mut server, app_uri, app);
+
+        let application = app.find("WebRoute(path").unwrap();
+        let hover = server
+            .hover(Some(&params_at(app_uri, app, application)))
+            .expect("attribute application hover");
+        let markdown = hover["contents"]["value"].as_str().unwrap();
+        assert!(markdown.contains("Attribute `Acme\\Metadata\\Route`"));
+        assert!(markdown.contains("`path`: `string` = `\"/posts\"`"));
+        assert!(markdown.contains("No Runtime Reflection"));
+
+        let definition = server.definition(Some(&params_at(app_uri, app, application)));
+        assert_eq!(definition["uri"], schema_uri);
+        let references = server.references(Some(&json!({
+            "textDocument": { "uri": app_uri },
+            "position": params_at(app_uri, app, application)["position"].clone(),
+            "context": { "includeDeclaration": true },
+        })));
+        assert_eq!(references.as_array().map(Vec::len), Some(3));
+
+        let class_rename = server.rename(Some(&json!({
+            "textDocument": { "uri": schema_uri },
+            "position": params_at(schema_uri, schema, schema.find("Route").unwrap())["position"].clone(),
+            "newName": "Endpoint",
+        })));
+        let class_edits = class_rename["changes"]
+            .as_object()
+            .expect("class rename edits");
+        assert!(class_edits.contains_key(schema_uri));
+        assert!(class_edits.contains_key(app_uri));
+
+        let named_argument = app.find("path:").unwrap();
+        let parameter_rename = server.rename(Some(&json!({
+            "textDocument": { "uri": app_uri },
+            "position": params_at(app_uri, app, named_argument)["position"].clone(),
+            "newName": "uri",
+        })));
+        let parameter_edits = parameter_rename["changes"]
+            .as_object()
+            .expect("parameter rename edits");
+        assert_eq!(
+            parameter_edits[schema_uri].as_array().map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(parameter_edits[app_uri].as_array().map(Vec::len), Some(1));
+        assert!(parameter_edits[schema_uri]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|edit| edit["newText"] == "$uri"));
+        assert_eq!(parameter_edits[app_uri][0]["newText"], "uri");
+
+        for marker in ["Test", "PHPExport"] {
+            let offset = app.find(marker).unwrap();
+            let marker_hover = server
+                .hover(Some(&params_at(app_uri, app, offset)))
+                .expect("compiler-known marker hover");
+            assert!(marker_hover["contents"]["value"]
+                .as_str()
+                .is_some_and(|value| value.contains("Metadata Only")));
+            assert_eq!(
+                server.rename(Some(&json!({
+                    "textDocument": { "uri": app_uri },
+                    "position": params_at(app_uri, app, offset)["position"].clone(),
+                    "newName": "Known",
+                }))),
+                Value::Null
+            );
+        }
+    }
+
+    #[test]
+    fn stage32_semantic_tokens_and_diagnostics_remain_compiler_owned_and_incremental() {
+        let uri = "file:///workspace/attributes.doria";
+        let valid = "#[Test]\nfunction main(): void {}\n# comment\n";
+        let invalid = "function main(): void {}\n#[Missing]\nfunction extra(): void {}\n";
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, valid);
+        assert!(server.documents[uri].analysis.diagnostics().is_empty());
+        let semantic = server.semantic_tokens(Some(&json!({
+            "textDocument": { "uri": uri },
+        })));
+        let data = semantic["data"].as_array().expect("semantic tokens");
+        assert!(
+            data.len() >= 15,
+            "attribute delimiter, name, and target tokens"
+        );
+
+        let mut output = Vec::new();
+        server
+            .did_change(
+                Some(&json!({
+                    "textDocument": { "uri": uri, "version": 2 },
+                    "contentChanges": [{ "text": invalid }],
+                })),
+                &mut output,
+            )
+            .unwrap();
+        assert!(server.documents[uri]
+            .analysis
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("unknown attribute")));
+
+        let mut clear_output = Vec::new();
+        server
+            .did_change(
+                Some(&json!({
+                    "textDocument": { "uri": uri, "version": 3 },
+                    "contentChanges": [{ "text": valid }],
+                })),
+                &mut clear_output,
+            )
+            .unwrap();
+        assert!(server.documents[uri].analysis.diagnostics().is_empty());
+        assert!(String::from_utf8(clear_output)
+            .unwrap()
+            .contains("\"diagnostics\":[]"));
     }
 }
