@@ -1,7 +1,5 @@
 use std::process::Command;
 
-const REQUIRED_COMPILER_COMMIT: &str = "1c0989c861a7838098f8d04f04b300a57392b37f";
-
 #[test]
 fn reports_server_and_canonical_toolchain_versions() {
     let output = Command::new(env!("CARGO_BIN_EXE_doria-lsp"))
@@ -30,8 +28,11 @@ fn reports_machine_readable_compiler_identity() {
     assert_eq!(value["component"], "doria-lsp");
     assert_eq!(value["version"], "2026.3.1-canary");
     assert_eq!(value["toolchainVersion"], "2026.03.1-canary");
-    assert_eq!(doriac::BUILD_COMMIT, REQUIRED_COMPILER_COMMIT);
-    assert_eq!(value["compilerCommit"], REQUIRED_COMPILER_COMMIT);
+    assert_eq!(doriac::BUILD_COMMIT.len(), 40);
+    assert!(doriac::BUILD_COMMIT
+        .bytes()
+        .all(|byte| byte.is_ascii_hexdigit()));
+    assert_eq!(value["compilerCommit"], doriac::BUILD_COMMIT);
 }
 
 #[test]

@@ -6,6 +6,10 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Aligned diagnostics and semantic hover with the ambient canonical I/O and
+  fallible-finalizer correction. Canonical I/O retains checked runtime transport
+  without source `throws`; required effects remain explicit, finalizer Errors
+  flow to enclosing contexts, and `E0632` remains historical and reserved.
 - Completed Stage 31 tooling integration by pinning the final build-plan
   compiler, analyzing each open workspace package through a reusable partial
   compilation graph, and adding compiler-backed cross-file definition,

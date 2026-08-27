@@ -9,6 +9,7 @@ It provides:
 - `.doria` file recognition.
 - Basic syntax highlighting for Doria keywords, variables, types, attributes, strings, string interpolation, comments, numbers, operators, punctuation, accepted OOP declaration vocabulary, namespace/import/include/directive vocabulary, and rejected strict-comparison/preprocessor spellings.
 - Doria code-style settings and formatting for tabs, indentation, continuation indentation, spacing, braces, and preserved blank lines.
+- Separate **New > Doria File** and **New > Doria Class** workflows. The class dialog can create a class, interface, trait, or enum and exposes class inheritance controls only for class templates. Namespace suggestions use the nearest `Baton.toml` `[autoload.namespaces]` and `[autoload-dev.namespaces]` roots. Without a matching mapping, the namespace remains editable for explicit entry. Moving a Doria file does not rewrite its namespace or references; automatic move retargeting waits for compiler-owned reference information.
 - A Doria settings page for configuring the language server path.
 - `doria-lsp` integration through the IntelliJ Platform LSP API.
 
@@ -100,6 +101,12 @@ are next, while Stage 33 project integration remains scheduled. Top-level
 `internal` declarations retain their type, function, enum, and constant
 presentation with `internal` as a modifier. The presentation lexer does not
 implement package visibility or other semantics.
+
+Compiler-backed hover separates required source `throws` effects from the exact
+ambient canonical I/O effects transported at runtime. Ambient I/O does not require
+source declarations, including in source `finally` blocks; escaping finalizer
+errors follow compiler-owned precedence rules. `E0632` is historical and reserved.
+The presentation lexer performs no effect classification or finalizer analysis.
 
 VS Code and IntelliJ / JetBrains highlighting should stay aligned. The shared smoke fixture is:
 

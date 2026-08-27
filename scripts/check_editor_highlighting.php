@@ -8,7 +8,6 @@ declare(strict_types=1);
  */
 
 $root = dirname(__DIR__);
-$requiredCompilerRevision = '1c0989c861a7838098f8d04f04b300a57392b37f';
 
 $cargoManifest = $root . '/Cargo.toml';
 $cargoLock = $root . '/Cargo.lock';
@@ -37,6 +36,13 @@ $intellijLspResolver = $root . '/editors/intellij/doria/src/main/kotlin/dev/dori
 $intellijPluginXml = $root . '/editors/intellij/doria/src/main/resources/META-INF/plugin.xml';
 $intellijPluginIcon = $root . '/editors/intellij/doria/src/main/resources/META-INF/pluginIcon.svg';
 $intellijCreateClassAction = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/actions/DoriaCreateClassAction.kt';
+$intellijAutoloadNamespaceResolver = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/actions/DoriaAutoloadNamespaceResolver.kt';
+$intellijDeclarationTemplates = [
+    'Class' => $root . '/editors/intellij/doria/src/main/resources/fileTemplates/internal/Doria Class.doria.ft',
+    'Interface' => $root . '/editors/intellij/doria/src/main/resources/fileTemplates/internal/Doria Interface.doria.ft',
+    'Trait' => $root . '/editors/intellij/doria/src/main/resources/fileTemplates/internal/Doria Trait.doria.ft',
+    'Enum' => $root . '/editors/intellij/doria/src/main/resources/fileTemplates/internal/Doria Enum.doria.ft',
+];
 $doriaLogo = $root . '/res/images/doria-app-icon-warm.svg';
 $releaseWorkflow = $root . '/.github/workflows/release.yml';
 $lspAnalysis = $root . '/server/src/analysis.rs';
@@ -1368,9 +1374,11 @@ function check_lsp_completion_vocabulary(): void
 function check_intellij_class_name_vocabulary(): void
 {
     global $acceptedKeywords, $plannedKeywords, $primitiveTypes, $reservedTypes, $wordOperators, $rejectedKeywords;
-    global $intellijCreateClassAction;
+    global $intellijCreateClassAction, $intellijAutoloadNamespaceResolver;
+    global $intellijDeclarationTemplates, $intellijPluginXml, $intellijBuildGradle;
 
     $actionText = read_text($intellijCreateClassAction);
+    $autoloadText = read_text($intellijAutoloadNamespaceResolver);
     require_check(
         preg_match('/DORIA_RESERVED_NAME_SEGMENTS = setOf\((.*?)\n\s*\)/s', $actionText, $segmentMatches) === 1,
         'IntelliJ class workflow reserved-name vocabulary could not be found'
@@ -1420,6 +1428,47 @@ function check_intellij_class_name_vocabulary(): void
         str_contains($actionText, "if (!isDoriaQualifiedInterfaceName(interfaceName))")
             && str_contains($actionText, 'value == "Displayable" || isDoriaQualifiedClassName(value)'),
         'IntelliJ class workflow must accept Displayable in the interface picker without allowing it as a class name'
+    );
+    foreach ($intellijDeclarationTemplates as $name => $path) {
+        $templateText = read_text($path);
+        require_check(
+            str_contains($actionText, strtoupper($name) . '("' . $name . '", "Doria ' . $name . '"'),
+            "IntelliJ class workflow must expose the {$name} template"
+        );
+        require_check(
+            str_contains($templateText, '${NAMESPACE_DECLARATION}')
+                && str_contains($templateText, '${TYPE_NAME}'),
+            "IntelliJ {$name} template must retain namespace and type-name placeholders"
+        );
+    }
+    require_check(
+        str_contains(read_text($intellijDeclarationTemplates['Enum']), 'case Value;'),
+        'IntelliJ enum template must create a semantically non-empty Doria enum'
+    );
+    require_check(
+        str_contains($actionText, 'DoriaAutoloadNamespaceResolver.suggest(directory.virtualFile)')
+            && !str_contains($actionText, 'DoriaNamespaceSuggester')
+            && !str_contains($autoloadText, 'DoriaLexer')
+            && !str_contains($autoloadText, 'FileTypeIndex'),
+        'IntelliJ class workflow must use structured Baton.toml namespace mappings without presentation-lexer semantic inference'
+    );
+    require_check(
+        str_contains(read_text($intellijBuildGradle), "implementation 'org.tomlj:tomlj:")
+            && str_contains($autoloadText, 'Toml.parse(source)')
+            && str_contains($autoloadText, '"autoload" to "namespaces"')
+            && str_contains($autoloadText, '"autoload-dev" to "namespaces"'),
+        'IntelliJ namespace inference must read structured Baton.toml autoload mappings'
+    );
+    require_check(
+        str_contains($actionText, 'if (!template.supportsClassInheritance) return@buildString')
+            && str_contains($actionText, 'updateTemplateControls()'),
+        'IntelliJ class workflow must restrict class inheritance controls to the class template'
+    );
+    require_check(
+        !str_contains(read_text($intellijPluginXml), '<moveFileHandler')
+            && !is_file(dirname($intellijCreateClassAction) . '/DoriaNamespaceSuggester.kt')
+            && !is_file(dirname(dirname($intellijCreateClassAction)) . '/refactoring/DoriaMoveFileHandler.kt'),
+        'IntelliJ must not rewrite namespaces during moves without compiler-owned reference retargeting'
     );
 }
 
@@ -1638,19 +1687,18 @@ function check_fixture(): void
 
 function check_stage30f_callable_alignment(): void
 {
-    global $cargoManifest, $cargoLock, $requiredCompilerRevision;
+    global $cargoManifest, $cargoLock;
     global $readme, $vscodeGrammar, $intellijLexer, $intellijLexerTest;
     global $lspAnalysis, $lspServer, $lspTests, $fixture, $rejectedFixture;
 
     $cargoManifestText = read_text($cargoManifest);
     $cargoLockText = read_text($cargoLock);
+    preg_match('/doriac\s*=\s*\{[^\n]*\brev\s*=\s*"([0-9a-f]{40})"/', $cargoManifestText, $manifestPin);
     require_check(
-        preg_match(
-            '/doriac\s*=\s*\{[^}]*\brev\s*=\s*"' . preg_quote($requiredCompilerRevision, '/') . '"/',
-            $cargoManifestText,
-        ) === 1,
-        'root doriac dependency must pin the final Stage 31 compiler commit',
+        isset($manifestPin[1]),
+        'root doriac dependency must pin an exact compiler commit',
     );
+    $requiredCompilerRevision = $manifestPin[1];
     preg_match_all(
         '/source = "git\+https:\/\/github\.com\/dorialang\/doria\?rev=([0-9a-f]{40})#([0-9a-f]{40})"/',
         $cargoLockText,
@@ -1932,8 +1980,8 @@ function check_inferred_main_effect_alignment(): void
     );
     foreach ([
         'accepts_compiler_inferred_checked_effects_for_selected_main',
-        'preserves_compiler_owned_checked_effect_diagnostics_for_ordinary_callables',
-        'preserves_compiler_owned_checked_effect_diagnostics_for_incomplete_main_clauses',
+        'accepts_ambient_io_in_ordinary_helpers_without_source_contracts',
+        'accepts_explicit_ambient_throws_without_requiring_the_complete_ambient_set',
         'assert_lsp_diagnostic_matches_compiler',
         'inferred_main_effects_do_not_rewrite_source_signature_hover',
     ] as $coverage) {
@@ -1944,7 +1992,7 @@ function check_inferred_main_effect_alignment(): void
     }
     require_check(
         str_contains($readmeText, 'entrypoint may omit `throws`') &&
-            str_contains($readmeText, 'server neither infers effects nor suppresses E0631'),
+            str_contains($readmeText, 'neither infers effects nor suppresses diagnostics'),
         'README must preserve compiler ownership of selected-main effect inference',
     );
 }

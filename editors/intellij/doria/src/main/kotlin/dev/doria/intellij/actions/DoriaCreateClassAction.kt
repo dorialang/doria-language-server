@@ -32,6 +32,7 @@ import java.awt.Insets
 import javax.swing.DefaultListModel
 import javax.swing.JButton
 import javax.swing.JComponent
+import javax.swing.JComboBox
 import javax.swing.JPanel
 import javax.swing.ListSelectionModel
 import javax.swing.event.DocumentEvent
@@ -57,7 +58,7 @@ class DoriaCreateClassAction : DumbAwareAction(
 
         try {
             val created = WriteCommandAction.writeCommandAction(project)
-                .withName("Create Doria class ${dialog.className}")
+                .withName("Create Doria ${dialog.template.displayName.lowercase()} ${dialog.typeName}")
                 .compute<PsiFile?, RuntimeException> {
                     createFromTemplate(project, directory, dialog)
                 }
@@ -65,8 +66,8 @@ class DoriaCreateClassAction : DumbAwareAction(
         } catch (error: IncorrectOperationException) {
             Messages.showErrorDialog(
                 project,
-                error.message ?: "The Doria class could not be created.",
-                "Cannot Create Doria Class",
+                error.message ?: "The Doria declaration could not be created.",
+                "Cannot Create Doria Declaration",
             )
         }
     }
@@ -77,7 +78,7 @@ class DoriaCreateClassAction : DumbAwareAction(
         dialog: DoriaCreateClassDialog,
     ): PsiFile? {
         val template = FileTemplateManager.getInstance(project)
-            .getInternalTemplate(DORIA_CLASS_TEMPLATE)
+            .getInternalTemplate(dialog.template.fileTemplateName)
         return CreateFileFromTemplateAction.createFileFromTemplate(
             dialog.fileBaseName,
             template,
@@ -87,15 +88,25 @@ class DoriaCreateClassAction : DumbAwareAction(
             emptyMap(),
             mapOf(
                 "NAMESPACE_DECLARATION" to dialog.namespaceDeclaration,
-                "CLASS_NAME" to dialog.className,
+                "TYPE_NAME" to dialog.typeName,
                 "INHERITANCE" to dialog.inheritanceClause,
             ),
         )
     }
+}
 
-    private companion object {
-        const val DORIA_CLASS_TEMPLATE = "Doria Class"
-    }
+internal enum class DoriaDeclarationTemplate(
+    val displayName: String,
+    val fileTemplateName: String,
+    val supportsClassInheritance: Boolean,
+) {
+    CLASS("Class", "Doria Class", true),
+    INTERFACE("Interface", "Doria Interface", false),
+    TRAIT("Trait", "Doria Trait", false),
+    ENUM("Enum", "Doria Enum", false),
+    ;
+
+    override fun toString(): String = displayName
 }
 
 private class DoriaCreateClassDialog(
@@ -103,9 +114,14 @@ private class DoriaCreateClassDialog(
     private val directory: PsiDirectory,
 ) : DialogWrapper(project, true) {
     private val classNameField = JBTextField(42)
-    private val namespaceField = JBTextField(42)
+    private val namespaceField = JComboBox(
+        listOfNotNull(DoriaAutoloadNamespaceResolver.suggest(directory.virtualFile)).toTypedArray(),
+    ).apply {
+        isEditable = true
+    }
     private val fileNameField = JBTextField(42)
     private val directoryField = JBTextField(directory.virtualFile.presentableUrl, 42)
+    private val templateSelector = JComboBox(DoriaDeclarationTemplate.entries.toTypedArray())
     private val parentField = JBTextField(42)
     private val interfaceModel = DefaultListModel<String>()
     private val interfaceList = JBList(interfaceModel)
@@ -114,19 +130,24 @@ private class DoriaCreateClassDialog(
     private var updatingFileName = false
     private var fileNameWasEdited = false
 
-    val className: String
+    val typeName: String
         get() = classNameField.text.trim()
+
+    val template: DoriaDeclarationTemplate
+        get() = templateSelector.selectedItem as? DoriaDeclarationTemplate
+            ?: DoriaDeclarationTemplate.CLASS
 
     val fileBaseName: String
         get() = fileNameField.text.trim().removeSuffix(".doria")
 
     val namespaceDeclaration: String
-        get() = namespaceField.text.trim().let { namespace ->
+        get() = namespaceField.editor.item?.toString()?.trim().orEmpty().let { namespace ->
             if (namespace.isEmpty()) "" else "namespace $namespace;\n\n"
         }
 
     val inheritanceClause: String
         get() = buildString {
+            if (!template.supportsClassInheritance) return@buildString
             val parent = parentField.text.trim()
             if (parent.isNotEmpty()) append(" extends ").append(parent)
 
@@ -140,9 +161,9 @@ private class DoriaCreateClassDialog(
         title = "Create New Doria Class"
         setOKButtonText("OK")
         directoryField.isEditable = false
-        classNameField.emptyText.text = "Class name"
-        namespaceField.emptyText.text = "Optional namespace"
-        fileNameField.emptyText.text = "ClassName.doria"
+        classNameField.emptyText.text = "Type name"
+        namespaceField.toolTipText = "Namespace inferred from the nearest Baton.toml autoload mapping"
+        fileNameField.emptyText.text = "TypeName.doria"
         parentField.emptyText.text = "Optional parent class"
         interfaceList.emptyText.text = "Choose interfaces to implement"
         interfaceList.selectionMode = ListSelectionModel.SINGLE_SELECTION
@@ -156,24 +177,27 @@ private class DoriaCreateClassDialog(
         removeInterfaceButton.accessibleContext.accessibleName = "Remove selected interface"
         removeInterfaceButton.isEnabled = false
         removeInterfaceButton.addActionListener { removeSelectedInterface() }
+        templateSelector.addActionListener { updateTemplateControls() }
         installFileNameSynchronization()
+        updateTemplateControls()
         init()
     }
 
     override fun createCenterPanel(): JComponent = JPanel(GridBagLayout()).apply {
-        addSection(this, 0, "Class")
+        addSection(this, 0, "Doria type")
         addRow(this, 1, "Name:", classNameField)
         addRow(this, 2, "Namespace:", namespaceField)
         addRow(this, 3, "File name:", fileNameField)
         addRow(this, 4, "Directory:", directoryField)
-        addSection(this, 5, "Parent classes")
-        addRow(this, 6, "Extends:", parentField)
+        addRow(this, 5, "Template:", templateSelector)
+        addSection(this, 6, "Parent types")
+        addRow(this, 7, "Extends:", parentField)
 
         add(
             JBLabel("Implements:"),
             GridBagConstraints().apply {
                 gridx = 0
-                gridy = 7
+                gridy = 8
                 anchor = GridBagConstraints.FIRST_LINE_START
                 insets = Insets(8, 20, 4, 12)
             },
@@ -182,7 +206,7 @@ private class DoriaCreateClassDialog(
             interfacePanel(),
             GridBagConstraints().apply {
                 gridx = 1
-                gridy = 7
+                gridy = 8
                 weightx = 1.0
                 weighty = 1.0
                 fill = GridBagConstraints.BOTH
@@ -193,11 +217,11 @@ private class DoriaCreateClassDialog(
 
     override fun getPreferredFocusedComponent(): JComponent = classNameField
 
-    override fun getInitialSize(): Dimension = Dimension(720, 500)
+    override fun getInitialSize(): Dimension = Dimension(720, 540)
 
     override fun doValidate(): ValidationInfo? {
-        if (!isDoriaClassName(className)) {
-            return ValidationInfo("Enter a valid Doria class name.", classNameField)
+        if (!isDoriaClassName(typeName)) {
+            return ValidationInfo("Enter a valid Doria type name.", classNameField)
         }
         if (fileBaseName.isEmpty() || !PathUtilRt.isValidFileName("$fileBaseName.doria", true)) {
             return ValidationInfo("Enter a valid Doria file name.", fileNameField)
@@ -206,15 +230,25 @@ private class DoriaCreateClassDialog(
             return ValidationInfo("$fileBaseName.doria already exists.", fileNameField)
         }
 
-        val namespace = namespaceField.text.trim()
+        val namespace = namespaceField.editor.item?.toString()?.trim().orEmpty()
         if (namespace.isNotEmpty() && !isDoriaNamespaceName(namespace)) {
             return ValidationInfo("Enter a valid Doria namespace.", namespaceField)
         }
-        val parent = parentField.text.trim()
-        if (parent.isNotEmpty() && !isDoriaQualifiedClassName(parent)) {
-            return ValidationInfo("Enter one valid Doria parent type.", parentField)
+        if (template.supportsClassInheritance) {
+            val parent = parentField.text.trim()
+            if (parent.isNotEmpty() && !isDoriaQualifiedClassName(parent)) {
+                return ValidationInfo("Enter one valid Doria parent type.", parentField)
+            }
         }
         return null
+    }
+
+    private fun updateTemplateControls() {
+        val enabled = template.supportsClassInheritance
+        parentField.isEnabled = enabled
+        interfaceList.isEnabled = enabled
+        addInterfaceButton.isEnabled = enabled
+        removeInterfaceButton.isEnabled = enabled && interfaceList.selectedIndex >= 0
     }
 
     private fun installFileNameSynchronization() {

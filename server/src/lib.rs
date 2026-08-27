@@ -1518,7 +1518,7 @@ fn completion_items() -> Value {
             "label": builtin.name(),
             "kind": 3,
             "detail": builtin.signature(),
-            "documentation": builtin_documentation(builtin),
+            "documentation": builtin_documentation_with_effects(builtin),
         })
     }));
     items.extend(
@@ -1727,7 +1727,7 @@ fn compiler_builtin_hover_at(tokens: &[Token], token_index: usize) -> Option<Str
     Some(format!(
         "```doria\n{}\n```\n\n{}",
         builtin.signature(),
-        builtin_documentation(builtin)
+        builtin_documentation_with_effects(builtin)
     ))
 }
 
@@ -1841,6 +1841,25 @@ fn builtin_documentation(builtin: Builtin) -> &'static str {
             "Writes exact bytes to standard error. Failure is a checked I/O error."
         }
     }
+}
+
+fn builtin_documentation_with_effects(builtin: Builtin) -> String {
+    let mut documentation = builtin_documentation(builtin).to_string();
+    let ambient = builtin.ambient_error_types();
+    if !ambient.is_empty() {
+        documentation.push_str("\n\n**Ambient I/O:**\n\n");
+        documentation.push_str(
+            &ambient
+                .iter()
+                .map(|effect| format!("- `{effect}`"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        documentation.push_str(
+            "\n\nThese checked runtime outcomes propagate without requiring source `throws`.",
+        );
+    }
+    documentation
 }
 
 fn string_companion_hover_at(tokens: &[Token], token_index: usize) -> Option<String> {
@@ -2031,7 +2050,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "Declares a reusable callable's source-ordered checked-error effect set. The selected program entrypoint may omit it and infer escaping effects.",
         ),
         TokenKind::Echo => Some(
-            "`echo value;` writes the displayed value and has the checked `Doria\\Std\\Io\\IoError` effect.",
+            "`echo value;` writes the displayed value. `Doria\\Std\\Io\\IoError` is an ambient checked runtime effect and does not require source `throws`.",
         ),
         TokenKind::New => Some("Constructs an instance of a class."),
         TokenKind::Foreach => Some("Iterates over a list or dictionary value."),
@@ -3367,6 +3386,8 @@ function main(): void
     fn echo_hover_names_its_checked_io_effect() {
         let hover = hover_description(&TokenKind::Echo).expect("echo hover");
         assert!(hover.contains(doriac::compiler_known_io::IO_ERROR));
+        assert!(hover.contains("ambient"));
+        assert!(hover.contains("does not require source `throws`"));
     }
 
     #[test]
@@ -3378,6 +3399,9 @@ function main(): void
             .expect("read_line hover should be markdown")
             .to_string();
         assert!(hover.contains("string $prompt"));
+        assert!(hover.contains("**Ambient I/O:**"));
+        assert!(hover.contains(doriac::compiler_known_io::IO_ERROR));
+        assert!(hover.contains(doriac::compiler_known_io::INVALID_UTF8_ERROR));
     }
 
     #[test]

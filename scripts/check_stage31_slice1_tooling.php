@@ -3,8 +3,6 @@
 
 declare(strict_types=1);
 
-const COMPILER_REVISION = '1c0989c861a7838098f8d04f04b300a57392b37f';
-
 $root = dirname(__DIR__);
 
 function read_required(string $path): string
@@ -29,6 +27,7 @@ $manifest = read_required($root . '/Cargo.toml');
 $lock = read_required($root . '/Cargo.lock');
 $analysis = read_required($root . '/server/src/analysis.rs');
 $server = read_required($root . '/server/src/lib.rs');
+$cliTests = read_required($root . '/server/tests/cli_tests.rs');
 $graph = read_required($root . '/server/src/workspace_graph.rs');
 $index = read_required($root . '/server/src/workspace_index.rs');
 $accepted = read_required($root . '/editors/fixtures/latest-tokens.doria');
@@ -42,10 +41,9 @@ $docs = read_required($root . '/README.md')
     . read_required($root . '/docs/architecture.md')
     . read_required($root . '/docs/semantic-hover.md');
 
-require_fact(
-    str_contains($manifest, 'rev = "' . COMPILER_REVISION . '"'),
-    'Cargo.toml must pin the final Stage 31 compiler commit.',
-);
+preg_match('/doriac\s*=\s*\{[^\n]*\brev\s*=\s*"([0-9a-f]{40})"/', $manifest, $manifestPin);
+require_fact(isset($manifestPin[1]), 'Cargo.toml must pin doriac to an exact compiler commit.');
+$compilerRevision = $manifestPin[1];
 preg_match_all(
     '/github\.com\/dorialang\/doria\?rev=([0-9a-f]{40})#([0-9a-f]{40})/',
     $lock,
@@ -55,10 +53,15 @@ preg_match_all(
 require_fact(count($sources) >= 3, 'Cargo.lock must contain the compiler-owned git packages.');
 foreach ($sources as $source) {
     require_fact(
-        $source[1] === COMPILER_REVISION && $source[2] === COMPILER_REVISION,
+        $source[1] === $compilerRevision && $source[2] === $compilerRevision,
         'Cargo.lock must resolve every compiler-owned package to the exact pin.',
     );
 }
+require_fact(
+    str_contains($cliTests, 'value["compilerCommit"], doriac::BUILD_COMMIT')
+        && preg_match('/REQUIRED_COMPILER_COMMIT[^\n]*[0-9a-f]{40}/', $cliTests) !== 1,
+    'CLI identity tests must follow the pinned compiler build identity without a copied SHA.',
+);
 
 foreach (['from_graph_source', 'CompilationContext', 'global_symbols', 'directive_semantic_tokens'] as $fact) {
     require_fact(str_contains($analysis, $fact), "analysis snapshot is missing {$fact}.");

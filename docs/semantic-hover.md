@@ -32,7 +32,7 @@ fallback.
 The lexical fallback describes the accepted Stage 30a callable grammar. Stage 30c
 semantic hovers use compiler metadata instead: structural function-typed bindings
 and parameters show their canonical semantic type and callback ownership contract;
-closure expressions show inferred invocation mode and checked effects together with
+closure expressions show inferred invocation mode and required checked effects together with
 owned or borrow-bound provenance, capture acquisition, invocation consumption, and
 escape classification. Capture occurrences show their compiler-resolved acquisition
 mode. Callable-value calls show the checked function signature where the existing
@@ -40,10 +40,16 @@ expression-hover route can identify the call. Authored effect order remains visi
 on source function types. A function value narrowed from `mixed` or a nullable
 binding shows the compiler-resolved structural function type at that use, while
 the declaration retains its authored `mixed` or nullable type. Arity, parameter
-types and ownership, invocation mode, return type, checked effects, and nullability
+types and ownership, invocation mode, return type, required checked effects, and nullability
 remain distinct; the server does not substitute a generic callable label. The
 server does not rediscover free variables, infer
 captures, or calculate lifetimes from text.
+
+Compiler-owned ambient I/O effects are supplementary runtime facts rather than
+source structural-function identity. Closure and callable hovers therefore show
+required source effects in the signature and list exact ambient I/O effects in a
+separate **Ambient I/O** section. The server does not derive that classification
+from an error's source spelling.
 
 The compiler publishes precise capture and callable diagnostics with safe capture
 fixes. Ordinary language-server analysis is target-neutral, so valid closures and
@@ -57,7 +63,8 @@ and operations being supported by the PHP backend; target-neutral analysis does
 not claim per-closure PHP compatibility. On a resolved `List<T>`, completion
 offers `map`, `filter`, and `reduce`, and call hover renders the compiler's
 concrete specialized callback and result types, selected readonly or writable
-repeatable access, checked effects, unchanged-source contract, and owned result.
+repeatable access, required checked effects, ambient I/O effects, unchanged-source
+contract, and owned result.
 The server consumes `ListAlgorithmCallInfo`; it does not infer callback effects
 or reconstruct an algorithm type checker. Other collection families do not
 receive these algorithms. PHP remains a secondary compatibility backend with
@@ -91,10 +98,20 @@ identities under `Doria\Std\Io`; short aliases such as `IoError` are neither gue
 offered. Because these declarations are compiler-known rather than source-backed, the
 server provides their contract documentation without inventing a definition location.
 
-Live diagnostics include uncovered checked effects such as `Doria\Std\Io\IoError` and
-`Doria\Std\Io\InvalidUtf8Error`. Ordinary reusable callables declare those effects
-explicitly. When the selected program entrypoint omits `throws`, the compiler infers
-its exact escaping set; the server does not perform inference or suppress E0631.
+The exact canonical `Doria\Std\Io\IoError` and
+`Doria\Std\Io\InvalidUtf8Error` effects are ambient. They remain catchable and use
+the checked runtime transport, but ordinary callables do not need to declare or
+catch them. Required nonambient effects still produce compiler-owned diagnostics
+when they are neither caught nor declared. When the selected program entrypoint
+omits `throws`, the compiler infers its exact escaping set; the server neither
+infers effects nor suppresses diagnostics.
+
+Builtin I/O hover keeps ambient effects out of the source signature. For example,
+`read_line(string $prompt = ""): ?string` is followed by the two exact ambient
+error identities as supplementary runtime information. A checked error may escape
+a source `finally` block and supersede a pending nonfatal outcome; a sibling catch
+on the same `try` does not catch that finalizer error, while an enclosing catch may.
+`E0632` is historical and reserved rather than a live editor diagnostic.
 `R1000` remains a runtime outcome for an error that escapes the entry point, so it is
 not published as an editor diagnostic.
 

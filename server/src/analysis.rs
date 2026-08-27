@@ -800,10 +800,11 @@ impl<'a> SnapshotBuilder<'a> {
             .into_iter()
             .filter(|(span, _)| span.source == self.source_id)
         {
+            let ambient = ambient_effect_documentation(&semantic.ambient_checked_effects);
             hovers.push(SemanticHover::new(
                 *span,
                 format!(
-                    "```doria\n{}\n```\n\nCanonical semantic function type.",
+                    "```doria\n{}\n```\n\nCanonical semantic function type.{ambient}",
                     display_function_type_with_effects(
                         &semantic.ty,
                         &semantic.authored_checked_effects,
@@ -911,18 +912,10 @@ impl<'a> SnapshotBuilder<'a> {
             let ownership = info.closure_ownership.get(&closure.closure_id);
             let signature = display_function_type_with_effects(
                 &closure.function_type,
-                &closure.inferred_checked_effects,
+                &closure.required_checked_effects,
             );
-            let effects = if closure.inferred_checked_effects.is_empty() {
-                "none".to_string()
-            } else {
-                closure
-                    .inferred_checked_effects
-                    .iter()
-                    .map(display_resolved_type)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
+            let effects = effect_list(&closure.required_checked_effects);
+            let ambient = ambient_effect_documentation(&closure.ambient_checked_effects);
             let captures = if closure.captures.is_empty() {
                 "none".to_string()
             } else {
@@ -963,7 +956,7 @@ impl<'a> SnapshotBuilder<'a> {
             hovers.push(SemanticHover::new(
                 closure_span,
                 format!(
-                    "```doria\n{signature}\n```\n\n**Inferred invocation mode:** `{}`\n\n**Inferred checked effects:** {effects}\n\n**Ownership:** {ownership_summary}\n\n**Invocation:** {invocation}\n\n**Escape:** {escape}\n\n**Captures:** {captures}{target_capabilities}",
+                    "```doria\n{signature}\n```\n\n**Inferred invocation mode:** `{}`\n\n**Required checked effects:** {effects}{ambient}\n\n**Ownership:** {ownership_summary}\n\n**Invocation:** {invocation}\n\n**Escape:** {escape}\n\n**Captures:** {captures}{target_capabilities}",
                     invocation_mode_name(closure.inferred_invocation_mode),
                 ),
             ));
@@ -1015,11 +1008,15 @@ impl<'a> SnapshotBuilder<'a> {
         {
             let call_span = *span;
             let target_capabilities = self.target_capabilities_for(call_span);
+            let ambient = ambient_effect_documentation(&call.ambient_checked_effects);
             hovers.push(SemanticHover::new(
                 call_span,
                 format!(
-                    "```doria\n{}\n```\n\nSemantically checked callable-value invocation returning `{}`.{target_capabilities}",
-                    display_function_type_with_effects(&call.function_type, &call.checked_effects),
+                    "```doria\n{}\n```\n\nSemantically checked callable-value invocation returning `{}`.{ambient}{target_capabilities}",
+                    display_function_type_with_effects(
+                        &call.function_type,
+                        &call.required_checked_effects,
+                    ),
                     display_resolved_type(&call.return_type),
                 ),
             ));
@@ -1059,10 +1056,12 @@ impl<'a> SnapshotBuilder<'a> {
                         &function.name,
                         TokenKind::Function,
                     );
+                    let mut documentation = phpdoc_before(self.text, function.span.start);
+                    self.append_callable_effect_documentation(&mut documentation, function.span);
                     let symbol = self.add_declaration_symbol(
                         selection_span,
                         function_signature(function, None),
-                        phpdoc_before(self.text, function.span.start),
+                        documentation,
                         SymbolKind::Plain,
                     );
                     self.record_callable_parameters(symbol, function);
@@ -1335,15 +1334,43 @@ impl<'a> SnapshotBuilder<'a> {
     fn collect_method(&mut self, class_name: &str, method: &FunctionDecl) {
         let selection_span =
             self.declaration_name_span(method.span, &method.name, TokenKind::Function);
+        let mut documentation = phpdoc_before(self.text, method.span.start);
+        self.append_callable_effect_documentation(&mut documentation, method.span);
         let symbol = self.add_declaration_symbol(
             selection_span,
             function_signature(method, Some(class_name)),
-            phpdoc_before(self.text, method.span.start),
+            documentation,
             SymbolKind::Plain,
         );
         self.record_callable_parameters(symbol, method);
         self.methods
             .insert((class_name.to_string(), method.name.clone()), symbol);
+    }
+
+    fn append_callable_effect_documentation(
+        &self,
+        documentation: &mut Option<String>,
+        declaration: Span,
+    ) {
+        let Some(effects) = self
+            .semantic_info
+            .and_then(|info| info.callable_effective_checked_effects.get(&declaration))
+        else {
+            return;
+        };
+        let profile = doriac::CheckedEffectProfile::classify(effects.iter().cloned());
+        let required = required_effect_documentation(&profile.required);
+        let ambient = ambient_effect_documentation(&profile.ambient);
+        if required.is_empty() && ambient.is_empty() {
+            return;
+        }
+        let effects = [required, ambient]
+            .into_iter()
+            .filter(|section| !section.is_empty())
+            .map(|section| section.trim().to_string())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        append_documentation(documentation, &effects);
     }
 
     fn add_declaration_symbol(
@@ -1742,7 +1769,7 @@ impl<'a> SnapshotBuilder<'a> {
                 finalizer.keyword_span,
                 "finally { ... }".to_string(),
                 Some(
-                    "Runs once after the protected block or selected catch. Checked errors may not escape this finalizer."
+                    "Runs once after the protected block or selected catch. Checked errors propagate beyond this construct; sibling catches do not consume finalizer errors."
                         .to_string(),
                 ),
                 SymbolKind::Plain,
@@ -1853,7 +1880,7 @@ impl<'a> SnapshotBuilder<'a> {
             finalizer.keyword_span,
             "finally { ... }".to_string(),
             Some(
-                "Runs exactly once when the attached control-flow construct leaves normally or through a structured transfer. Fatal panic bypasses it."
+                "Runs exactly once when the attached control-flow construct leaves normally or through a structured transfer. A checked error supersedes the pending nonfatal outcome and propagates outward; fatal panic bypasses the finalizer."
                     .to_string(),
             ),
             SymbolKind::Plain,
@@ -2668,8 +2695,10 @@ fn list_algorithm_completions(receiver: &ResolvedType) -> Option<Vec<SemanticCom
 
 fn list_algorithm_hover(algorithm: &ListAlgorithmCallInfo) -> CompilerKnownMethodHover {
     let receiver = display_resolved_type(&algorithm.receiver_type);
-    let callback =
-        display_function_type_with_effects(&algorithm.callback_type, &algorithm.checked_effects);
+    let callback = display_function_type_with_effects(
+        &algorithm.callback_type,
+        &algorithm.required_checked_effects,
+    );
     let result = display_resolved_type(&algorithm.result_type);
     let parameters = match algorithm.kind {
         ListAlgorithmKind::Map | ListAlgorithmKind::Filter => callback,
@@ -2688,16 +2717,8 @@ fn list_algorithm_hover(algorithm: &ListAlgorithmCallInfo) -> CompilerKnownMetho
         ListAlgorithmKind::Filter => "filter",
         ListAlgorithmKind::Reduce => "reduce",
     };
-    let effects = if algorithm.checked_effects.is_empty() {
-        "none".to_string()
-    } else {
-        algorithm
-            .checked_effects
-            .iter()
-            .map(display_resolved_type)
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
+    let effects = effect_list(&algorithm.required_checked_effects);
+    let ambient = ambient_effect_documentation(&algorithm.ambient_checked_effects);
     let (access, invocation) = match algorithm.callback_access {
         ListCallbackAccess::Readonly => ("readonly", "Readonly Repeatable"),
         ListCallbackAccess::Writable => ("writable", "Writable Repeatable"),
@@ -2705,7 +2726,7 @@ fn list_algorithm_hover(algorithm: &ListAlgorithmCallInfo) -> CompilerKnownMetho
     CompilerKnownMethodHover {
         signature: format!("{receiver}::{method}({parameters}): {result}"),
         documentation: format!(
-            "**Callback access:** {access}\n\n**Callback invocation:** {invocation}\n\n**Checked effects:** {effects}\n\n**Source:** Unchanged\n\n**Result:** Owned `{result}`"
+            "**Callback access:** {access}\n\n**Callback invocation:** {invocation}\n\n**Required checked effects:** {effects}{ambient}\n\n**Source:** Unchanged\n\n**Result:** Owned `{result}`"
         ),
     }
 }
@@ -3178,6 +3199,40 @@ fn display_function_type_with_effects(ty: &ResolvedType, effects: &[ResolvedType
         function.checked_effects = effects.to_vec();
     }
     display_resolved_type(&source_ordered)
+}
+
+fn effect_list(effects: &[ResolvedType]) -> String {
+    if effects.is_empty() {
+        "none".to_string()
+    } else {
+        effects
+            .iter()
+            .map(display_resolved_type)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+fn required_effect_documentation(effects: &[ResolvedType]) -> String {
+    if effects.is_empty() {
+        String::new()
+    } else {
+        format!("**Required checked effects:** {}", effect_list(effects))
+    }
+}
+
+fn ambient_effect_documentation(effects: &[ResolvedType]) -> String {
+    if effects.is_empty() {
+        return String::new();
+    }
+    let effects = effects
+        .iter()
+        .map(|effect| format!("- `{}`", display_resolved_type(effect)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "\n\n**Ambient I/O:**\n\n{effects}\n\nAmbient I/O uses checked runtime transport without requiring source `throws`."
+    )
 }
 
 fn closure_target_capabilities() -> &'static str {
@@ -4865,7 +4920,10 @@ function main(): void {}
         for expected in [
             "**Callback access:** writable",
             "**Callback invocation:** Writable Repeatable",
-            "**Checked effects:** Failure",
+            "**Required checked effects:** Failure",
+            "**Ambient I/O:**",
+            "Doria\\Std\\Io\\IoError",
+            "Doria\\Std\\Io\\InvalidUtf8Error",
             "**Source:** Unchanged",
             "**Result:** Owned `List<string>`",
         ] {
@@ -4886,7 +4944,72 @@ function main(): void {}
             "{}",
             reduce.markdown
         );
-        assert!(reduce.markdown.contains("**Checked effects:** none"));
+        assert!(reduce
+            .markdown
+            .contains("**Required checked effects:** none"));
+        assert!(reduce.markdown.contains("**Ambient I/O:**"));
+    }
+
+    #[test]
+    fn ambient_effect_hovers_preserve_source_signatures_and_runtime_behavior() {
+        let source = r#"function helper(): void
+{
+    echo "helper";
+}
+
+function explicit(): void throws Doria\Std\Io\IoError
+{
+    echo "explicit";
+}
+
+function main(): void
+{
+    let $callback = function (): void { echo "closure"; };
+    $callback( );
+    helper();
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("ambient-hover.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+
+        let helper = snapshot
+            .hover_at_offset(source.find("helper").expect("helper declaration"))
+            .expect("helper hover");
+        assert!(helper.markdown.contains("function helper(): void"));
+        assert!(!helper.markdown.contains("function helper(): void throws"));
+        assert!(helper.markdown.contains("**Ambient I/O:**"));
+        assert!(helper.markdown.contains("Doria\\Std\\Io\\IoError"));
+
+        let explicit = snapshot
+            .hover_at_offset(source.find("explicit").expect("explicit declaration"))
+            .expect("explicit hover");
+        assert!(explicit
+            .markdown
+            .contains("function explicit(): void throws Doria\\Std\\Io\\IoError"));
+        assert!(explicit.markdown.contains("**Ambient I/O:**"));
+
+        let closure_offset = source.find("function (): void").expect("closure");
+        let closure = snapshot
+            .hover_at_offset(closure_offset)
+            .expect("closure hover");
+        assert!(closure.markdown.contains("function(): void"));
+        assert!(!closure.markdown.contains("function(): void throws"));
+        assert!(closure
+            .markdown
+            .contains("**Required checked effects:** none"));
+        assert!(closure.markdown.contains("**Ambient I/O:**"));
+
+        let call_offset = source.find("$callback( );").expect("indirect call") + "$callback(".len();
+        let call = snapshot
+            .hover_at_offset(call_offset)
+            .expect("indirect call hover");
+        assert!(call.markdown.contains("function(): void"));
+        assert!(!call.markdown.contains("function(): void throws"));
+        assert!(call.markdown.contains("**Ambient I/O:**"));
     }
 
     #[test]
@@ -5400,7 +5523,8 @@ function handle(): void { try { fail(); } catch (Failure $caught) { echo $caught
             .hover_at_offset(source.find("main").expect("main declaration"))
             .expect("main declaration hover");
         assert!(hover.markdown.contains("function main(): void"));
-        assert!(!hover.markdown.contains("throws"));
+        assert!(!hover.markdown.contains("function main(): void throws"));
+        assert!(hover.markdown.contains("**Ambient I/O:**"));
     }
 
     #[test]

@@ -31,6 +31,13 @@ are next, while Stage 33 project integration remains scheduled. Top-level
 modifier. The grammar does not implement package visibility, capture, callable,
 or execution semantics.
 
+Compiler-backed hover separates required source `throws` effects from the exact
+ambient canonical I/O effects transported at runtime. Ambient I/O does not require
+source declarations, including in source `finally` blocks; escaping finalizer
+errors follow compiler-owned precedence rules. `E0632` is historical and reserved.
+The TextMate grammar performs presentation only and does not classify effects or
+analyze finalizer control flow.
+
 ## Install the VS Code extension
 
 From the repository root, package the extension with the shared target-based build command:

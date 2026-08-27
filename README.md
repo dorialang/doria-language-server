@@ -64,10 +64,15 @@ it does not reproduce those analyses. Moving values out of properties remains a
 separate unsupported operation.
 
 Checked-effect diagnostics also remain compiler-owned. Ordinary reusable
-callables declare escaping checked effects explicitly, while the selected
-entrypoint may omit `throws` and infer the checked effects that escape it. The
-language server neither infers effects nor suppresses E0631; it publishes the
-result from the pinned compiler.
+callables declare escaping nonambient checked effects explicitly, while the
+selected entrypoint may omit `throws` and infer the checked effects that escape
+it. The exact canonical `Doria\Std\Io\IoError` and
+`Doria\Std\Io\InvalidUtf8Error` identities are ambient: they retain checked
+runtime transport without requiring source `throws`. Hovers present ambient I/O
+separately from required effects. Source finalizers may propagate checked Errors
+to an outer context, and `E0632` is historical and reserved. The language server
+neither infers effects nor suppresses diagnostics; it publishes the result and
+structured effect facts from the pinned compiler.
 
 ## Layout
 

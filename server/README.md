@@ -21,6 +21,16 @@ compatibility backend with independent limitations. Stage 30 and Stage 31 are
 complete. Stage 32 attributes are next; Stage 33 project integration remains
 scheduled and unimplemented.
 
+The compiler classifies checked effects into source-required effects and ambient
+canonical I/O effects. Hovers keep source signatures focused on required
+`throws` contracts and describe the exact ambient
+`Doria\Std\Io\IoError`/`Doria\Std\Io\InvalidUtf8Error` runtime profile
+separately. Ambient I/O needs no source declaration, including inside source
+`finally` blocks. A checked error escaping a finalizer propagates under the
+compiler's finalizer-precedence rules; `E0632` is historical and reserved. The
+server consumes compiler-owned effect profiles and does not classify effects by
+source spelling.
+
 For namespace-aware tooling, each longest-matching workspace root receives a
 stable synthetic package and one compiler `CompilationSession`. Open documents
 become an in-memory partial build plan and are checked as one compiler graph.

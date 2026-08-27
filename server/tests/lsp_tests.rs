@@ -1067,22 +1067,34 @@ function main(): void
 }
 
 #[test]
-fn preserves_compiler_owned_checked_effect_diagnostics_for_ordinary_callables() {
-    let source = "function greet(): void { echo \"value\"; } function main(): void {}";
-    assert_lsp_diagnostic_matches_compiler("ordinary-uncovered-io.doria", source, "E0631");
+fn accepts_ambient_io_in_ordinary_helpers_without_source_contracts() {
+    for (name, source) in [
+        (
+            "echo-helper.doria",
+            "function greet(): void { echo \"value\"; } function main(): void { greet(); }",
+        ),
+        (
+            "read-helper.doria",
+            "function read(): ?string { return read_line(); } function main(): void { read(); }",
+        ),
+    ] {
+        let diagnostics = diagnostics_for_document(&format!("file:///{name}"), source);
+        assert!(diagnostics.is_empty(), "{name}: {diagnostics:#?}");
+    }
 }
 
 #[test]
-fn preserves_compiler_owned_checked_effect_diagnostics_for_incomplete_main_clauses() {
+fn accepts_explicit_ambient_throws_without_requiring_the_complete_ambient_set() {
     let source = r#"function main(): void throws Doria\Std\Io\IoError
 {
     let $line = read_line();
 }"#;
-    assert_lsp_diagnostic_matches_compiler("incomplete-main-effects.doria", source, "E0631");
+    let diagnostics = diagnostics_for_document("file:///explicit-ambient-effects.doria", source);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
 }
 
 #[test]
-fn publishes_lifecycle_and_finalizer_io_effect_diagnostics() {
+fn preserves_destructor_boundary_and_accepts_ambient_finalizers() {
     let destructor = diagnostics_for_document(
         "file:///destructor-output.doria",
         r#"class Log
@@ -1109,13 +1121,88 @@ fn publishes_lifecycle_and_finalizer_io_effect_diagnostics() {
 }
 "#,
     );
-    let finalizer_diagnostic = finalizer
+    assert!(finalizer.is_empty(), "{finalizer:#?}");
+}
+
+#[test]
+fn ambient_closures_and_list_callbacks_need_no_source_contract() {
+    let source = r#"function main(): void
+{
+    let $callback = function (): void { echo "closure"; };
+    $callback();
+    List<int> $values = [1, 2];
+    List<string> $mapped = $values->map(function (int $value): string {
+        echo "{$value}";
+        return "{$value}";
+    });
+}"#;
+    let diagnostics = diagnostics_for_document("file:///ambient-callbacks.doria", source);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn fallible_finalizers_flow_to_outer_context_but_not_same_try_catches() {
+    let error = r#"class CleanupError implements Error
+{
+    function __construct(string $message) {}
+}
+function cleanup(): void throws CleanupError
+{
+    throw new CleanupError("cleanup");
+}
+"#;
+    let handled = format!(
+        r#"{error}
+function main(): void
+{{
+    try {{
+        try {{ if (false) {{ cleanup(); }} }} catch (CleanupError) {{}} finally {{ cleanup(); }}
+    }} catch (CleanupError) {{}}
+}}
+"#
+    );
+    let diagnostics = diagnostics_for_document("file:///outer-finalizer-catch.doria", &handled);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+
+    let same_try_only = format!(
+        r#"{error}
+function run(): void
+{{
+    try {{ if (false) {{ cleanup(); }} }} catch (CleanupError) {{}} finally {{ cleanup(); }}
+}}
+function main(): void {{}}
+"#
+    );
+    assert_lsp_diagnostic_matches_compiler(
+        "same-try-finalizer-catch.doria",
+        &same_try_only,
+        "E0631",
+    );
+}
+
+#[test]
+fn missing_nonambient_callable_contract_remains_compiler_owned() {
+    let source = r#"class Failure implements Error
+{
+    function __construct(string $message) {}
+}
+function fail(): void throws Failure { throw new Failure("x"); }
+function caller(): void { fail(); }
+function main(): void {}
+"#;
+    assert_lsp_diagnostic_matches_compiler("required-effect.doria", source, "E0631");
+}
+
+#[test]
+fn retired_finalizer_diagnostic_remains_catalogued_but_is_never_published() {
+    assert!(doriac::diagnostics::CATALOGUED_CODES.contains(&"E0632"));
+    let diagnostics = diagnostics_for_document(
+        "file:///fallible-finalizer.doria",
+        r#"function main(): void { try {} finally { echo "cleanup"; } }"#,
+    );
+    assert!(diagnostics
         .iter()
-        .find(|diagnostic| diagnostic["code"] == "E0632")
-        .unwrap_or_else(|| panic!("missing finalizer checked-effect diagnostic: {finalizer:#?}"));
-    assert!(finalizer_diagnostic["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("Doria\\Std\\Io\\IoError")));
+        .all(|diagnostic| diagnostic["code"] != "E0632"));
 }
 
 #[test]
@@ -2346,15 +2433,5 @@ function cleanup(): void throws Failure, Doria\Std\Io\IoError
 "#
     );
     let diagnostics = diagnostics_for_document("file:///finally-error.doria", &finalizer);
-    let diagnostic = diagnostics
-        .iter()
-        .find(|diagnostic| diagnostic["code"] == "E0632")
-        .unwrap_or_else(|| panic!("missing finalizer diagnostic: {diagnostics:#?}"));
-    let finally_offset = finalizer.rfind("finally").expect("finally keyword");
-    let expected = byte_offset_to_position(&finalizer, finally_offset);
-    assert_eq!(diagnostic["range"]["start"]["line"], expected.line);
-    assert_eq!(
-        diagnostic["range"]["start"]["character"],
-        expected.character
-    );
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
 }
