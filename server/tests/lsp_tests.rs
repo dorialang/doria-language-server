@@ -156,6 +156,62 @@ fn namespace_naming_diagnostics_remain_compiler_owned_and_utf16_safe() {
 }
 
 #[test]
+fn stage32_attribute_diagnostics_remain_compiler_owned_and_utf16_safe() {
+    let schema = r#"// 😀 keeps UTF-16 conversion honest.
+#[Attribute]
+class Route { function __construct(string $path, int $status) {} }
+class Ordinary {}
+function runtimePath(): string { return "/runtime"; }
+"#;
+    let cases = [
+        ("E0686", "#[Missing] function target(): void {}"),
+        (
+            "E0687",
+            "#[Attribute] class Route {} class Ordinary {} #[Ordinary] function target(): void {}",
+        ),
+        ("E0688", "#[Attribute] function target(): void {}"),
+        (
+            "E0689",
+            "#[Attribute(repeatable: true)] class MarkerArguments {}",
+        ),
+        ("E0690", "#[Attribute] class GenericAttribute<T> {}"),
+        (
+            "E0692",
+            "#[Attribute] class CollectionAttribute { function __construct(List<int> $values) {} }",
+        ),
+        (
+            "E0516",
+            "#[Route(path: \"/\", unknown: 200)] function target(): void {}",
+        ),
+        (
+            "E0517",
+            "#[Route(path: \"/\", status: 200, status: 201)] function target(): void {}",
+        ),
+        ("E0518", "#[Route(path: \"/\")] function target(): void {}"),
+        (
+            "E0403",
+            "#[Route(path: 1, status: 200)] function target(): void {}",
+        ),
+        (
+            "E0693",
+            "#[Route(path: runtimePath(), status: 200)] function target(): void {}",
+        ),
+    ];
+
+    for (code, body) in cases {
+        let source = if matches!(
+            code,
+            "E0686" | "E0687" | "E0688" | "E0689" | "E0690" | "E0692"
+        ) {
+            format!("// 😀 keeps UTF-16 conversion honest.\n{body}\n")
+        } else {
+            format!("{schema}\n{body}\n")
+        };
+        assert_lsp_diagnostic_matches_compiler("stage32-attributes.doria", &source, code);
+    }
+}
+
+#[test]
 fn accepted_stage_30h_closure_routes_are_compiler_owned_and_target_neutral() {
     let cases = [
         (

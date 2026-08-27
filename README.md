@@ -43,9 +43,14 @@ compatibility backend and its unrelated limitations remain in force. Completion
 offers `map`, `filter`, and `reduce` only for resolved `List<T>` receivers, while
 semantic hover presents the compiler's concrete callback, result, access, and
 checked-effect facts. Diagnostics remain compiler-owned. Other collection
-algorithms are not included. Stage 31 is complete, Stage 32 attributes are next,
-and Stage 33 project integration remains scheduled but unimplemented. Ordinary
-analysis remains target-neutral, and highlighting remains presentation only.
+algorithms are not included. Stage 31 is complete. Stage 32 is complete. The server now
+uses compiler-owned typed attribute schemas and applications for scoped
+completion, named-argument completion, evaluated metadata hover, semantic
+tokens, navigation, references, and conservative rename. `#[Test]` records
+metadata but does not run tests; `#[PHPExport]` records metadata but does not
+activate a bridge. Attributes remain compile-time metadata with no runtime
+reflection. Stage 33 project integration is next. Ordinary analysis remains
+target-neutral, and highlighting remains presentation only.
 
 Namespace-aware tooling analyzes the currently open sources under each workspace
 root as one compiler-owned partial compilation graph. The compiler supplies

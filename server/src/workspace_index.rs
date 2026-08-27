@@ -1,9 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
+use doriac::ast::MemberAccess;
+use doriac::attributes::{AttributeClassIdentity, AttributeClassSchema, AttributeSchemaParameter};
 use doriac::names::{GlobalReferenceRole, GlobalSymbolId, GlobalSymbolKind, PackageIdentity};
 use doriac::source::Span;
 
-use crate::analysis::AnalysisSnapshot;
+use crate::analysis::{AnalysisSnapshot, AttributeParameterIdentity};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct AliasIdentity {
@@ -16,6 +18,7 @@ pub(crate) struct AliasIdentity {
 pub(crate) enum SymbolTarget {
     Canonical(GlobalSymbolId),
     Alias(AliasIdentity),
+    AttributeParameter(AttributeParameterIdentity),
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +45,7 @@ pub(crate) struct IndexedCompletion {
     pub(crate) label: String,
     pub(crate) kind: u32,
     pub(crate) detail: String,
+    pub(crate) documentation: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +65,16 @@ struct IndexedOccurrence {
     role: IndexedRole,
     source_spelling: String,
     alias: Option<AliasIdentity>,
+    global_role: Option<GlobalReferenceRole>,
+}
+
+#[derive(Debug, Clone)]
+struct IndexedAttributeParameterOccurrence {
+    uri: String,
+    span: Span,
+    identity: AttributeParameterIdentity,
+    name: String,
+    declaration: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +94,9 @@ pub(crate) struct OpenDocumentIndex {
     implicit_imports: HashSet<GlobalSymbolId>,
     incomplete_packages: HashSet<PackageIdentity>,
     declaration_hovers: HashMap<GlobalSymbolId, String>,
+    symbol_access: HashMap<GlobalSymbolId, MemberAccess>,
+    attribute_schemas: HashMap<AttributeClassIdentity, AttributeClassSchema>,
+    attribute_parameter_occurrences: Vec<IndexedAttributeParameterOccurrence>,
     documents: HashMap<String, DocumentSummary>,
 }
 
@@ -98,6 +115,15 @@ impl OpenDocumentIndex {
                 right.span.end,
             ))
         });
+        index
+            .attribute_parameter_occurrences
+            .sort_by(|left, right| {
+                (&left.uri, left.span.start, left.span.end).cmp(&(
+                    &right.uri,
+                    right.span.start,
+                    right.span.end,
+                ))
+            });
         index
     }
 
@@ -120,6 +146,9 @@ impl OpenDocumentIndex {
             self.symbol_kinds
                 .entry(declaration.id.clone())
                 .or_insert(declaration.kind);
+            self.symbol_access
+                .entry(declaration.id.clone())
+                .or_insert(declaration.access);
             summary.declarations.push((
                 declaration.id.clone(),
                 declaration.source_name.clone(),
@@ -137,6 +166,7 @@ impl OpenDocumentIndex {
                 role: IndexedRole::Declaration,
                 source_spelling: declaration.source_name.clone(),
                 alias: None,
+                global_role: None,
             });
         }
 
@@ -185,6 +215,7 @@ impl OpenDocumentIndex {
                         target: target.clone(),
                         alias: import.alias.clone(),
                     }),
+                    global_role: None,
                 });
             } else {
                 self.implicit_imports.insert(target.clone());
@@ -214,8 +245,27 @@ impl OpenDocumentIndex {
                 },
                 source_spelling: reference.source_spelling.clone(),
                 alias,
+                global_role: Some(reference.role),
             });
         }
+
+        for schema in &snapshot.attribute_info().schemas {
+            self.attribute_schemas
+                .entry(schema.identity.clone())
+                .or_insert_with(|| schema.clone());
+        }
+        self.attribute_parameter_occurrences.extend(
+            snapshot
+                .attribute_parameter_occurrences()
+                .iter()
+                .map(|occurrence| IndexedAttributeParameterOccurrence {
+                    uri: uri.to_string(),
+                    span: occurrence.span,
+                    identity: occurrence.identity.clone(),
+                    name: occurrence.name.clone(),
+                    declaration: occurrence.declaration,
+                }),
+        );
 
         if !facts.unresolved.is_empty() {
             self.incomplete_packages.insert(package);
@@ -225,6 +275,18 @@ impl OpenDocumentIndex {
     }
 
     pub(crate) fn target_at(&self, uri: &str, offset: usize) -> Option<SymbolTarget> {
+        if let Some(occurrence) = self
+            .attribute_parameter_occurrences
+            .iter()
+            .filter(|occurrence| {
+                occurrence.uri == uri && span_contains_offset(occurrence.span, offset)
+            })
+            .min_by_key(|occurrence| occurrence.span.end.saturating_sub(occurrence.span.start))
+        {
+            return Some(SymbolTarget::AttributeParameter(
+                occurrence.identity.clone(),
+            ));
+        }
         let occurrence = self
             .occurrences
             .iter()
@@ -240,6 +302,9 @@ impl OpenDocumentIndex {
                     ),
                 )
             })?;
+        if occurrence.global_role == Some(GlobalReferenceRole::AttributeClass) {
+            return Some(SymbolTarget::Canonical(occurrence.symbol.clone()));
+        }
         occurrence
             .alias
             .clone()
@@ -252,6 +317,20 @@ impl OpenDocumentIndex {
         target: &SymbolTarget,
         include_declaration: bool,
     ) -> Vec<IndexedLocation> {
+        if let SymbolTarget::AttributeParameter(identity) = target {
+            return self
+                .attribute_parameter_occurrences
+                .iter()
+                .filter(|occurrence| {
+                    occurrence.identity == *identity
+                        && (include_declaration || !occurrence.declaration)
+                })
+                .map(|occurrence| IndexedLocation {
+                    uri: occurrence.uri.clone(),
+                    span: occurrence.span,
+                })
+                .collect();
+        }
         self.occurrences
             .iter()
             .filter(|occurrence| match target {
@@ -264,6 +343,7 @@ impl OpenDocumentIndex {
                     occurrence.alias.as_ref() == Some(alias)
                         && (include_declaration || occurrence.role != IndexedRole::AliasDeclaration)
                 }
+                SymbolTarget::AttributeParameter(_) => false,
             })
             .map(|occurrence| IndexedLocation {
                 uri: occurrence.uri.clone(),
@@ -273,6 +353,16 @@ impl OpenDocumentIndex {
     }
 
     pub(crate) fn definition(&self, uri: &str, offset: usize) -> Option<IndexedLocation> {
+        if let Some(SymbolTarget::AttributeParameter(identity)) = self.target_at(uri, offset) {
+            return self
+                .attribute_parameter_occurrences
+                .iter()
+                .find(|candidate| candidate.identity == identity && candidate.declaration)
+                .map(|candidate| IndexedLocation {
+                    uri: candidate.uri.clone(),
+                    span: candidate.span,
+                });
+        }
         let occurrence = self
             .occurrences
             .iter()
@@ -282,6 +372,16 @@ impl OpenDocumentIndex {
             .min_by_key(|occurrence| occurrence.span.end.saturating_sub(occurrence.span.start))?;
         if occurrence.role == IndexedRole::AliasUse {
             let alias = occurrence.alias.as_ref()?;
+            if occurrence.global_role == Some(GlobalReferenceRole::AttributeClass) {
+                return self
+                    .occurrences
+                    .iter()
+                    .find(|candidate| {
+                        candidate.symbol == alias.target
+                            && candidate.role == IndexedRole::Declaration
+                    })
+                    .map(indexed_location);
+            }
             return self
                 .occurrences
                 .iter()
@@ -364,6 +464,33 @@ impl OpenDocumentIndex {
                 edits.dedup_by(|left, right| left.uri == right.uri && left.span == right.span);
                 (!edits.is_empty()).then_some(edits)
             }
+            SymbolTarget::AttributeParameter(identity) => {
+                let package = symbol_package(&identity.class)?;
+                if self.declaration_counts.get(&identity.class) != Some(&1)
+                    || self.incomplete_packages.contains(package)
+                {
+                    return None;
+                }
+                let mut edits = self
+                    .attribute_parameter_occurrences
+                    .iter()
+                    .filter(|occurrence| occurrence.identity == *identity)
+                    .map(|occurrence| IndexedEdit {
+                        uri: occurrence.uri.clone(),
+                        span: occurrence.span,
+                        replacement: new_name.to_string(),
+                    })
+                    .collect::<Vec<_>>();
+                edits.sort_by(|left, right| {
+                    (&left.uri, left.span.start, left.span.end).cmp(&(
+                        &right.uri,
+                        right.span.start,
+                        right.span.end,
+                    ))
+                });
+                edits.dedup_by(|left, right| left.uri == right.uri && left.span == right.span);
+                (!edits.is_empty()).then_some(edits)
+            }
         }
     }
 
@@ -372,6 +499,26 @@ impl OpenDocumentIndex {
         let (symbol, alias) = match target {
             SymbolTarget::Canonical(symbol) => (symbol, None),
             SymbolTarget::Alias(alias) => (alias.target, Some(alias.alias)),
+            SymbolTarget::AttributeParameter(identity) => {
+                let occurrence =
+                    self.attribute_parameter_occurrences
+                        .iter()
+                        .find(|occurrence| {
+                            occurrence.uri == uri && span_contains_offset(occurrence.span, offset)
+                        })?;
+                let schema = self
+                    .attribute_schemas
+                    .get(&AttributeClassIdentity::User(identity.class.clone()))?;
+                let parameter = schema.parameters.get(identity.index)?;
+                return Some(IndexedHover {
+                    span: occurrence.span,
+                    markdown: format!(
+                        "Attribute parameter `${}`: `{}`\n\nNamed attribute arguments bind to this constructor parameter by compiler identity.",
+                        occurrence.name,
+                        doriac::attributes::metadata_type_name(&parameter.ty)
+                    ),
+                });
+            }
         };
         let kind = self.symbol_kinds.get(&symbol)?;
         let occurrence = self.occurrences.iter().find(|occurrence| {
@@ -420,10 +567,14 @@ impl OpenDocumentIndex {
                     label: alias.clone(),
                     kind: completion_kind(kind),
                     detail,
+                    documentation: None,
                 },
             );
         }
         for (name, symbol, kind) in &document.compiler_known {
+            if *kind == GlobalSymbolKind::CompilerKnownAttribute {
+                continue;
+            }
             completions
                 .entry(name.clone())
                 .or_insert_with(|| completion(name.clone(), *kind, &symbol.qualified_name));
@@ -451,6 +602,110 @@ impl OpenDocumentIndex {
         let mut completions = completions.into_values().collect::<Vec<_>>();
         completions.sort_by(|left, right| left.label.cmp(&right.label));
         completions
+    }
+
+    pub(crate) fn attribute_completions(&self, uri: &str) -> Vec<IndexedCompletion> {
+        let Some(document) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let mut completions = HashMap::<String, IndexedCompletion>::new();
+        for name in doriac::names::COMPILER_KNOWN_ATTRIBUTES {
+            completions.insert(
+                name.to_string(),
+                IndexedCompletion {
+                    label: name.to_string(),
+                    kind: 7,
+                    detail: format!("Compiler-known attribute `{name}`"),
+                    documentation: Some(compiler_known_attribute_documentation(name)),
+                },
+            );
+        }
+        for schema in self.attribute_schemas.values() {
+            let Some(label) = self.attribute_source_name(document, schema) else {
+                continue;
+            };
+            completions
+                .entry(label.clone())
+                .or_insert_with(|| IndexedCompletion {
+                    label,
+                    kind: 7,
+                    detail: format!("Typed attribute `{}`", schema.canonical_name),
+                    documentation: Some(attribute_schema_completion_documentation(schema)),
+                });
+        }
+        let mut completions = completions.into_values().collect::<Vec<_>>();
+        completions.sort_by(|left, right| left.label.cmp(&right.label));
+        completions
+    }
+
+    pub(crate) fn attribute_argument_completions(
+        &self,
+        uri: &str,
+        source_name: &str,
+        positional_count: usize,
+        supplied_names: &HashSet<String>,
+        _named_started: bool,
+    ) -> Vec<IndexedCompletion> {
+        let Some(document) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let Some(schema) = self.attribute_schema_for_source_name(document, source_name) else {
+            return Vec::new();
+        };
+        schema
+            .parameters
+            .iter()
+            .filter(|parameter| parameter.index >= positional_count)
+            .filter(|parameter| !supplied_names.contains(&parameter.name))
+            .map(attribute_parameter_completion)
+            .collect()
+    }
+
+    fn attribute_source_name(
+        &self,
+        document: &DocumentSummary,
+        schema: &AttributeClassSchema,
+    ) -> Option<String> {
+        match &schema.identity {
+            AttributeClassIdentity::CompilerKnown(_) => Some(schema.canonical_name.clone()),
+            AttributeClassIdentity::User(symbol) => {
+                if self.symbol_access.get(symbol) == Some(&MemberAccess::Internal)
+                    && symbol_package(symbol) != Some(&document.package)
+                {
+                    return None;
+                }
+                if let Some((alias, _, _)) = document
+                    .imports
+                    .iter()
+                    .find(|(_, _, target)| target.as_ref() == Some(symbol))
+                {
+                    return Some(alias.clone());
+                }
+                if schema.package != document.package {
+                    return None;
+                }
+                let (namespace, short) = schema.canonical_name.rsplit_once('\\').map_or(
+                    (None, schema.canonical_name.as_str()),
+                    |(namespace, short)| (Some(namespace), short),
+                );
+                if namespace == document.namespace.as_deref() {
+                    Some(short.to_string())
+                } else {
+                    Some(schema.canonical_name.clone())
+                }
+            }
+        }
+    }
+
+    fn attribute_schema_for_source_name(
+        &self,
+        document: &DocumentSummary,
+        source_name: &str,
+    ) -> Option<&AttributeClassSchema> {
+        self.attribute_schemas.values().find(|schema| {
+            self.attribute_source_name(document, schema).as_deref() == Some(source_name)
+                || schema.canonical_name == source_name
+        })
     }
 }
 
@@ -499,6 +754,7 @@ fn kind_name(kind: GlobalSymbolKind) -> &'static str {
         GlobalSymbolKind::Constant => "Constant",
         GlobalSymbolKind::CompilerKnownType => "Compiler-Known Type",
         GlobalSymbolKind::CompilerKnownIntrinsic => "Language Intrinsic",
+        GlobalSymbolKind::CompilerKnownAttribute => "Compiler-Known Attribute",
     }
 }
 
@@ -510,6 +766,7 @@ fn completion_kind(kind: GlobalSymbolKind) -> u32 {
         GlobalSymbolKind::Function | GlobalSymbolKind::CompilerKnownIntrinsic => 3,
         GlobalSymbolKind::Constant => 21,
         GlobalSymbolKind::CompilerKnownType => 25,
+        GlobalSymbolKind::CompilerKnownAttribute => 7,
     }
 }
 
@@ -518,5 +775,58 @@ fn completion(label: String, kind: GlobalSymbolKind, qualified_name: &str) -> In
         label,
         kind: completion_kind(kind),
         detail: format!("{} `{qualified_name}`", kind_name(kind)),
+        documentation: None,
     }
+}
+
+fn attribute_parameter_completion(parameter: &AttributeSchemaParameter) -> IndexedCompletion {
+    let default = if parameter.has_default {
+        " (default available)"
+    } else {
+        ""
+    };
+    IndexedCompletion {
+        label: parameter.name.clone(),
+        kind: 5,
+        detail: format!(
+            "Attribute argument `{}`: `{}`{default}",
+            parameter.name,
+            doriac::attributes::metadata_type_name(&parameter.ty)
+        ),
+        documentation: None,
+    }
+}
+
+fn attribute_schema_completion_documentation(schema: &AttributeClassSchema) -> String {
+    let signature = schema
+        .parameters
+        .iter()
+        .map(|parameter| {
+            format!(
+                "{} ${}{}",
+                doriac::attributes::metadata_type_name(&parameter.ty),
+                parameter.name,
+                if parameter.has_default {
+                    " = default"
+                } else {
+                    ""
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "```doria\n#[{}({signature})]\n```\n\nMetadata only. Attribute constructors are not executed.",
+        schema.canonical_name
+    )
+}
+
+fn compiler_known_attribute_documentation(name: &str) -> String {
+    match name {
+        "Attribute" => "Marks a readonly, non-generic class as a typed attribute schema. Metadata only; constructors are not executed and no runtime reflection is provided.",
+        "Test" => "Compiler-known test metadata. Execution lands in Stage 33 Baton test orchestration.",
+        "PHPExport" => "Compiler-known bridge metadata. Bridge semantics land in Stage 41.",
+        _ => "Compiler-known attribute metadata.",
+    }
+    .to_string()
 }

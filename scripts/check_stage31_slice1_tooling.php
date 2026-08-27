@@ -172,8 +172,8 @@ foreach ([
 
 require_fact(
     str_contains($docs, 'Stage 31 is complete')
-        && str_contains($docs, 'Stage 32 attributes are next')
-        && str_contains($docs, 'Stage 33 project integration remains scheduled'),
+        && str_contains($docs, 'Stage 32 is complete')
+        && str_contains($docs, 'Stage 33 project integration is next'),
     'tooling documents must preserve the final Stage 31 status and boundaries.',
 );
 

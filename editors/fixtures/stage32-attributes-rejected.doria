@@ -1,0 +1,18 @@
+#[]
+function emptyGroup(): void
+{
+}
+
+#[Missing]
+function unknownAttribute(): void
+{
+}
+
+class Ordinary
+{
+}
+
+#[Ordinary]
+function unmarkedClass(): void
+{
+}

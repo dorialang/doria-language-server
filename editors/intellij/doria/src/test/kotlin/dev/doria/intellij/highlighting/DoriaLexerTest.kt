@@ -38,6 +38,23 @@ class DoriaLexerTest : TestCase() {
         assertEquals(DoriaTokenTypes.KEYWORD, tokens.first { it.text == "class" }.type)
     }
 
+    fun testStage32AttributePresentationPreservesHashCommentsAndMalformedBoundaries() {
+        val tokens = lex(
+            "#[Attribute] #[Acme\\Metadata\\Route(path: \"/\")] " +
+                "# comment\n# [Test]\n#[] function invalid(): void {}",
+        )
+
+        for (name in listOf("Attribute", "Acme", "Metadata", "Route")) {
+            assertEquals(DoriaTokenTypes.ATTRIBUTE_NAME, tokens.first { it.text == name }.type)
+        }
+        assertEquals(DoriaTokenTypes.ATTRIBUTE_ARGUMENT, tokens.first { it.text == "path" }.type)
+        assertEquals(2, tokens.count { it.type == DoriaTokenTypes.COMMENT })
+        assertFalse(
+            tokens.any { it.text.isNotEmpty() && it.type == DoriaTokenTypes.ATTRIBUTE_NAME && it.text == "]" },
+        )
+        assertFalse(tokens.any { it.type.toString().contains("PARSER") })
+    }
+
     fun testStage22TypeTestAndRejectedPhpOperator() {
         val tokens = lex("if (\$payload is string) { echo \$payload instanceof User; }")
 

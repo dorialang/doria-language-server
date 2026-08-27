@@ -6,6 +6,13 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Completed Stage 32 tooling by pinning the typed-attribute compiler and using
+  its schemas, canonical identities, bound constant values, and source spans for
+  scoped marker/schema and named-argument completion, typed metadata hover,
+  semantic tokens, cross-file navigation/references, and conservative class and
+  constructor-parameter rename. Added accepted/rejected shared fixtures and
+  presentation-only VS Code and IntelliJ regressions. `Test`, `PHPExport`,
+  processor execution, and runtime reflection remain deliberately inactive.
 - Aligned diagnostics and semantic hover with the ambient canonical I/O and
   fallible-finalizer correction. Canonical I/O retains checked runtime transport
   without source `throws`; required effects remain explicit, finalizer Errors

@@ -67,7 +67,7 @@ foreach ([
     'E0632',
     'historical',
     'Stage 31 is complete',
-    'Stage 32 attributes are next',
+    'Stage 32 is complete',
 ] as $fact) {
     ambient_require(str_contains($docs, $fact), "tooling documentation is missing {$fact}.");
 }

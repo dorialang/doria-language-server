@@ -1,0 +1,26 @@
+namespace Acme\Metadata;
+
+enum HttpMethod
+{
+    case Get;
+    case Post;
+}
+
+#[Attribute]
+class Route
+{
+    function __construct(
+        string $path,
+        HttpMethod $method = HttpMethod::Get,
+    ) {}
+}
+
+#[Route(path: "/posts", method: HttpMethod::Post)]
+#[Test]
+#[PHPExport]
+function handle(): void
+{
+}
+
+# ordinary hash comment
+# [Test] remains a comment because the delimiter is not adjacent.

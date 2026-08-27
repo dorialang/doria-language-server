@@ -68,9 +68,19 @@ contract, and owned result.
 The server consumes `ListAlgorithmCallInfo`; it does not infer callback effects
 or reconstruct an algorithm type checker. Other collection families do not
 receive these algorithms. PHP remains a secondary compatibility backend with
-independent limitations. Stage 31 is complete, Stage 32 attributes are next, and
-Stage 33 project integration remains scheduled. Semantically invalid closures
+independent limitations. Stage 31 is complete. Stage 32 is complete. Stage 33 project
+integration is next. Semantically invalid closures
 receive no execution capability block.
+
+Attribute application hover uses compiler-owned Stage 32 metadata. It shows the
+canonical attribute class, declaration target, constructor parameter types,
+evaluated constant values, and whether a value came from a default without
+exposing compiler IDs or host paths. Attribute-schema hover supplements the
+ordinary rich class hover with its constructor-shaped metadata contract.
+Compiler-known `Attribute`, `Test`, and `PHPExport` hovers state their metadata
+role and their deferred execution or bridge boundary. The server does not run
+attribute constructors, provide runtime reflection, or infer attribute facts
+from source spelling.
 
 Ownership hover text stays in Doria vocabulary: Owned Closure or Borrow-Bound Closure,
 Readonly/Writable/Owned taking capture, Readonly/Writable Repeatable or Consumes On
