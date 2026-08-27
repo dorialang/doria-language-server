@@ -103,6 +103,13 @@ pub(crate) struct AttributeParameterOccurrence {
     pub(crate) name: String,
     pub(crate) span: Span,
     pub(crate) declaration: bool,
+    pub(crate) spelling: AttributeParameterSpelling,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttributeParameterSpelling {
+    Variable,
+    Label,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -874,6 +881,7 @@ impl<'a> SnapshotBuilder<'a> {
                             if let Some(name) = &argument.name {
                                 self.attribute_semantic_tokens.push((name.span, VARIABLE));
                             }
+                            self.visit_expr(&argument.value, None, None);
                         }
                     }
                     if attribute.name.canonical() == "Attribute" {
@@ -948,6 +956,7 @@ impl<'a> SnapshotBuilder<'a> {
                                 name: parameter.name.clone(),
                                 span: occurrence.span,
                                 declaration: occurrence.role == OccurrenceRole::Declaration,
+                                spelling: AttributeParameterSpelling::Variable,
                             }),
                     );
                 } else {
@@ -957,6 +966,7 @@ impl<'a> SnapshotBuilder<'a> {
                             name: parameter.name.clone(),
                             span: name_span,
                             declaration: true,
+                            spelling: AttributeParameterSpelling::Variable,
                         });
                 }
             }
@@ -1009,6 +1019,7 @@ impl<'a> SnapshotBuilder<'a> {
                         name: parameter_name.clone(),
                         span: name_span,
                         declaration: false,
+                        spelling: AttributeParameterSpelling::Label,
                     });
             }
         }
@@ -4307,6 +4318,37 @@ function inspect(): void
                 "enum case at {span:?} must retain the enum-member token type"
             );
         }
+    }
+
+    #[test]
+    fn semantic_tokens_traverse_attribute_argument_values() {
+        let source = r#"enum HttpMethod { case Get; case Post; }
+#[Attribute]
+class Route
+{
+    function __construct(HttpMethod $method) {}
+}
+#[Route(method: HttpMethod::Post)]
+function main(): void {}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("attributes.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+        let tokens = snapshot.semantic_token_spans();
+        let value_start = source.rfind("HttpMethod::Post").unwrap();
+        let type_span = Span::new(value_start, value_start + "HttpMethod".len());
+        let case_start = value_start + "HttpMethod::".len();
+        let case_span = Span::new(case_start, case_start + "Post".len());
+
+        assert!(tokens
+            .iter()
+            .any(|(span, token_type)| *span == type_span && *token_type == 1));
+        assert!(tokens
+            .iter()
+            .any(|(span, token_type)| *span == case_span && *token_type == 2));
     }
 
     #[test]

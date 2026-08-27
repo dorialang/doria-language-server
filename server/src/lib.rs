@@ -1728,6 +1728,15 @@ fn attribute_completion_context(text: &str, offset: usize) -> Option<AttributeCo
         &mut named_started,
         false,
     );
+    if !matches!(
+        argument_tokens.as_slice(),
+        [] | [Token {
+            kind: TokenKind::Identifier(_),
+            ..
+        }]
+    ) {
+        return None;
+    }
     Some(AttributeCompletionContext::Arguments {
         attribute,
         positional_count,
@@ -5300,6 +5309,8 @@ function run(): int
         assert!(attribute_completion_context("# #[Route]", 10).is_none());
         assert!(attribute_completion_context("\"#[Route]\"", 10).is_none());
         assert!(attribute_completion_context("#[Route]", 8).is_none());
+        let value_prefix = "#[Route(method: HttpMethod::";
+        assert!(attribute_completion_context(value_prefix, value_prefix.len()).is_none());
         let context = attribute_completion_context(
             "#[Route(path: \"/posts\", ",
             "#[Route(path: \"/posts\", ".len(),
@@ -5390,6 +5401,35 @@ function main(): void {}
     }
 
     #[test]
+    fn stage32_attribute_values_retain_expression_completion() {
+        let uri = "file:///workspace/route.doria";
+        let source = r#"enum HttpMethod { case Get; case Post; }
+#[Attribute]
+class Route
+{
+    function __construct(HttpMethod $method) {}
+}
+#[Route(method: HttpMethod::Post)]
+function main(): void {}
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+
+        let offset = source.find("HttpMethod::Post").unwrap() + "HttpMethod::".len();
+        let completion = server.completion(Some(&params_at(uri, source, offset)));
+        let labels = completion["items"]
+            .as_array()
+            .expect("enum case completions inside attribute value")
+            .iter()
+            .filter_map(|item| item["label"].as_str().map(str::to_string))
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            labels,
+            HashSet::from(["Get".to_string(), "Post".to_string()])
+        );
+    }
+
+    #[test]
     fn stage32_hovers_navigation_references_and_rename_share_compiler_identities() {
         let root = "file:///workspace";
         let schema_uri = "file:///workspace/route.doria";
@@ -5455,6 +5495,12 @@ function main(): void {}
             Some(2)
         );
         assert_eq!(parameter_edits[app_uri].as_array().map(Vec::len), Some(1));
+        assert!(parameter_edits[schema_uri]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|edit| edit["newText"] == "$uri"));
+        assert_eq!(parameter_edits[app_uri][0]["newText"], "uri");
 
         for marker in ["Test", "PHPExport"] {
             let offset = app.find(marker).unwrap();

@@ -1712,7 +1712,7 @@ function check_stage30f_callable_alignment(): void
     foreach ($doriaSources as $source) {
         require_check(
             $source[1] === $requiredCompilerRevision && $source[2] === $requiredCompilerRevision,
-            'every Doria git package must resolve to the final Stage 31 compiler commit',
+            'every Doria git package must resolve to the pinned compiler commit',
         );
     }
     $fixtureText = read_text($fixture);

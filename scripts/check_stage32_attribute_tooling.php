@@ -23,7 +23,7 @@ function stage32_require(bool $condition, string $message): void
     }
 }
 
-$compilerCommit = '5adddf0d283f20f171444518e6f2d889ca59437f';
+$compilerCommit = '9735332b9c6ae776d7cf8b959e02fd70e313ea1a';
 $manifest = stage32_read($root . '/Cargo.toml');
 $lock = stage32_read($root . '/Cargo.lock');
 $analysis = stage32_read($root . '/server/src/analysis.rs');

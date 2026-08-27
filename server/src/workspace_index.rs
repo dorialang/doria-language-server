@@ -5,7 +5,7 @@ use doriac::attributes::{AttributeClassIdentity, AttributeClassSchema, Attribute
 use doriac::names::{GlobalReferenceRole, GlobalSymbolId, GlobalSymbolKind, PackageIdentity};
 use doriac::source::Span;
 
-use crate::analysis::{AnalysisSnapshot, AttributeParameterIdentity};
+use crate::analysis::{AnalysisSnapshot, AttributeParameterIdentity, AttributeParameterSpelling};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct AliasIdentity {
@@ -75,6 +75,7 @@ struct IndexedAttributeParameterOccurrence {
     identity: AttributeParameterIdentity,
     name: String,
     declaration: bool,
+    spelling: AttributeParameterSpelling,
 }
 
 #[derive(Debug, Clone)]
@@ -264,6 +265,7 @@ impl OpenDocumentIndex {
                     identity: occurrence.identity.clone(),
                     name: occurrence.name.clone(),
                     declaration: occurrence.declaration,
+                    spelling: occurrence.spelling,
                 }),
         );
 
@@ -478,7 +480,10 @@ impl OpenDocumentIndex {
                     .map(|occurrence| IndexedEdit {
                         uri: occurrence.uri.clone(),
                         span: occurrence.span,
-                        replacement: new_name.to_string(),
+                        replacement: match occurrence.spelling {
+                            AttributeParameterSpelling::Variable => format!("${new_name}"),
+                            AttributeParameterSpelling::Label => new_name.to_string(),
+                        },
                     })
                     .collect::<Vec<_>>();
                 edits.sort_by(|left, right| {
