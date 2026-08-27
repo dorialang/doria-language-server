@@ -15,8 +15,8 @@ internal object DoriaAutoloadNamespaceResolver {
         }
 
         return infer(
-            DoriaNamespaceSuggester.pathSegments(manifest.parent),
-            DoriaNamespaceSuggester.pathSegments(directory),
+            pathSegments(manifest.parent),
+            pathSegments(directory),
             mappings(source),
         )
     }
@@ -90,6 +90,9 @@ internal object DoriaAutoloadNamespaceResolver {
             .filter { it.isNotEmpty() && it != "." }
         return segments.takeIf { ".." !in it }
     }
+
+    private fun pathSegments(file: VirtualFile): List<String> =
+        file.path.split('/').filter(String::isNotEmpty)
 
     private fun List<String>.startsWith(prefix: List<String>): Boolean =
         size >= prefix.size && take(prefix.size) == prefix

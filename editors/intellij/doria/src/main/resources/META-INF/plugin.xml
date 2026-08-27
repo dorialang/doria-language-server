@@ -42,8 +42,6 @@
       language="doria"
       implementationClass="dev.doria.intellij.codestyle.DoriaFormattingModelBuilder" />
 
-    <moveFileHandler implementation="dev.doria.intellij.refactoring.DoriaMoveFileHandler" />
-
     <applicationConfigurable
       parentId="language"
       instance="dev.doria.intellij.settings.DoriaConfigurable"

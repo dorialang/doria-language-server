@@ -37,8 +37,6 @@ $intellijPluginXml = $root . '/editors/intellij/doria/src/main/resources/META-IN
 $intellijPluginIcon = $root . '/editors/intellij/doria/src/main/resources/META-INF/pluginIcon.svg';
 $intellijCreateClassAction = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/actions/DoriaCreateClassAction.kt';
 $intellijAutoloadNamespaceResolver = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/actions/DoriaAutoloadNamespaceResolver.kt';
-$intellijNamespaceSuggester = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/actions/DoriaNamespaceSuggester.kt';
-$intellijMoveFileHandler = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/refactoring/DoriaMoveFileHandler.kt';
 $intellijDeclarationTemplates = [
     'Class' => $root . '/editors/intellij/doria/src/main/resources/fileTemplates/internal/Doria Class.doria.ft',
     'Interface' => $root . '/editors/intellij/doria/src/main/resources/fileTemplates/internal/Doria Interface.doria.ft',
@@ -1376,13 +1374,11 @@ function check_lsp_completion_vocabulary(): void
 function check_intellij_class_name_vocabulary(): void
 {
     global $acceptedKeywords, $plannedKeywords, $primitiveTypes, $reservedTypes, $wordOperators, $rejectedKeywords;
-    global $intellijCreateClassAction, $intellijAutoloadNamespaceResolver, $intellijNamespaceSuggester;
-    global $intellijMoveFileHandler, $intellijDeclarationTemplates, $intellijPluginXml, $intellijBuildGradle;
+    global $intellijCreateClassAction, $intellijAutoloadNamespaceResolver;
+    global $intellijDeclarationTemplates, $intellijPluginXml, $intellijBuildGradle;
 
     $actionText = read_text($intellijCreateClassAction);
     $autoloadText = read_text($intellijAutoloadNamespaceResolver);
-    $namespaceText = read_text($intellijNamespaceSuggester);
-    $moveHandlerText = read_text($intellijMoveFileHandler);
     require_check(
         preg_match('/DORIA_RESERVED_NAME_SEGMENTS = setOf\((.*?)\n\s*\)/s', $actionText, $segmentMatches) === 1,
         'IntelliJ class workflow reserved-name vocabulary could not be found'
@@ -1450,20 +1446,18 @@ function check_intellij_class_name_vocabulary(): void
         'IntelliJ enum template must create a semantically non-empty Doria enum'
     );
     require_check(
-        str_contains($actionText, 'DoriaNamespaceSuggester.suggest(project, directory)')
-            && str_contains($namespaceText, 'FileTypeIndex.getFiles(DoriaFileType.INSTANCE')
-            && str_contains($namespaceText, 'DoriaLexer()')
-            && str_contains($namespaceText, 'inferNamespace'),
-        'IntelliJ class workflow must infer namespace suggestions from indexed Doria declarations through the shared lexer'
+        str_contains($actionText, 'DoriaAutoloadNamespaceResolver.suggest(directory.virtualFile)')
+            && !str_contains($actionText, 'DoriaNamespaceSuggester')
+            && !str_contains($autoloadText, 'DoriaLexer')
+            && !str_contains($autoloadText, 'FileTypeIndex'),
+        'IntelliJ class workflow must use structured Baton.toml namespace mappings without presentation-lexer semantic inference'
     );
     require_check(
         str_contains(read_text($intellijBuildGradle), "implementation 'org.tomlj:tomlj:")
             && str_contains($autoloadText, 'Toml.parse(source)')
             && str_contains($autoloadText, '"autoload" to "namespaces"')
-            && str_contains($autoloadText, '"autoload-dev" to "namespaces"')
-            && str_contains($namespaceText, 'configuredNamespace(directory)')
-            && str_contains($namespaceText, 'listOfNotNull(configured) + indexed.filterNot'),
-        'IntelliJ namespace inference must give structured Baton.toml autoload mappings precedence over observed source layout'
+            && str_contains($autoloadText, '"autoload-dev" to "namespaces"'),
+        'IntelliJ namespace inference must read structured Baton.toml autoload mappings'
     );
     require_check(
         str_contains($actionText, 'if (!template.supportsClassInheritance) return@buildString')
@@ -1471,13 +1465,10 @@ function check_intellij_class_name_vocabulary(): void
         'IntelliJ class workflow must restrict class inheritance controls to the class template'
     );
     require_check(
-        str_contains(read_text($intellijPluginXml), '<moveFileHandler implementation="dev.doria.intellij.refactoring.DoriaMoveFileHandler"')
-            && str_contains($moveHandlerText, 'DoriaNamespaceSuggester.configuredNamespace(moveDestination)')
-            && str_contains($moveHandlerText, 'DoriaNamespaceSuggester.inferNamespace(')
-            && str_contains($moveHandlerText, 'DoriaNamespaceSuggester.namespaceDeclaration(source)')
-            && str_contains($moveHandlerText, 'DoriaNamespaceSuggester.unambiguousSuggestion(file.project, moveDestination)')
-            && str_contains($moveHandlerText, 'documentManager.commitDocument(document)'),
-        'IntelliJ move refactoring must update Doria namespace declarations through the shared namespace model'
+        !str_contains(read_text($intellijPluginXml), '<moveFileHandler')
+            && !is_file(dirname($intellijCreateClassAction) . '/DoriaNamespaceSuggester.kt')
+            && !is_file(dirname(dirname($intellijCreateClassAction)) . '/refactoring/DoriaMoveFileHandler.kt'),
+        'IntelliJ must not rewrite namespaces during moves without compiler-owned reference retargeting'
     );
 }
 

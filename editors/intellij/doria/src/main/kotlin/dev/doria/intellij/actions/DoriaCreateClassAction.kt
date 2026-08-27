@@ -115,7 +115,7 @@ private class DoriaCreateClassDialog(
 ) : DialogWrapper(project, true) {
     private val classNameField = JBTextField(42)
     private val namespaceField = JComboBox(
-        DoriaNamespaceSuggester.suggest(project, directory).toTypedArray(),
+        listOfNotNull(DoriaAutoloadNamespaceResolver.suggest(directory.virtualFile)).toTypedArray(),
     ).apply {
         isEditable = true
     }
@@ -162,7 +162,7 @@ private class DoriaCreateClassDialog(
         setOKButtonText("OK")
         directoryField.isEditable = false
         classNameField.emptyText.text = "Type name"
-        namespaceField.toolTipText = "Namespace inferred from Baton.toml or nearby Doria source files"
+        namespaceField.toolTipText = "Namespace inferred from the nearest Baton.toml autoload mapping"
         fileNameField.emptyText.text = "TypeName.doria"
         parentField.emptyText.text = "Optional parent class"
         interfaceList.emptyText.text = "Choose interfaces to implement"
