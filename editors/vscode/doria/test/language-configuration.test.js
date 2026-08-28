@@ -14,11 +14,12 @@ test("delimiter Enter rules defer indentation text to VS Code settings", () => {
     ({ action }) => action.indent === "indentOutdent"
   );
 
-  assert.equal(delimiterRules.length, 4);
+  assert.equal(delimiterRules.length, 5);
   for (const rule of delimiterRules) {
+    const isBlockComment = rule.beforeText.startsWith("^\\s*/\\*");
     assert.equal(
       rule.action.appendText,
-      rule.beforeText.startsWith("^\\s*/\\*\\*") ? " * " : undefined
+      isBlockComment ? " * " : undefined
     );
   }
 });

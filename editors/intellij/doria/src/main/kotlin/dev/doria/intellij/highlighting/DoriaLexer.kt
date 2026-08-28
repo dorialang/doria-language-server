@@ -205,7 +205,9 @@ class DoriaLexer : LexerBase() {
         }
 
         val text = buffer.subSequence(tokenStart, tokenEnd).toString()
-        tokenType = if (isDocTypePosition()) {
+        tokenType = if (text in DOC_PARAMETER_MODIFIERS && isDocParameterModifierPosition()) {
+            DoriaTokenTypes.MODIFIER
+        } else if (isDocTypePosition()) {
             when (text) {
                 in PRIMITIVE_TYPES -> DoriaTokenTypes.PRIMITIVE_TYPE
                 in RESERVED_TYPES -> DoriaTokenTypes.RESERVED_TYPE
@@ -777,6 +779,23 @@ class DoriaLexer : LexerBase() {
         return tokenStart in typeRange
     }
 
+    private fun isDocParameterModifierPosition(): Boolean {
+        val tag = docTagBefore(tokenStart) ?: return false
+        if (tag.name != "param") return false
+
+        var cursor = tag.endOffset
+        while (cursor < tokenStart) {
+            while (cursor < tokenStart && buffer[cursor].isWhitespace()) cursor++
+            if (cursor == tokenStart) return true
+            if (!isIdentifierStart(buffer[cursor])) return false
+            val wordStart = cursor
+            cursor++
+            while (cursor < tokenStart && isIdentifierPart(buffer[cursor])) cursor++
+            if (buffer.subSequence(wordStart, cursor).toString() !in DOC_PARAMETER_MODIFIERS) return false
+        }
+        return cursor == tokenStart
+    }
+
     private fun isDocMethodStaticModifierPosition(): Boolean {
         val tag = docTagBefore(tokenStart) ?: return false
         if (tag.name != "method") {
@@ -832,6 +851,13 @@ class DoriaLexer : LexerBase() {
             cursor += "static".length
             while (cursor < lineEnd && buffer[cursor].isWhitespace()) {
                 cursor++
+            }
+        }
+        if (tagName == "param") {
+            while (true) {
+                val modifier = DOC_PARAMETER_MODIFIERS.firstOrNull { hasWordAt(cursor, it) } ?: break
+                cursor += modifier.length
+                while (cursor < lineEnd && buffer[cursor].isWhitespace()) cursor++
             }
         }
         if (cursor >= lineEnd) {
@@ -1148,6 +1174,7 @@ class DoriaLexer : LexerBase() {
             "extends",
             "implements",
         )
+        private val DOC_PARAMETER_MODIFIERS = setOf("internal", "take", "writable")
 
         private val STRICT_COMPARISON_OPERATORS = setOf("===", "!==")
         private val THREE_CHAR_OPERATORS =

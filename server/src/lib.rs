@@ -19,7 +19,10 @@ mod string_surface;
 mod workspace_graph;
 mod workspace_index;
 
-use analysis::{AnalysisSnapshot, SemanticCompletion};
+use analysis::{
+    documentation_comment_template, AnalysisSnapshot, ImportCandidate, SemanticCompletion,
+    SemanticImport,
+};
 use string_surface::{STRING_COMPANION_METHODS, STRING_PROPERTIES};
 use workspace_graph::{analyze_open_graph, OpenSource};
 use workspace_index::OpenDocumentIndex;
@@ -347,6 +350,11 @@ impl Server {
                     send_response(writer, id, self.signature_help(message.get("params")))?;
                 }
             }
+            "textDocument/onTypeFormatting" => {
+                if let Some(id) = id {
+                    send_response(writer, id, self.on_type_formatting(message.get("params")))?;
+                }
+            }
             "textDocument/codeAction" => {
                 if let Some(id) = id {
                     let actions = self.code_actions(message.get("params"));
@@ -407,6 +415,49 @@ impl Server {
         );
         self.reanalyze_documents();
         self.publish_all_diagnostics(writer)
+    }
+
+    fn on_type_formatting(&self, params: Option<&Value>) -> Value {
+        let Some(params) = params else {
+            return json!([]);
+        };
+        if params.get("ch").and_then(Value::as_str) != Some("\n") {
+            return json!([]);
+        }
+        let Some(uri) = params
+            .get("textDocument")
+            .and_then(|document| document.get("uri"))
+            .and_then(Value::as_str)
+        else {
+            return json!([]);
+        };
+        let Some(document) = self.documents.get(uri) else {
+            return json!([]);
+        };
+        let Some(line) = params
+            .get("position")
+            .and_then(|position| position.get("line"))
+            .and_then(Value::as_u64)
+        else {
+            return json!([]);
+        };
+        let Some(character) = params
+            .get("position")
+            .and_then(|position| position.get("character"))
+            .and_then(Value::as_u64)
+        else {
+            return json!([]);
+        };
+        let offset = position_to_byte_offset(&document.text, line as u32, character as u32);
+        documentation_comment_edits(&document.text, offset)
+            .into_iter()
+            .map(|edit| {
+                json!({
+                    "range": span_to_range(&document.text, edit.span),
+                    "newText": edit.new_text,
+                })
+            })
+            .collect()
     }
 
     fn did_change<W: Write>(
@@ -537,19 +588,7 @@ impl Server {
         let primary_uri = selected
             .and_then(|(_, label)| self.diagnostic_location_uri(uri, &label.source, label.span))
             .unwrap_or_else(|| uri.to_string());
-        let mut message = diagnostic.title.clone();
-        if let Some((_, label)) = selected.filter(|(_, label)| !label.message.is_empty()) {
-            message.push('\n');
-            message.push_str(&label.message);
-        }
-        if let Some(explanation) = &diagnostic.explanation {
-            message.push_str("\n\nWhy: ");
-            message.push_str(explanation);
-        }
-        for help in &diagnostic.helps {
-            message.push_str("\nHelp: ");
-            message.push_str(help);
-        }
+        let message = diagnostic_message(diagnostic);
         let text = self
             .documents
             .get(&primary_uri)
@@ -1035,17 +1074,49 @@ impl Server {
             return json!([]);
         };
 
-        Value::Array(
-            prepare_diagnostics(document.analysis.diagnostics())
-                .iter()
-                .flat_map(|diagnostic| {
-                    diagnostic
-                        .fixes
-                        .iter()
-                        .filter_map(|fix| self.graph_code_action(uri, diagnostic, fix))
-                })
-                .collect(),
-        )
+        let mut actions = prepare_diagnostics(document.analysis.diagnostics())
+            .iter()
+            .flat_map(|diagnostic| {
+                diagnostic
+                    .fixes
+                    .iter()
+                    .filter_map(|fix| self.graph_code_action(uri, diagnostic, fix))
+            })
+            .collect::<Vec<_>>();
+        if let Some(offset) = code_action_offset(params, &document.text) {
+            let mut import_candidates = document
+                .analysis
+                .import_candidate_at_offset(&document.source_identity, offset)
+                .into_iter()
+                .collect::<Vec<_>>();
+            if import_candidates.is_empty() {
+                if let Some(reference) = document.analysis.unresolved_short_import_at_offset(
+                    &document.text,
+                    &document.source_identity,
+                    offset,
+                ) {
+                    import_candidates.extend(
+                        self.document_index
+                            .import_candidates(uri, &reference.spelling, reference.role)
+                            .into_iter()
+                            .filter_map(|candidate| {
+                                document.analysis.import_candidate_for_target(
+                                    &document.source_identity,
+                                    candidate.target,
+                                    reference.span,
+                                    Some(candidate.class_like),
+                                )
+                            }),
+                    );
+                }
+            }
+            for candidate in import_candidates {
+                if let Some(action) = import_code_action(uri, document, &candidate) {
+                    actions.push(action);
+                }
+            }
+        }
+        Value::Array(actions)
     }
 
     fn configure_workspace_roots(&mut self, params: Option<&Value>) {
@@ -1259,6 +1330,298 @@ fn uri_is_within(uri: &str, root: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
+fn code_action_offset(params: Option<&Value>, text: &str) -> Option<usize> {
+    let start = params?.get("range")?.get("start")?;
+    Some(position_to_byte_offset(
+        text,
+        start.get("line")?.as_u64()? as u32,
+        start.get("character")?.as_u64()? as u32,
+    ))
+}
+
+fn import_code_action(
+    uri: &str,
+    document: &Document,
+    candidate: &ImportCandidate,
+) -> Option<Value> {
+    let mut imports = document
+        .analysis
+        .semantic_imports(&document.source_identity);
+    if candidate.requires_import {
+        imports.push(SemanticImport {
+            target: candidate.target.clone(),
+            alias: candidate.alias.clone(),
+            class_like: candidate.class_like,
+        });
+    }
+    sort_imports(&mut imports);
+    imports.dedup_by(|left, right| left.target == right.target && left.alias == right.alias);
+
+    let import_block = render_import_block(&imports, source_newline(&document.text));
+    let import_edit = import_section_edit(&document.text, &import_block)?;
+    let mut edits = Vec::new();
+    if document.text[candidate.reference_span.start..candidate.reference_span.end]
+        != candidate.alias
+    {
+        edits.push(json!({
+            "range": span_to_range(&document.text, candidate.reference_span),
+            "newText": candidate.alias,
+        }));
+    }
+    if document.text[import_edit.span.start..import_edit.span.end] != import_edit.new_text {
+        edits.push(json!({
+            "range": span_to_range(&document.text, import_edit.span),
+            "newText": import_edit.new_text,
+        }));
+    }
+
+    let mut changes = serde_json::Map::new();
+    changes.insert(uri.to_string(), Value::Array(edits));
+    Some(json!({
+        "title": format!("Use import for {}", candidate.target),
+        "kind": "quickfix",
+        "isPreferred": true,
+        "edit": {
+            "changes": changes,
+        },
+    }))
+}
+
+fn sort_imports(imports: &mut [SemanticImport]) {
+    imports.sort_by(|left, right| {
+        (!left.class_like)
+            .cmp(&!right.class_like)
+            .then_with(|| left.target.to_lowercase().cmp(&right.target.to_lowercase()))
+            .then_with(|| left.target.cmp(&right.target))
+            .then_with(|| left.alias.cmp(&right.alias))
+    });
+}
+
+fn render_import_block(imports: &[SemanticImport], newline: &str) -> String {
+    let mut lines = Vec::new();
+    let mut previous_class_like = imports.first().map(|import| import.class_like);
+    for import in imports {
+        if previous_class_like.is_some_and(|class_like| class_like != import.class_like) {
+            lines.push(String::new());
+        }
+        let final_segment = import.target.rsplit('\\').next().unwrap_or(&import.target);
+        if import.alias == final_segment {
+            lines.push(format!("use {};", import.target));
+        } else {
+            lines.push(format!("use {} as {};", import.target, import.alias));
+        }
+        previous_class_like = Some(import.class_like);
+    }
+    lines.join(newline)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ImportSectionEdit {
+    span: Span,
+    new_text: String,
+}
+
+fn import_section_edit(text: &str, import_block: &str) -> Option<ImportSectionEdit> {
+    let program = doriac::parse_source("import-action.doria", text.to_string()).ok()?;
+    let newline = source_newline(text);
+    if let (Some(first), Some(last)) = (program.imports.first(), program.imports.last()) {
+        if program.imports.windows(2).any(|pair| {
+            text[pair[0].span.end..pair[1].span.start]
+                .chars()
+                .any(|character| !character.is_whitespace())
+        }) {
+            return None;
+        }
+        let end = following_whitespace_end(text, last.span.end);
+        return Some(ImportSectionEdit {
+            span: Span::new(first.span.start, end),
+            new_text: format!("{import_block}{newline}{newline}"),
+        });
+    }
+
+    let start = program
+        .namespace
+        .as_ref()
+        .map_or(0, |namespace| namespace.semicolon_span.end);
+    let end = following_whitespace_end(text, start);
+    let prefix = if program.namespace.is_some() {
+        format!("{newline}{newline}")
+    } else {
+        String::new()
+    };
+    Some(ImportSectionEdit {
+        span: Span::new(start, end),
+        new_text: format!("{prefix}{import_block}{newline}{newline}"),
+    })
+}
+
+fn following_whitespace_end(text: &str, start: usize) -> usize {
+    text[start..]
+        .char_indices()
+        .find_map(|(relative, character)| (!character.is_whitespace()).then_some(start + relative))
+        .unwrap_or(text.len())
+}
+
+fn source_newline(text: &str) -> &str {
+    if text.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DocumentationCommentEdit {
+    span: Span,
+    new_text: String,
+}
+
+fn documentation_comment_edits(text: &str, offset: usize) -> Vec<DocumentationCommentEdit> {
+    let Some(trigger) = documentation_comment_trigger(text, offset) else {
+        return Vec::new();
+    };
+    let tags = if trigger.documentation {
+        documentation_comment_template(text, trigger.comment_start, offset)
+            .map(|template| template.tags)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+
+    if trigger.before_enter {
+        let replacement_end = same_line_comment_end(text, offset).unwrap_or(offset);
+        let mut lines = vec![trigger.opener.to_string(), format!("{} * ", trigger.indent)];
+        if !tags.is_empty() {
+            lines.push(format!("{} *", trigger.indent));
+            lines.extend(tags.iter().map(|tag| format!("{} * {tag}", trigger.indent)));
+        }
+        lines.push(format!("{} */", trigger.indent));
+        return vec![DocumentationCommentEdit {
+            span: Span::new(trigger.comment_start, replacement_end),
+            new_text: lines.join(newline),
+        }];
+    }
+
+    let mut edits = Vec::new();
+    if !trigger.current_line_has_star {
+        edits.push(DocumentationCommentEdit {
+            span: Span::new(offset, offset),
+            new_text: " * ".to_string(),
+        });
+    }
+    if let Some(close_start) = following_comment_close(text, offset) {
+        if !tags.is_empty() {
+            let mut inserted = vec![format!("{} *", trigger.indent)];
+            inserted.extend(tags.iter().map(|tag| format!("{} * {tag}", trigger.indent)));
+            edits.push(DocumentationCommentEdit {
+                span: Span::new(close_start, close_start),
+                new_text: format!("{}{newline}", inserted.join(newline)),
+            });
+        }
+    } else {
+        let mut inserted = Vec::new();
+        if !tags.is_empty() {
+            inserted.push(format!("{} *", trigger.indent));
+            inserted.extend(tags.iter().map(|tag| format!("{} * {tag}", trigger.indent)));
+        }
+        inserted.push(format!("{} */", trigger.indent));
+        edits.push(DocumentationCommentEdit {
+            span: Span::new(offset, offset),
+            new_text: format!("{newline}{}", inserted.join(newline)),
+        });
+    }
+    edits
+}
+
+#[derive(Debug)]
+struct DocumentationCommentTrigger<'a> {
+    comment_start: usize,
+    opener: &'a str,
+    indent: &'a str,
+    documentation: bool,
+    before_enter: bool,
+    current_line_has_star: bool,
+}
+
+fn documentation_comment_trigger(
+    text: &str,
+    offset: usize,
+) -> Option<DocumentationCommentTrigger<'_>> {
+    if offset > text.len() || !text.is_char_boundary(offset) {
+        return None;
+    }
+    let current_start = text[..offset].rfind('\n').map_or(0, |index| index + 1);
+    let current_prefix = &text[current_start..offset];
+    if let Some((indent, opener)) = comment_opener(current_prefix) {
+        return Some(DocumentationCommentTrigger {
+            comment_start: current_start + indent.len(),
+            opener,
+            indent,
+            documentation: opener == "/**",
+            before_enter: true,
+            current_line_has_star: false,
+        });
+    }
+
+    let previous_end = current_start.checked_sub(1)?;
+    let previous_start = text[..previous_end]
+        .rfind('\n')
+        .map_or(0, |index| index + 1);
+    let previous_line = text[previous_start..previous_end].trim_end_matches('\r');
+    let (indent, opener) = comment_opener(previous_line)?;
+    let current_trimmed = current_prefix.trim();
+    if !current_trimmed.is_empty() && current_trimmed != "*" {
+        return None;
+    }
+    Some(DocumentationCommentTrigger {
+        comment_start: previous_start + indent.len(),
+        opener,
+        indent,
+        documentation: opener == "/**",
+        before_enter: false,
+        current_line_has_star: current_trimmed == "*",
+    })
+}
+
+fn comment_opener(line: &str) -> Option<(&str, &str)> {
+    let indent_end = line.find(|character: char| !matches!(character, ' ' | '\t'))?;
+    let indent = &line[..indent_end];
+    let opener = line[indent_end..].trim_end();
+    matches!(opener, "/*" | "/**").then_some((indent, opener))
+}
+
+fn same_line_comment_end(text: &str, offset: usize) -> Option<usize> {
+    let line_end = text[offset..]
+        .find(['\r', '\n'])
+        .map_or(text.len(), |relative| offset + relative);
+    let suffix = &text[offset..line_end];
+    let leading = suffix.len() - suffix.trim_start().len();
+    let after_whitespace = &suffix[leading..];
+    after_whitespace
+        .strip_prefix("*/")
+        .filter(|rest| rest.trim().is_empty())
+        .map(|_| offset + leading + 2)
+}
+
+fn following_comment_close(text: &str, offset: usize) -> Option<usize> {
+    let mut line_start = text[offset..]
+        .find('\n')
+        .map(|relative| offset + relative + 1)?;
+    while line_start <= text.len() {
+        let line_end = text[line_start..]
+            .find('\n')
+            .map_or(text.len(), |relative| line_start + relative);
+        let line = text[line_start..line_end].trim_end_matches('\r');
+        if line.trim().is_empty() {
+            line_start = line_end.saturating_add(1);
+            continue;
+        }
+        return (line.trim() == "*/").then_some(line_start);
+    }
+    None
+}
+
 fn stable_hash(value: &str) -> u64 {
     value.bytes().fold(0xcbf29ce484222325, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
@@ -1304,6 +1667,9 @@ fn initialize_result() -> Value {
             "definitionProvider": true,
             "signatureHelpProvider": {
                 "triggerCharacters": ["(", ","]
+            },
+            "documentOnTypeFormattingProvider": {
+                "firstTriggerCharacter": "\n"
             },
             "referencesProvider": true,
             "renameProvider": true,
@@ -2307,19 +2673,7 @@ fn diagnostic_to_lsp(uri: &str, text: &str, diagnostic: &Diagnostic) -> Value {
         .find(|label| label.role == LabelRole::Primary)
         .or_else(|| diagnostic.labels.first());
     let primary_span = primary.map_or(diagnostic.span, |label| label.span);
-    let mut message = diagnostic.title.clone();
-    if let Some(primary) = primary.filter(|label| !label.message.is_empty()) {
-        message.push('\n');
-        message.push_str(&primary.message);
-    }
-    if let Some(explanation) = &diagnostic.explanation {
-        message.push_str("\n\nWhy: ");
-        message.push_str(explanation);
-    }
-    for help in &diagnostic.helps {
-        message.push_str("\nHelp: ");
-        message.push_str(help);
-    }
+    let message = diagnostic_message(diagnostic);
 
     let mut value = json!({
         "range": span_to_range(text, primary_span),
@@ -2391,6 +2745,44 @@ fn diagnostic_to_lsp(uri: &str, text: &str, diagnostic: &Diagnostic) -> Value {
         value["relatedInformation"] = Value::Array(related);
     }
     value
+}
+
+fn diagnostic_message(diagnostic: &Diagnostic) -> String {
+    let primary = diagnostic
+        .labels
+        .iter()
+        .find(|label| label.role == LabelRole::Primary)
+        .or_else(|| diagnostic.labels.first());
+    let mut message = diagnostic.title.clone();
+    if let Some(primary) = primary.filter(|label| !label.message.is_empty()) {
+        if diagnostic_text_is_equivalent(&message, &primary.message) {
+            message.clone_from(&primary.message);
+        } else {
+            message.push('\n');
+            message.push_str(&primary.message);
+        }
+    }
+    if let Some(explanation) = &diagnostic.explanation {
+        message.push_str("\n\nWhy: ");
+        message.push_str(explanation);
+    }
+    for help in &diagnostic.helps {
+        message.push_str("\nHelp: ");
+        message.push_str(help);
+    }
+    message
+}
+
+fn diagnostic_text_is_equivalent(left: &str, right: &str) -> bool {
+    fn normalized(text: &str) -> String {
+        text.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim_end_matches(['.', ':', ';'])
+            .to_lowercase()
+    }
+
+    normalized(left) == normalized(right)
 }
 
 fn lsp_severity(severity: DiagnosticSeverity) -> u8 {
@@ -2532,6 +2924,70 @@ mod tests {
             doriac::TOOLCHAIN_VERSION
         );
         assert_eq!(doriac::TOOLCHAIN_VERSION, "2026.03.1-canary");
+        assert_eq!(
+            initialize_result()["capabilities"]["documentOnTypeFormattingProvider"]
+                ["firstTriggerCharacter"],
+            "\n",
+        );
+    }
+
+    #[test]
+    fn documentation_comment_generation_uses_compiler_authored_signatures() {
+        let source = "/**\nfunction transform<T>(take Payload $payload, writable List<int> $items): ?Result<T> throws FirstError, SecondError {}\n";
+        let edits = documentation_comment_edits(source, 3);
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].span, Span::new(0, 3));
+        assert_eq!(
+            edits[0].new_text,
+            "/**\n * \n *\n * @template T\n * @param take Payload $payload\n * @param writable List<int> $items\n * @return ?Result<T>\n * @throws FirstError\n * @throws SecondError\n */",
+        );
+    }
+
+    #[test]
+    fn documentation_comment_generation_inserts_tags_after_the_summary_caret() {
+        let source = "/**\n * \n */\nfunction greet(string $name): string {}\n";
+        let offset = source.find(" * \n").expect("summary line") + 3;
+        let edits = documentation_comment_edits(source, offset);
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].span.start, source.find(" */").unwrap());
+        assert_eq!(
+            edits[0].new_text,
+            " *\n * @param string $name\n * @return string\n",
+        );
+    }
+
+    #[test]
+    fn ordinary_block_comment_generation_never_invents_documentation_tags() {
+        let source = "    /*\n    function greet(string $name): string {}\n";
+        let edits = documentation_comment_edits(source, 6);
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].new_text, "/*\n     * \n     */");
+    }
+
+    #[test]
+    fn on_type_formatting_serves_documentation_edits_for_open_documents() {
+        let uri = "file:///documentation.doria";
+        let source = "/**\n * \n */\nfunction greet(string $name): string {}\n";
+        let offset = source.find(" * \n").expect("summary line") + 3;
+        let position = byte_offset_to_position(source, offset);
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document::new(uri, source.to_string(), Some(1)),
+        );
+
+        let response = server.on_type_formatting(Some(&json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": position.line, "character": position.character },
+            "ch": "\n",
+            "options": { "tabSize": 4, "insertSpaces": true },
+        })));
+
+        assert_eq!(response.as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            response[0]["newText"],
+            " *\n * @param string $name\n * @return string\n",
+        );
     }
 
     fn completion_item(label: &str) -> Value {
@@ -3827,6 +4283,43 @@ function main(): void
     }
 
     #[test]
+    fn equivalent_diagnostic_title_and_primary_label_are_not_repeated() {
+        let diagnostic = Diagnostic::new(
+            "E0201",
+            "cannot write through readonly object path",
+            Span::new(0, 5),
+        )
+        .with_title("Cannot Write Through Readonly Object Path")
+        .with_label(
+            DiagnosticSource::Current,
+            Span::new(0, 5),
+            LabelRole::Primary,
+            "cannot write through readonly object path",
+        );
+
+        let lsp = diagnostic_to_lsp("file:///main.doria", "$this", &diagnostic);
+        assert_eq!(lsp["message"], "cannot write through readonly object path");
+        let mut server = Server::default();
+        server.documents.insert(
+            "file:///main.doria".to_string(),
+            Document::new("file:///main.doria", "$this".to_string(), Some(1)),
+        );
+        let graph_lsp = server.graph_diagnostic_to_lsp("file:///main.doria", &diagnostic);
+        assert_eq!(
+            graph_lsp["message"],
+            "cannot write through readonly object path"
+        );
+        assert!(diagnostic_text_is_equivalent(
+            "Cannot Write Through Readonly Object Path:",
+            "cannot   write through readonly object path."
+        ));
+        assert!(!diagnostic_text_is_equivalent(
+            "Cannot Write Through Readonly Object Path",
+            "the receiver is readonly"
+        ));
+    }
+
+    #[test]
     fn live_diagnostics_use_compiler_owned_duplicate_and_cause_grouping() {
         let uri = "file:///main.doria";
         let text = "$missing;\n$other;\n";
@@ -4514,6 +5007,229 @@ function relay(take Failure $failure): void throws Failure
                 "character": position.character,
             },
         })
+    }
+
+    fn code_action_params_at(uri: &str, source: &str, offset: usize) -> Value {
+        let position = params_at(uri, source, offset)["position"].clone();
+        json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": position,
+                "end": position,
+            },
+            "context": { "diagnostics": [] },
+        })
+    }
+
+    fn apply_workspace_edits(source: &str, action: &Value, uri: &str) -> String {
+        let mut edits = action["edit"]["changes"][uri]
+            .as_array()
+            .expect("workspace edits")
+            .iter()
+            .map(|edit| {
+                let range = &edit["range"];
+                let start = position_to_byte_offset(
+                    source,
+                    range["start"]["line"].as_u64().unwrap() as u32,
+                    range["start"]["character"].as_u64().unwrap() as u32,
+                );
+                let end = position_to_byte_offset(
+                    source,
+                    range["end"]["line"].as_u64().unwrap() as u32,
+                    range["end"]["character"].as_u64().unwrap() as u32,
+                );
+                (start, end, edit["newText"].as_str().unwrap().to_string())
+            })
+            .collect::<Vec<_>>();
+        edits.sort_by_key(|(start, end, _)| std::cmp::Reverse((*start, *end)));
+
+        let mut result = source.to_string();
+        for (start, end, replacement) in edits {
+            result.replace_range(start..end, &replacement);
+        }
+        result
+    }
+
+    #[test]
+    fn import_code_action_shortens_qualified_names_and_groups_sorted_imports() {
+        let uri = "file:///workspace/app.doria";
+        let source = r#"namespace App\Core;
+
+use Vendor\zeta;
+use Vendor\Zebra;
+
+function run(Vendor\Render\WindowStyles $styles, Zebra $z): void
+{
+    zeta();
+}
+"#;
+        let offset = source.find("Vendor\\Render\\WindowStyles").unwrap() + 8;
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document::new(uri, source.to_string(), Some(1)),
+        );
+
+        let actions = server.code_actions(Some(&code_action_params_at(uri, source, offset)));
+        let action = actions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|action| action["title"] == "Use import for Vendor\\Render\\WindowStyles")
+            .expect("qualified type import action");
+        let updated = apply_workspace_edits(source, action, uri);
+
+        assert_eq!(
+            updated,
+            r#"namespace App\Core;
+
+use Vendor\Render\WindowStyles;
+use Vendor\Zebra;
+
+use Vendor\zeta;
+
+function run(WindowStyles $styles, Zebra $z): void
+{
+    zeta();
+}
+"#
+        );
+    }
+
+    #[test]
+    fn import_code_action_reuses_an_existing_alias_without_duplicating_it() {
+        let uri = "file:///workspace/app.doria";
+        let source = "namespace App;\n\nuse Vendor\\Render\\WindowStyles as Styles;\n\nfunction run(Vendor\\Render\\WindowStyles $styles): void {}\n";
+        let offset = source.rfind("Vendor\\Render\\WindowStyles").unwrap() + 8;
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document::new(uri, source.to_string(), Some(1)),
+        );
+
+        let actions = server.code_actions(Some(&code_action_params_at(uri, source, offset)));
+        let action = actions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|action| action["title"] == "Use import for Vendor\\Render\\WindowStyles")
+            .expect("existing alias action");
+        let updated = apply_workspace_edits(source, action, uri);
+
+        assert_eq!(
+            updated.matches("use Vendor\\Render\\WindowStyles").count(),
+            1
+        );
+        assert!(updated.contains("function run(Styles $styles): void"));
+    }
+
+    #[test]
+    fn import_code_action_resolves_short_names_from_compiler_workspace_symbols() {
+        let declaration_uri = "file:///workspace/src/Rendering/WindowStyles.doria";
+        let consumer_uri = "file:///workspace/src/Core/Application.doria";
+        let declaration = "namespace Doria\\Tui\\Rendering;\nclass WindowStyles {}\n";
+        let consumer = "namespace Doria\\Tui\\Core;\n\nclass Application\n{\n    function loadStyle(WindowStyles $styles): void {}\n}\n";
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, declaration_uri, declaration);
+        open_stage31_document(&mut server, consumer_uri, consumer);
+        let offset = consumer.find("WindowStyles").unwrap() + 3;
+
+        let actions =
+            server.code_actions(Some(&code_action_params_at(consumer_uri, consumer, offset)));
+        let action = actions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|action| action["title"] == "Use import for Doria\\Tui\\Rendering\\WindowStyles")
+            .expect("short-name workspace import action");
+        let updated = apply_workspace_edits(consumer, action, consumer_uri);
+
+        assert!(updated.contains("use Doria\\Tui\\Rendering\\WindowStyles;"));
+        assert_eq!(updated.matches("WindowStyles $styles").count(), 1);
+    }
+
+    #[test]
+    fn import_code_action_exposes_ambiguous_short_names_as_explicit_choices() {
+        let consumer_uri = "file:///workspace/src/App.doria";
+        let consumer = "namespace App;\nfunction render(Widget $widget): void {}\n";
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(
+            &mut server,
+            "file:///workspace/src/First.doria",
+            "namespace First; class Widget {}",
+        );
+        open_stage31_document(
+            &mut server,
+            "file:///workspace/src/Second.doria",
+            "namespace Second; class Widget {}",
+        );
+        open_stage31_document(&mut server, consumer_uri, consumer);
+        let offset = consumer.find("Widget").unwrap() + 2;
+
+        let actions =
+            server.code_actions(Some(&code_action_params_at(consumer_uri, consumer, offset)));
+        let titles = actions
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|action| action["title"].as_str())
+            .filter(|title| title.starts_with("Use import for "))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            titles,
+            vec![
+                "Use import for First\\Widget",
+                "Use import for Second\\Widget"
+            ]
+        );
+    }
+
+    #[test]
+    fn import_code_action_declines_alias_collisions_and_interleaved_comments() {
+        let collision_uri = "file:///workspace/collision.doria";
+        let collision = "namespace App;\n\nuse Other\\WindowStyles;\n\nfunction run(Vendor\\WindowStyles $styles, WindowStyles $other): void {}\n";
+        let collision_offset = collision.find("Vendor\\WindowStyles").unwrap() + 4;
+        let mut server = Server::default();
+        server.documents.insert(
+            collision_uri.to_string(),
+            Document::new(collision_uri, collision.to_string(), Some(1)),
+        );
+        let collision_actions = server.code_actions(Some(&code_action_params_at(
+            collision_uri,
+            collision,
+            collision_offset,
+        )));
+        assert!(!collision_actions
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| { action["title"] == "Use import for Vendor\\WindowStyles" }));
+
+        let comment_uri = "file:///workspace/comment.doria";
+        let comment = "use Vendor\\Zebra;\n// Keep this grouping note.\nuse Vendor\\zeta;\n\nfunction run(Vendor\\WindowStyles $styles): void {}\n";
+        let comment_offset = comment.find("Vendor\\WindowStyles").unwrap() + 4;
+        server.documents.insert(
+            comment_uri.to_string(),
+            Document::new(comment_uri, comment.to_string(), Some(1)),
+        );
+        let comment_actions = server.code_actions(Some(&code_action_params_at(
+            comment_uri,
+            comment,
+            comment_offset,
+        )));
+        assert!(!comment_actions
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| { action["title"] == "Use import for Vendor\\WindowStyles" }));
+    }
+
+    #[test]
+    fn import_section_edit_preserves_crlf_line_endings() {
+        let source = "namespace App;\r\n\r\nfunction run(): void {}\r\n";
+        let edit =
+            import_section_edit(source, "use Vendor\\Window;").expect("namespace import insertion");
+        assert_eq!(edit.new_text, "\r\n\r\nuse Vendor\\Window;\r\n\r\n");
     }
 
     #[test]

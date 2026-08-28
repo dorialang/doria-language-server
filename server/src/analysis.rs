@@ -11,10 +11,13 @@ use doriac::attributes::{
     AttributeApplication, AttributeClassIdentity, AttributeClassSchema, AttributeSemanticInfo,
     AttributeTarget, AttributeValue, AttributeValueKind,
 };
-use doriac::diagnostics::{Diagnostic, DiagnosticSeverity};
+use doriac::diagnostics::{Diagnostic, DiagnosticSeverity, LabelRole};
 use doriac::enums::{EnumBackingType, EnumBackingValue};
 use doriac::lexer::{Token, TokenKind};
-use doriac::names::{CompilationContext, GlobalSymbolFacts, GlobalSymbolId};
+use doriac::names::{
+    CompilationContext, GlobalReferenceRole, GlobalSymbolFacts, GlobalSymbolId, GlobalSymbolKind,
+    SourceIdentity,
+};
 use doriac::ownership::{
     CaptureAcquisitionKind, ClosureBorrowRoot, ClosureEscapeClassification, ClosureValueProvenance,
     InvocationConsumption,
@@ -36,6 +39,186 @@ pub(crate) struct SemanticHover {
     pub(crate) span: Span,
     pub(crate) markdown: String,
     priority: SemanticHoverPriority,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DocumentationCommentTemplate {
+    pub(crate) tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImportCandidate {
+    pub(crate) target: String,
+    pub(crate) alias: String,
+    pub(crate) reference_span: Span,
+    pub(crate) requires_import: bool,
+    pub(crate) class_like: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SemanticImport {
+    pub(crate) target: String,
+    pub(crate) alias: String,
+    pub(crate) class_like: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnresolvedImportReference {
+    pub(crate) spelling: String,
+    pub(crate) span: Span,
+    pub(crate) role: GlobalReferenceRole,
+}
+
+pub(crate) fn documentation_comment_template(
+    text: &str,
+    comment_start: usize,
+    cursor_offset: usize,
+) -> Option<DocumentationCommentTemplate> {
+    let recovered = recover_unclosed_comment(text, comment_start, cursor_offset)?;
+    let program = doriac::parse_source("documentation-comment.doria", recovered).ok()?;
+    documentation_targets(&program)
+        .into_iter()
+        .filter(|target| target.start >= cursor_offset)
+        .min_by_key(|target| target.start)
+        .map(|target| DocumentationCommentTemplate { tags: target.tags })
+}
+
+fn recover_unclosed_comment(
+    text: &str,
+    comment_start: usize,
+    cursor_offset: usize,
+) -> Option<String> {
+    if comment_start > cursor_offset || cursor_offset > text.len() {
+        return None;
+    }
+    if text[comment_start..].contains("*/") {
+        return Some(text.to_string());
+    }
+
+    let mut recovered = text.as_bytes().to_vec();
+    for byte in &mut recovered[comment_start..cursor_offset] {
+        if *byte != b'\n' && *byte != b'\r' {
+            *byte = b' ';
+        }
+    }
+    String::from_utf8(recovered).ok()
+}
+
+#[derive(Debug)]
+struct DocumentationTarget {
+    start: usize,
+    tags: Vec<String>,
+}
+
+fn documentation_targets(program: &Program) -> Vec<DocumentationTarget> {
+    let mut targets = Vec::new();
+    for item in &program.items {
+        match item {
+            Item::Function(function) => targets.push(function_documentation_target(function)),
+            Item::Class(class) => {
+                targets.push(DocumentationTarget {
+                    start: class.span.start,
+                    tags: template_tags(&class.type_params),
+                });
+                member_documentation_targets(&class.members, &mut targets);
+            }
+            Item::Trait(trait_decl) => {
+                targets.push(DocumentationTarget {
+                    start: trait_decl.span.start,
+                    tags: Vec::new(),
+                });
+                member_documentation_targets(&trait_decl.members, &mut targets);
+            }
+            Item::Enum(enum_decl) => targets.push(DocumentationTarget {
+                start: enum_decl.span.start,
+                tags: template_tags(&enum_decl.type_params),
+            }),
+            Item::Interface(interface) => targets.push(DocumentationTarget {
+                start: interface.span.start,
+                tags: Vec::new(),
+            }),
+            Item::Constant(constant) => targets.push(DocumentationTarget {
+                start: constant.span.start,
+                tags: constant
+                    .ty
+                    .as_ref()
+                    .map(|ty| vec![format!("@var {ty}")])
+                    .unwrap_or_default(),
+            }),
+            Item::Statement(_) => {}
+        }
+    }
+    targets
+}
+
+fn member_documentation_targets(members: &[ClassMember], targets: &mut Vec<DocumentationTarget>) {
+    for member in members {
+        match member {
+            ClassMember::Method(function) => {
+                targets.push(function_documentation_target(function));
+            }
+            ClassMember::Property(property) => targets.push(DocumentationTarget {
+                start: property.span.start,
+                tags: vec![format!("@var {}", property.ty)],
+            }),
+            ClassMember::Constant(constant) => targets.push(DocumentationTarget {
+                start: constant.span.start,
+                tags: constant
+                    .ty
+                    .as_ref()
+                    .map(|ty| vec![format!("@var {ty}")])
+                    .unwrap_or_default(),
+            }),
+        }
+    }
+}
+
+fn function_documentation_target(function: &FunctionDecl) -> DocumentationTarget {
+    let mut tags = template_tags(&function.type_params);
+    tags.extend(
+        function
+            .params
+            .iter()
+            .map(|parameter| format!("@param {}", documentation_parameter_signature(parameter))),
+    );
+    if let Some(return_type) = &function.return_type {
+        tags.push(format!("@return {return_type}"));
+    }
+    if let Some(throws) = &function.throws {
+        tags.extend(
+            throws
+                .entries
+                .iter()
+                .map(|entry| format!("@throws {}", entry.ty)),
+        );
+    }
+    DocumentationTarget {
+        start: function.span.start,
+        tags,
+    }
+}
+
+fn template_tags(parameters: &[doriac::ast::TypeParamDecl]) -> Vec<String> {
+    parameters
+        .iter()
+        .map(|parameter| format!("@template {}", parameter.name))
+        .collect()
+}
+
+fn documentation_parameter_signature(parameter: &Param) -> String {
+    let mut parts = Vec::new();
+    if matches!(parameter.promoted_access, Some(MemberAccess::Internal)) {
+        parts.push("internal".to_string());
+    }
+    if parameter.take {
+        parts.push("take".to_string());
+    }
+    if parameter.writable {
+        parts.push("writable".to_string());
+    }
+    parts.push(parameter.ty.to_string());
+    parts.push(format!("${}", parameter.name));
+    parts.join(" ")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -280,6 +463,207 @@ impl AnalysisSnapshot {
 
     pub(crate) fn global_symbols(&self) -> &GlobalSymbolFacts {
         &self.global_symbols
+    }
+
+    pub(crate) fn import_candidate_at_offset(
+        &self,
+        source: &SourceIdentity,
+        offset: usize,
+    ) -> Option<ImportCandidate> {
+        let resolved = self
+            .global_symbols
+            .references
+            .iter()
+            .filter(|reference| {
+                reference.source_identity == *source
+                    && importable_reference_role(reference.role)
+                    && reference.source_spelling.contains('\\')
+                    && span_contains(reference.source_span, offset)
+            })
+            .map(|reference| {
+                (
+                    reference.symbol_id.qualified_name.clone(),
+                    reference.source_span,
+                )
+            });
+        let unresolved = self
+            .global_symbols
+            .unresolved
+            .iter()
+            .filter(|reference| {
+                reference.source_identity == *source
+                    && importable_reference_role(reference.role)
+                    && reference.source_spelling.contains('\\')
+                    && span_contains(reference.source_span, offset)
+            })
+            .map(|reference| (reference.source_spelling.clone(), reference.source_span));
+        let (target, reference_span) = resolved
+            .chain(unresolved)
+            .min_by_key(|(_, span)| span.end.saturating_sub(span.start))?;
+
+        self.import_candidate_for_target(source, target, reference_span, None)
+    }
+
+    pub(crate) fn unresolved_short_import_at_offset(
+        &self,
+        text: &str,
+        source: &SourceIdentity,
+        offset: usize,
+    ) -> Option<UnresolvedImportReference> {
+        if let Some(reference) = self
+            .global_symbols
+            .unresolved
+            .iter()
+            .filter(|reference| {
+                reference.source_identity == *source
+                    && importable_reference_role(reference.role)
+                    && !reference.source_spelling.contains('\\')
+                    && span_contains(reference.source_span, offset)
+            })
+            .min_by_key(|reference| {
+                reference
+                    .source_span
+                    .end
+                    .saturating_sub(reference.source_span.start)
+            })
+            .map(|reference| UnresolvedImportReference {
+                spelling: reference.source_spelling.clone(),
+                span: reference.source_span,
+                role: reference.role,
+            })
+        {
+            return Some(reference);
+        }
+
+        let diagnostic = self.diagnostics.iter().find(|diagnostic| {
+            unresolved_import_role(diagnostic.code).is_some()
+                && (diagnostic
+                    .labels
+                    .iter()
+                    .find(|label| label.role == LabelRole::Primary)
+                    .is_some_and(|label| span_contains(label.span, offset))
+                    || (diagnostic.labels.is_empty() && span_contains(diagnostic.span, offset)))
+        })?;
+        let role = unresolved_import_role(diagnostic.code)?;
+        let token = doriac::lex_source("import-candidate.doria", text.to_string())
+            .ok()?
+            .into_iter()
+            .find(|token| span_contains(token.span, offset))?;
+        let TokenKind::Identifier(spelling) = token.kind else {
+            return None;
+        };
+        Some(UnresolvedImportReference {
+            spelling,
+            span: token.span,
+            role,
+        })
+    }
+
+    pub(crate) fn import_candidate_for_target(
+        &self,
+        source: &SourceIdentity,
+        target: String,
+        reference_span: Span,
+        class_like: Option<bool>,
+    ) -> Option<ImportCandidate> {
+        let class_like =
+            class_like.unwrap_or_else(|| self.import_target_is_class_like(source, &target));
+        let imports = self
+            .global_symbols
+            .imports
+            .iter()
+            .filter(|import| import.source_identity == *source)
+            .collect::<Vec<_>>();
+        if let Some(existing) = imports.iter().find(|import| import.target == target) {
+            return Some(ImportCandidate {
+                class_like,
+                target,
+                alias: existing.alias.clone(),
+                reference_span,
+                requires_import: false,
+            });
+        }
+
+        let alias = target.rsplit('\\').next()?.to_string();
+        let namespace = self
+            .global_symbols
+            .namespaces
+            .iter()
+            .find(|namespace| namespace.source_identity == *source)
+            .map(|namespace| namespace.name.canonical());
+        if namespace
+            .as_ref()
+            .is_some_and(|namespace| format!("{namespace}\\{alias}") == target)
+        {
+            return None;
+        }
+        let alias_conflicts =
+            imports
+                .iter()
+                .any(|import| import.alias == alias && import.target != target)
+                || self.global_symbols.declarations.iter().any(|declaration| {
+                    declaration.qualified_name
+                        == namespace.as_ref().map_or_else(
+                            || alias.clone(),
+                            |namespace| format!("{namespace}\\{alias}"),
+                        )
+                })
+                || self.global_symbols.compiler_known.iter().any(|symbol| {
+                    symbol.source_name == alias && symbol.id.qualified_name != target
+                });
+        if alias_conflicts {
+            return None;
+        }
+
+        Some(ImportCandidate {
+            class_like,
+            target,
+            alias,
+            reference_span,
+            requires_import: true,
+        })
+    }
+
+    pub(crate) fn semantic_imports(&self, source: &SourceIdentity) -> Vec<SemanticImport> {
+        self.global_symbols
+            .imports
+            .iter()
+            .filter(|import| import.source_identity == *source)
+            .map(|import| SemanticImport {
+                target: import.target.clone(),
+                alias: import.alias.clone(),
+                class_like: self.import_target_is_class_like(source, &import.target),
+            })
+            .collect()
+    }
+
+    fn import_target_is_class_like(&self, source: &SourceIdentity, target: &str) -> bool {
+        if let Some(kind) = self
+            .global_symbols
+            .declarations
+            .iter()
+            .find(|declaration| declaration.qualified_name == target)
+            .map(|declaration| declaration.kind)
+            .or_else(|| {
+                self.global_symbols
+                    .compiler_known
+                    .iter()
+                    .find(|symbol| symbol.id.qualified_name == target)
+                    .map(|symbol| symbol.kind)
+            })
+        {
+            return class_like_symbol_kind(kind);
+        }
+
+        self.global_symbols.references.iter().any(|reference| {
+            reference.source_identity == *source
+                && reference.symbol_id.qualified_name == target
+                && class_like_reference_role(reference.role)
+        }) || self.global_symbols.unresolved.iter().any(|reference| {
+            reference.source_identity == *source
+                && reference.source_spelling == target
+                && class_like_reference_role(reference.role)
+        })
     }
 
     pub(crate) fn attribute_info(&self) -> &AttributeSemanticInfo {
@@ -635,6 +1019,54 @@ impl AnalysisSnapshot {
             .min_by_key(|occurrence| occurrence.span.end.saturating_sub(occurrence.span.start))
             .map(|occurrence| occurrence.symbol)
     }
+}
+
+fn importable_reference_role(role: GlobalReferenceRole) -> bool {
+    !matches!(
+        role,
+        GlobalReferenceRole::ImportTarget
+            | GlobalReferenceRole::ImportAliasUse
+            | GlobalReferenceRole::Include
+    )
+}
+
+fn unresolved_import_role(code: &str) -> Option<GlobalReferenceRole> {
+    match code {
+        "E0401" => Some(GlobalReferenceRole::Type),
+        "E0305" => Some(GlobalReferenceRole::StaticQualifier),
+        "E0309" => Some(GlobalReferenceRole::FunctionCall),
+        "E0491" => Some(GlobalReferenceRole::Value),
+        "E0686" => Some(GlobalReferenceRole::AttributeClass),
+        _ => None,
+    }
+}
+
+fn class_like_symbol_kind(kind: GlobalSymbolKind) -> bool {
+    matches!(
+        kind,
+        GlobalSymbolKind::Class
+            | GlobalSymbolKind::Enum
+            | GlobalSymbolKind::Interface
+            | GlobalSymbolKind::Trait
+            | GlobalSymbolKind::CompilerKnownType
+            | GlobalSymbolKind::CompilerKnownAttribute
+    )
+}
+
+fn class_like_reference_role(role: GlobalReferenceRole) -> bool {
+    matches!(
+        role,
+        GlobalReferenceRole::Type
+            | GlobalReferenceRole::Constructor
+            | GlobalReferenceRole::StaticQualifier
+            | GlobalReferenceRole::Extends
+            | GlobalReferenceRole::Implements
+            | GlobalReferenceRole::Throws
+            | GlobalReferenceRole::Catch
+            | GlobalReferenceRole::TypeTest
+            | GlobalReferenceRole::MatchPattern
+            | GlobalReferenceRole::AttributeClass
+    )
 }
 
 fn directive_semantic_tokens(program: &Program) -> Vec<(Span, u32)> {

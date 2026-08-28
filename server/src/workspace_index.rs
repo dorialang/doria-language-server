@@ -48,6 +48,12 @@ pub(crate) struct IndexedCompletion {
     pub(crate) documentation: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IndexedImportCandidate {
+    pub(crate) target: String,
+    pub(crate) class_like: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IndexedRole {
     Declaration,
@@ -609,6 +615,41 @@ impl OpenDocumentIndex {
         completions
     }
 
+    pub(crate) fn import_candidates(
+        &self,
+        uri: &str,
+        name: &str,
+        role: GlobalReferenceRole,
+    ) -> Vec<IndexedImportCandidate> {
+        let Some(document) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let mut candidates = HashMap::<String, IndexedImportCandidate>::new();
+        for summary in self.documents.values() {
+            if summary.package != document.package || summary.namespace == document.namespace {
+                continue;
+            }
+            for (symbol, source_name, kind) in &summary.declarations {
+                if source_name != name
+                    || !import_kind_matches_reference_role(*kind, role)
+                    || self.declaration_counts.get(symbol) != Some(&1)
+                {
+                    continue;
+                }
+                candidates.insert(
+                    symbol.qualified_name.clone(),
+                    IndexedImportCandidate {
+                        target: symbol.qualified_name.clone(),
+                        class_like: is_class_like_import_kind(*kind),
+                    },
+                );
+            }
+        }
+        let mut candidates = candidates.into_values().collect::<Vec<_>>();
+        candidates.sort_by(|left, right| left.target.cmp(&right.target));
+        candidates
+    }
+
     pub(crate) fn attribute_completions(&self, uri: &str) -> Vec<IndexedCompletion> {
         let Some(document) = self.documents.get(uri) else {
             return Vec::new();
@@ -726,6 +767,58 @@ fn symbol_package(symbol: &GlobalSymbolId) -> Option<&PackageIdentity> {
         doriac::names::GlobalSymbolOwner::Package(package) => Some(package),
         doriac::names::GlobalSymbolOwner::CompilerKnown(_) => None,
     }
+}
+
+fn import_kind_matches_reference_role(kind: GlobalSymbolKind, role: GlobalReferenceRole) -> bool {
+    match role {
+        GlobalReferenceRole::Type
+        | GlobalReferenceRole::Extends
+        | GlobalReferenceRole::Implements
+        | GlobalReferenceRole::Throws
+        | GlobalReferenceRole::Catch
+        | GlobalReferenceRole::TypeTest
+        | GlobalReferenceRole::MatchPattern => matches!(
+            kind,
+            GlobalSymbolKind::Class
+                | GlobalSymbolKind::Enum
+                | GlobalSymbolKind::Interface
+                | GlobalSymbolKind::Trait
+                | GlobalSymbolKind::CompilerKnownType
+        ),
+        GlobalReferenceRole::Constructor => kind == GlobalSymbolKind::Class,
+        GlobalReferenceRole::StaticQualifier => matches!(
+            kind,
+            GlobalSymbolKind::Class
+                | GlobalSymbolKind::Enum
+                | GlobalSymbolKind::Interface
+                | GlobalSymbolKind::Trait
+                | GlobalSymbolKind::CompilerKnownType
+        ),
+        GlobalReferenceRole::FunctionCall => matches!(
+            kind,
+            GlobalSymbolKind::Function | GlobalSymbolKind::CompilerKnownIntrinsic
+        ),
+        GlobalReferenceRole::Value => kind == GlobalSymbolKind::Constant,
+        GlobalReferenceRole::AttributeClass => matches!(
+            kind,
+            GlobalSymbolKind::Class | GlobalSymbolKind::CompilerKnownAttribute
+        ),
+        GlobalReferenceRole::ImportTarget
+        | GlobalReferenceRole::ImportAliasUse
+        | GlobalReferenceRole::Include => false,
+    }
+}
+
+fn is_class_like_import_kind(kind: GlobalSymbolKind) -> bool {
+    matches!(
+        kind,
+        GlobalSymbolKind::Class
+            | GlobalSymbolKind::Enum
+            | GlobalSymbolKind::Interface
+            | GlobalSymbolKind::Trait
+            | GlobalSymbolKind::CompilerKnownType
+            | GlobalSymbolKind::CompilerKnownAttribute
+    )
 }
 
 fn span_contains(outer: Span, inner: Span) -> bool {

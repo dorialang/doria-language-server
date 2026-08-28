@@ -222,15 +222,18 @@
               }
             },
             {
-              "match": "(@param)\\s+((?:\\??[A-Za-z_\\\\][A-Za-z0-9_\\\\]*(?:<[^>]+>)?(?:\\[\\])?)(?:\\|\\??[A-Za-z_\\\\][A-Za-z0-9_\\\\]*(?:<[^>]+>)?(?:\\[\\])?)*)\\s+(\\$[A-Za-z_][A-Za-z0-9_]*)",
+              "match": "(@param)\\s+((?:(?:internal|take|writable)\\s+)*)(\\S(?:.*?\\S)?)\\s+(\\$[A-Za-z_][A-Za-z0-9_]*)",
               "captures": {
                 "1": {
                   "name": "keyword.other.documentation.tag.doria"
                 },
                 "2": {
-                  "name": "storage.type.documentation.doria"
+                  "name": "storage.modifier.parameter.documentation.doria"
                 },
                 "3": {
+                  "name": "storage.type.documentation.doria"
+                },
+                "4": {
                   "name": "variable.other.doria"
                 }
               }

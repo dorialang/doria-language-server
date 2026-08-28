@@ -70,6 +70,24 @@ class DoriaLanguageClient {
         "$",
         ">",
         ":"
+      ),
+      vscode.languages.registerCodeActionsProvider(
+        { language: "doria" },
+        {
+          provideCodeActions: (document, range) =>
+            this.provideCodeActions(document, range)
+        },
+        {
+          providedCodeActionKinds: [vscode.CodeActionKind.QuickFix]
+        }
+      ),
+      vscode.languages.registerOnTypeFormattingEditProvider(
+        { language: "doria" },
+        {
+          provideOnTypeFormattingEdits: (document, position, character, options) =>
+            this.provideOnTypeFormattingEdits(document, position, character, options)
+        },
+        "\n"
       )
     );
   }
@@ -370,6 +388,49 @@ class DoriaLanguageClient {
           return completion;
         });
       })
+      .catch(() => undefined);
+  }
+
+  provideCodeActions(document, range) {
+    if (!isDoriaSource(document) || !this.process) {
+      return undefined;
+    }
+
+    return this.sendRequest("textDocument/codeAction", {
+      textDocument: {
+        uri: document.uri.toString()
+      },
+      range: {
+        start: toLspPosition(range.start),
+        end: toLspPosition(range.end)
+      },
+      context: {
+        diagnostics: []
+      }
+    })
+      .then((actions) => (actions ?? []).map(toCodeAction))
+      .catch(() => undefined);
+  }
+
+  provideOnTypeFormattingEdits(document, position, character, options) {
+    if (!isDoriaSource(document) || !this.process || character !== "\n") {
+      return undefined;
+    }
+
+    return this.sendRequest("textDocument/onTypeFormatting", {
+      textDocument: {
+        uri: document.uri.toString()
+      },
+      position: toLspPosition(position),
+      ch: character,
+      options: {
+        tabSize: options.tabSize,
+        insertSpaces: options.insertSpaces
+      }
+    })
+      .then((edits) => (edits ?? []).map((edit) =>
+        vscode.TextEdit.replace(toRange(edit.range), edit.newText)
+      ))
       .catch(() => undefined);
   }
 }
@@ -749,6 +810,28 @@ function toCompletionKind(kind) {
     default:
       return vscode.CompletionItemKind.Text;
   }
+}
+
+function toCodeAction(action) {
+  const kind = action.kind === "quickfix"
+    ? vscode.CodeActionKind.QuickFix
+    : undefined;
+  const result = new vscode.CodeAction(action.title, kind);
+  result.isPreferred = action.isPreferred;
+
+  if (action.edit?.changes) {
+    const edit = new vscode.WorkspaceEdit();
+    for (const [uri, changes] of Object.entries(action.edit.changes)) {
+      edit.set(
+        vscode.Uri.parse(uri),
+        changes.map((change) =>
+          vscode.TextEdit.replace(toRange(change.range), change.newText)
+        )
+      );
+    }
+    result.edit = edit;
+  }
+  return result;
 }
 
 module.exports = {
