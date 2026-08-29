@@ -62,6 +62,27 @@ class DoriaLanguageClient {
           provideHover: (document, position) => this.provideHover(document, position)
         }
       ),
+      vscode.languages.registerDefinitionProvider(
+        { language: "doria" },
+        {
+          provideDefinition: (document, position) =>
+            this.provideDefinition(document, position)
+        }
+      ),
+      vscode.languages.registerReferenceProvider(
+        { language: "doria" },
+        {
+          provideReferences: (document, position, context) =>
+            this.provideReferences(document, position, context)
+        }
+      ),
+      vscode.languages.registerRenameProvider(
+        { language: "doria" },
+        {
+          provideRenameEdits: (document, position, newName) =>
+            this.provideRenameEdits(document, position, newName)
+        }
+      ),
       vscode.languages.registerCompletionItemProvider(
         { language: "doria" },
         {
@@ -70,6 +91,27 @@ class DoriaLanguageClient {
         "$",
         ">",
         ":"
+      ),
+      vscode.languages.registerCodeActionsProvider(
+        { language: "doria" },
+        {
+          provideCodeActions: (document, range) =>
+            this.provideCodeActions(document, range)
+        },
+        {
+          providedCodeActionKinds: [
+            vscode.CodeActionKind.QuickFix,
+            vscode.CodeActionKind.RefactorRewrite
+          ]
+        }
+      ),
+      vscode.languages.registerOnTypeFormattingEditProvider(
+        { language: "doria" },
+        {
+          provideOnTypeFormattingEdits: (document, position, character, options) =>
+            this.provideOnTypeFormattingEdits(document, position, character, options)
+        },
+        "\n"
       )
     );
   }
@@ -349,6 +391,61 @@ class DoriaLanguageClient {
       .catch(() => undefined);
   }
 
+  provideDefinition(document, position) {
+    if (!isDoriaSource(document) || !this.process) {
+      return undefined;
+    }
+
+    return this.sendRequest("textDocument/definition", {
+      textDocument: {
+        uri: document.uri.toString()
+      },
+      position: toLspPosition(position)
+    })
+      .then((result) => {
+        if (!result) {
+          return undefined;
+        }
+        const locations = Array.isArray(result) ? result : [result];
+        return locations.map(toLocation);
+      })
+      .catch(() => undefined);
+  }
+
+  provideRenameEdits(document, position, newName) {
+    if (!isDoriaSource(document) || !this.process) {
+      return undefined;
+    }
+
+    return this.sendRequest("textDocument/rename", {
+      textDocument: {
+        uri: document.uri.toString()
+      },
+      position: toLspPosition(position),
+      newName
+    })
+      .then((edit) => edit ? toWorkspaceEdit(edit) : undefined)
+      .catch(() => undefined);
+  }
+
+  provideReferences(document, position, context) {
+    if (!isDoriaSource(document) || !this.process) {
+      return undefined;
+    }
+
+    return this.sendRequest("textDocument/references", {
+      textDocument: {
+        uri: document.uri.toString()
+      },
+      position: toLspPosition(position),
+      context: {
+        includeDeclaration: context.includeDeclaration
+      }
+    })
+      .then((locations) => (locations ?? []).map(toLocation))
+      .catch(() => undefined);
+  }
+
   provideCompletionItems(document, position) {
     if (!isDoriaSource(document) || !this.process) {
       return undefined;
@@ -370,6 +467,49 @@ class DoriaLanguageClient {
           return completion;
         });
       })
+      .catch(() => undefined);
+  }
+
+  provideCodeActions(document, range) {
+    if (!isDoriaSource(document) || !this.process) {
+      return undefined;
+    }
+
+    return this.sendRequest("textDocument/codeAction", {
+      textDocument: {
+        uri: document.uri.toString()
+      },
+      range: {
+        start: toLspPosition(range.start),
+        end: toLspPosition(range.end)
+      },
+      context: {
+        diagnostics: []
+      }
+    })
+      .then((actions) => (actions ?? []).map(toCodeAction))
+      .catch(() => undefined);
+  }
+
+  provideOnTypeFormattingEdits(document, position, character, options) {
+    if (!isDoriaSource(document) || !this.process || character !== "\n") {
+      return undefined;
+    }
+
+    return this.sendRequest("textDocument/onTypeFormatting", {
+      textDocument: {
+        uri: document.uri.toString()
+      },
+      position: toLspPosition(position),
+      ch: character,
+      options: {
+        tabSize: options.tabSize,
+        insertSpaces: options.insertSpaces
+      }
+    })
+      .then((edits) => (edits ?? []).map((edit) =>
+        vscode.TextEdit.replace(toRange(edit.range), edit.newText)
+      ))
       .catch(() => undefined);
   }
 }
@@ -722,6 +862,26 @@ function toRange(range) {
   );
 }
 
+function toLocation(location) {
+  return new vscode.Location(
+    vscode.Uri.parse(location.uri),
+    toRange(location.range)
+  );
+}
+
+function toWorkspaceEdit(workspaceEdit) {
+  const edit = new vscode.WorkspaceEdit();
+  for (const [uri, changes] of Object.entries(workspaceEdit.changes ?? {})) {
+    edit.set(
+      vscode.Uri.parse(uri),
+      changes.map((change) =>
+        vscode.TextEdit.replace(toRange(change.range), change.newText)
+      )
+    );
+  }
+  return edit;
+}
+
 function toHoverContents(contents) {
   if (typeof contents === "string") {
     return contents;
@@ -749,6 +909,20 @@ function toCompletionKind(kind) {
     default:
       return vscode.CompletionItemKind.Text;
   }
+}
+
+function toCodeAction(action) {
+  const kind = {
+    quickfix: vscode.CodeActionKind.QuickFix,
+    "refactor.rewrite": vscode.CodeActionKind.RefactorRewrite
+  }[action.kind];
+  const result = new vscode.CodeAction(action.title, kind);
+  result.isPreferred = action.isPreferred;
+
+  if (action.edit?.changes) {
+    result.edit = toWorkspaceEdit(action.edit);
+  }
+  return result;
 }
 
 module.exports = {

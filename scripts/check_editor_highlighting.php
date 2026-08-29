@@ -33,7 +33,11 @@ $intellijParser = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/int
 $intellijFormatterTest = $root . '/editors/intellij/doria/src/test/kotlin/dev/doria/intellij/codestyle/DoriaFormattingModelBuilderTest.kt';
 $intellijLspFiles = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/lsp/DoriaLspFiles.kt';
 $intellijLspResolver = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/lsp/DoriaLspServerPathResolver.kt';
+$intellijDocumentationEnterHandler = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/documentation/DoriaDocumentationEnterHandler.kt';
 $intellijPluginXml = $root . '/editors/intellij/doria/src/main/resources/META-INF/plugin.xml';
+$intellijLspPluginXml = $root . '/editors/intellij/doria/src/main/resources/META-INF/doria-lsp.xml';
+$intellijImportIntention = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/actions/DoriaImportIntention.kt';
+$intellijLspCodeActionIntention = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/actions/DoriaLspCodeActionIntention.kt';
 $intellijPluginIcon = $root . '/editors/intellij/doria/src/main/resources/META-INF/pluginIcon.svg';
 $intellijCreateClassAction = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/actions/DoriaCreateClassAction.kt';
 $intellijAutoloadNamespaceResolver = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/actions/DoriaAutoloadNamespaceResolver.kt';
@@ -1489,6 +1493,112 @@ function check_editor_fixture_diagnostics_are_skipped(): void
     );
 }
 
+function check_documentation_comment_support(): void
+{
+    global $vscodePackage, $vscodeGrammar, $vscodeLanguageConfiguration, $vscodeExtension;
+    global $intellijLexer, $intellijDocumentationEnterHandler, $intellijLspPluginXml;
+    global $lspAnalysis, $lspServer;
+
+    $package = load_json($vscodePackage);
+    $configuration = load_json($vscodeLanguageConfiguration);
+    $grammarText = read_text($vscodeGrammar);
+    $extensionText = read_text($vscodeExtension);
+    require_check(
+        ($package['contributes']['configurationDefaults']['[doria]']['editor.formatOnType'] ?? null) === true
+            && str_contains($extensionText, 'registerOnTypeFormattingEditProvider')
+            && str_contains($extensionText, 'textDocument/onTypeFormatting'),
+        'VS Code must request compiler-backed documentation tags through standard on-type formatting',
+    );
+    foreach (['/\\*', '/\\*\\*'] as $opener) {
+        require_check(
+            any_match(
+                $configuration['onEnterRules'] ?? [],
+                static fn (mixed $rule): bool => is_array($rule)
+                    && str_contains((string) ($rule['beforeText'] ?? ''), $opener)
+                    && ($rule['action']['appendText'] ?? null) === ' * '
+            ),
+            "VS Code must continue {$opener} comments with PHP-style leading asterisks",
+        );
+    }
+    require_check(
+        str_contains($grammarText, 'storage.modifier.parameter.documentation.doria')
+            && str_contains($grammarText, 'internal|take|writable'),
+        'VS Code must highlight Doria parameter modifiers inside documentation tags',
+    );
+
+    $pluginXml = read_text($intellijLspPluginXml);
+    $enterHandler = read_text($intellijDocumentationEnterHandler);
+    $lexerText = read_text($intellijLexer);
+    require_check(
+        str_contains($pluginXml, 'DoriaDocumentationEnterHandler')
+            && str_contains($enterHandler, 'DocumentOnTypeFormattingParams')
+            && str_contains($enterHandler, 'onTypeFormatting(params)'),
+        'IntelliJ must bridge Enter handling to the standard compiler-backed on-type request',
+    );
+    require_check(
+        str_contains($lexerText, 'DOC_PARAMETER_MODIFIERS')
+            && str_contains($lexerText, 'isDocParameterModifierPosition()'),
+        'IntelliJ must highlight Doria parameter modifiers inside documentation tags',
+    );
+
+    $analysisText = read_text($lspAnalysis);
+    $serverText = read_text($lspServer);
+    require_check(
+        str_contains($analysisText, 'documentation_comment_template')
+            && str_contains($analysisText, 'function_documentation_target')
+            && str_contains($serverText, 'documentOnTypeFormattingProvider')
+            && str_contains($serverText, 'documentation_comment_edits'),
+        'doria-lsp must own compiler-derived documentation comment generation for both editors',
+    );
+}
+
+function check_import_actions_and_diagnostic_messages(): void
+{
+    global $vscodeExtension, $lspAnalysis, $lspServer;
+    global $intellijImportIntention, $intellijLspCodeActionIntention, $intellijLspPluginXml;
+
+    $extensionText = read_text($vscodeExtension);
+    $analysisText = read_text($lspAnalysis);
+    $serverText = read_text($lspServer);
+    require_check(
+        str_contains($extensionText, 'registerCodeActionsProvider')
+            && str_contains($extensionText, 'textDocument/codeAction')
+            && str_contains($extensionText, 'new vscode.WorkspaceEdit()'),
+        'VS Code must expose compiler-backed Doria code actions as workspace edits',
+    );
+    $intellijIntentionText = read_text($intellijImportIntention);
+    $intellijLspCodeActionText = read_text($intellijLspCodeActionIntention);
+    $intellijLspPluginText = read_text($intellijLspPluginXml);
+    require_check(
+        str_contains($intellijLspPluginText, 'DoriaImportIntention')
+            && str_contains($intellijIntentionText, 'Use import for ')
+            && str_contains($intellijLspCodeActionText, 'textDocumentService.codeAction(params)')
+            && str_contains($intellijLspCodeActionText, 'WriteCommandAction.runWriteCommandAction'),
+        'IntelliJ must expose shared LSP import actions through its intention menu',
+    );
+    require_check(
+        str_contains($intellijLspPluginText, 'DoriaGenerateMethodIntention')
+            && str_contains($intellijLspPluginText, 'DoriaGenerateFunctionIntention')
+            && str_contains($intellijLspCodeActionText, 'action.edit?.changes'),
+        'IntelliJ must expose server-owned missing callable generation actions',
+    );
+    require_check(
+        str_contains($analysisText, 'import_candidate_at_offset')
+            && str_contains($analysisText, 'unresolved_short_import_at_offset')
+            && str_contains($analysisText, 'GlobalReferenceRole')
+            && str_contains($serverText, 'Use import for')
+            && str_contains($serverText, '.import_candidates(uri, &reference.spelling, reference.role)')
+            && str_contains($serverText, 'sort_imports')
+            && str_contains($serverText, 'render_import_block'),
+        'doria-lsp must own qualified-name import selection and deterministic import grouping',
+    );
+    require_check(
+        str_contains($serverText, 'diagnostic_text_is_equivalent')
+            && str_contains($serverText, 'equivalent_diagnostic_title_and_primary_label_are_not_repeated'),
+        'doria-lsp must not repeat equivalent diagnostic title and primary-label text',
+    );
+}
+
 function check_fixture(): void
 {
     global $fixture, $rejectedFixture, $strictComparison, $rejectedKeywords, $groupedLocalForms, $stage28GuardForms, $stage28aControlFlowForms;
@@ -2008,6 +2118,8 @@ function main(): int
     check_intellij_class_name_vocabulary();
     check_lsp_completion_vocabulary();
     check_editor_fixture_diagnostics_are_skipped();
+    check_documentation_comment_support();
+    check_import_actions_and_diagnostic_messages();
     check_fixture();
     check_stage30f_callable_alignment();
     check_inferred_main_effect_alignment();

@@ -319,6 +319,23 @@ class DoriaLexerTest : TestCase() {
         assertEquals(DoriaTokenTypes.INVALID, legacyUse.first { it.text == "use" }.type)
     }
 
+    fun testDoriaParameterModifiersRemainDistinctInsideDocumentationComments() {
+        val tokens = lex(
+            "/**\n" +
+                " * @param internal writable List<string> \$items Items to render.\n" +
+                " * @param take Payload \$payload Payload to consume.\n" +
+                " */",
+        )
+
+        for (modifier in listOf("internal", "writable", "take")) {
+            assertEquals(DoriaTokenTypes.MODIFIER, tokens.first { it.text == modifier }.type)
+        }
+        assertEquals(DoriaTokenTypes.COLLECTION_TYPE, tokens.first { it.text == "List" }.type)
+        assertEquals(DoriaTokenTypes.PRIMITIVE_TYPE, tokens.first { it.text == "string" }.type)
+        assertEquals(DoriaTokenTypes.TYPE_NAME, tokens.first { it.text == "Payload" }.type)
+        assertEquals(DoriaTokenTypes.VARIABLE, tokens.first { it.text == "\$items" }.type)
+    }
+
     fun testNamespaceIndividualAliasAndGroupedImportsUsePresentationTokens() {
         val tokens = lex(
             "namespace Acme\\Editor;\n" +

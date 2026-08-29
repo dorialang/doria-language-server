@@ -34,7 +34,6 @@
     <lang.commenter
       language="doria"
       implementationClass="dev.doria.intellij.DoriaCommenter" />
-
     <langCodeStyleSettingsProvider
       implementation="dev.doria.intellij.codestyle.DoriaLanguageCodeStyleSettingsProvider" />
 

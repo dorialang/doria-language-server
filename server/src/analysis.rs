@@ -11,10 +11,13 @@ use doriac::attributes::{
     AttributeApplication, AttributeClassIdentity, AttributeClassSchema, AttributeSemanticInfo,
     AttributeTarget, AttributeValue, AttributeValueKind,
 };
-use doriac::diagnostics::{Diagnostic, DiagnosticSeverity};
+use doriac::diagnostics::{Diagnostic, DiagnosticSeverity, LabelRole};
 use doriac::enums::{EnumBackingType, EnumBackingValue};
 use doriac::lexer::{Token, TokenKind};
-use doriac::names::{CompilationContext, GlobalSymbolFacts, GlobalSymbolId};
+use doriac::names::{
+    CompilationContext, GlobalReferenceRole, GlobalSymbolFacts, GlobalSymbolId, GlobalSymbolKind,
+    SourceIdentity,
+};
 use doriac::ownership::{
     CaptureAcquisitionKind, ClosureBorrowRoot, ClosureEscapeClassification, ClosureValueProvenance,
     InvocationConsumption,
@@ -36,6 +39,213 @@ pub(crate) struct SemanticHover {
     pub(crate) span: Span,
     pub(crate) markdown: String,
     priority: SemanticHoverPriority,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DocumentationCommentTemplate {
+    pub(crate) tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImportCandidate {
+    pub(crate) target: String,
+    pub(crate) alias: String,
+    pub(crate) reference_span: Span,
+    pub(crate) requires_import: bool,
+    pub(crate) class_like: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SemanticImport {
+    pub(crate) target: String,
+    pub(crate) alias: String,
+    pub(crate) class_like: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MissingCallable {
+    pub(crate) name: String,
+    pub(crate) name_span: Span,
+    pub(crate) parameters: Vec<GeneratedParameter>,
+    pub(crate) return_type: String,
+    pub(crate) target: MissingCallableTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClassDeclaration {
+    name: String,
+    span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GeneratedParameter {
+    pub(crate) name: String,
+    pub(crate) ty: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MissingCallableTarget {
+    Function,
+    Method { class_name: String, is_static: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnresolvedImportReference {
+    pub(crate) spelling: String,
+    pub(crate) span: Span,
+    pub(crate) role: GlobalReferenceRole,
+}
+
+pub(crate) fn documentation_comment_template(
+    text: &str,
+    comment_start: usize,
+    cursor_offset: usize,
+) -> Option<DocumentationCommentTemplate> {
+    let recovered = recover_unclosed_comment(text, comment_start, cursor_offset)?;
+    let program = doriac::parse_source("documentation-comment.doria", recovered).ok()?;
+    documentation_targets(&program)
+        .into_iter()
+        .filter(|target| target.start >= cursor_offset)
+        .min_by_key(|target| target.start)
+        .map(|target| DocumentationCommentTemplate { tags: target.tags })
+}
+
+fn recover_unclosed_comment(
+    text: &str,
+    comment_start: usize,
+    cursor_offset: usize,
+) -> Option<String> {
+    if comment_start > cursor_offset || cursor_offset > text.len() {
+        return None;
+    }
+    if text[comment_start..].contains("*/") {
+        return Some(text.to_string());
+    }
+
+    let mut recovered = text.as_bytes().to_vec();
+    for byte in &mut recovered[comment_start..cursor_offset] {
+        if *byte != b'\n' && *byte != b'\r' {
+            *byte = b' ';
+        }
+    }
+    String::from_utf8(recovered).ok()
+}
+
+#[derive(Debug)]
+struct DocumentationTarget {
+    start: usize,
+    tags: Vec<String>,
+}
+
+fn documentation_targets(program: &Program) -> Vec<DocumentationTarget> {
+    let mut targets = Vec::new();
+    for item in &program.items {
+        match item {
+            Item::Function(function) => targets.push(function_documentation_target(function)),
+            Item::Class(class) => {
+                targets.push(DocumentationTarget {
+                    start: class.span.start,
+                    tags: template_tags(&class.type_params),
+                });
+                member_documentation_targets(&class.members, &mut targets);
+            }
+            Item::Trait(trait_decl) => {
+                targets.push(DocumentationTarget {
+                    start: trait_decl.span.start,
+                    tags: Vec::new(),
+                });
+                member_documentation_targets(&trait_decl.members, &mut targets);
+            }
+            Item::Enum(enum_decl) => targets.push(DocumentationTarget {
+                start: enum_decl.span.start,
+                tags: template_tags(&enum_decl.type_params),
+            }),
+            Item::Interface(interface) => targets.push(DocumentationTarget {
+                start: interface.span.start,
+                tags: Vec::new(),
+            }),
+            Item::Constant(constant) => targets.push(DocumentationTarget {
+                start: constant.span.start,
+                tags: constant
+                    .ty
+                    .as_ref()
+                    .map(|ty| vec![format!("@var {ty}")])
+                    .unwrap_or_default(),
+            }),
+            Item::Statement(_) => {}
+        }
+    }
+    targets
+}
+
+fn member_documentation_targets(members: &[ClassMember], targets: &mut Vec<DocumentationTarget>) {
+    for member in members {
+        match member {
+            ClassMember::Method(function) => {
+                targets.push(function_documentation_target(function));
+            }
+            ClassMember::Property(property) => targets.push(DocumentationTarget {
+                start: property.span.start,
+                tags: vec![format!("@var {}", property.ty)],
+            }),
+            ClassMember::Constant(constant) => targets.push(DocumentationTarget {
+                start: constant.span.start,
+                tags: constant
+                    .ty
+                    .as_ref()
+                    .map(|ty| vec![format!("@var {ty}")])
+                    .unwrap_or_default(),
+            }),
+        }
+    }
+}
+
+fn function_documentation_target(function: &FunctionDecl) -> DocumentationTarget {
+    let mut tags = template_tags(&function.type_params);
+    tags.extend(
+        function
+            .params
+            .iter()
+            .map(|parameter| format!("@param {}", documentation_parameter_signature(parameter))),
+    );
+    if let Some(return_type) = &function.return_type {
+        tags.push(format!("@return {return_type}"));
+    }
+    if let Some(throws) = &function.throws {
+        tags.extend(
+            throws
+                .entries
+                .iter()
+                .map(|entry| format!("@throws {}", entry.ty)),
+        );
+    }
+    DocumentationTarget {
+        start: function.span.start,
+        tags,
+    }
+}
+
+fn template_tags(parameters: &[doriac::ast::TypeParamDecl]) -> Vec<String> {
+    parameters
+        .iter()
+        .map(|parameter| format!("@template {}", parameter.name))
+        .collect()
+}
+
+fn documentation_parameter_signature(parameter: &Param) -> String {
+    let mut parts = Vec::new();
+    if matches!(parameter.promoted_access, Some(MemberAccess::Internal)) {
+        parts.push("internal".to_string());
+    }
+    if parameter.take {
+        parts.push("take".to_string());
+    }
+    if parameter.writable {
+        parts.push("writable".to_string());
+    }
+    parts.push(parameter.ty.to_string());
+    parts.push(format!("${}", parameter.name));
+    parts.join(" ")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -89,6 +299,10 @@ pub(crate) struct AnalysisSnapshot {
     local_visibilities: Vec<LocalVisibility>,
     call_signatures: Vec<CallSignatureContext>,
     semantic_hovers: Vec<SemanticHover>,
+    missing_callables: Vec<MissingCallable>,
+    class_declarations: Vec<ClassDeclaration>,
+    member_occurrences: Vec<MemberOccurrence>,
+    member_parents: Vec<MemberParent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -104,6 +318,34 @@ pub(crate) struct AttributeParameterOccurrence {
     pub(crate) span: Span,
     pub(crate) declaration: bool,
     pub(crate) spelling: AttributeParameterSpelling,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MemberKind {
+    Method,
+    Property,
+    Constant,
+    EnumCase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct MemberIdentity {
+    pub(crate) owner: GlobalSymbolId,
+    pub(crate) name: String,
+    pub(crate) kind: MemberKind,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MemberOccurrence {
+    pub(crate) identity: MemberIdentity,
+    pub(crate) span: Span,
+    pub(crate) declaration: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MemberParent {
+    pub(crate) child: GlobalSymbolId,
+    pub(crate) parent: GlobalSymbolId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,6 +522,236 @@ impl AnalysisSnapshot {
 
     pub(crate) fn global_symbols(&self) -> &GlobalSymbolFacts {
         &self.global_symbols
+    }
+
+    pub(crate) fn member_occurrences(&self) -> &[MemberOccurrence] {
+        &self.member_occurrences
+    }
+
+    pub(crate) fn member_parents(&self) -> &[MemberParent] {
+        &self.member_parents
+    }
+
+    pub(crate) fn missing_callable_at_offset(&self, offset: usize) -> Option<&MissingCallable> {
+        self.missing_callables
+            .iter()
+            .filter(|callable| span_contains(callable.name_span, offset))
+            .min_by_key(|callable| {
+                callable
+                    .name_span
+                    .end
+                    .saturating_sub(callable.name_span.start)
+            })
+    }
+
+    pub(crate) fn class_declaration_span(&self, name: &str) -> Option<Span> {
+        let mut declarations = self
+            .class_declarations
+            .iter()
+            .filter(|declaration| declaration.name == name);
+        let declaration = declarations.next()?;
+        declarations.next().is_none().then_some(declaration.span)
+    }
+
+    pub(crate) fn import_candidate_at_offset(
+        &self,
+        source: &SourceIdentity,
+        offset: usize,
+    ) -> Option<ImportCandidate> {
+        let resolved = self
+            .global_symbols
+            .references
+            .iter()
+            .filter(|reference| {
+                reference.source_identity == *source
+                    && importable_reference_role(reference.role)
+                    && reference.source_spelling.contains('\\')
+                    && span_contains(reference.source_span, offset)
+            })
+            .map(|reference| {
+                (
+                    reference.symbol_id.qualified_name.clone(),
+                    reference.source_span,
+                )
+            });
+        let unresolved = self
+            .global_symbols
+            .unresolved
+            .iter()
+            .filter(|reference| {
+                reference.source_identity == *source
+                    && importable_reference_role(reference.role)
+                    && reference.source_spelling.contains('\\')
+                    && span_contains(reference.source_span, offset)
+            })
+            .map(|reference| (reference.source_spelling.clone(), reference.source_span));
+        let (target, reference_span) = resolved
+            .chain(unresolved)
+            .min_by_key(|(_, span)| span.end.saturating_sub(span.start))?;
+
+        self.import_candidate_for_target(source, target, reference_span, None)
+    }
+
+    pub(crate) fn unresolved_short_import_at_offset(
+        &self,
+        text: &str,
+        source: &SourceIdentity,
+        offset: usize,
+    ) -> Option<UnresolvedImportReference> {
+        if let Some(reference) = self
+            .global_symbols
+            .unresolved
+            .iter()
+            .filter(|reference| {
+                reference.source_identity == *source
+                    && importable_reference_role(reference.role)
+                    && !reference.source_spelling.contains('\\')
+                    && span_contains(reference.source_span, offset)
+            })
+            .min_by_key(|reference| {
+                reference
+                    .source_span
+                    .end
+                    .saturating_sub(reference.source_span.start)
+            })
+            .map(|reference| UnresolvedImportReference {
+                spelling: reference.source_spelling.clone(),
+                span: reference.source_span,
+                role: reference.role,
+            })
+        {
+            return Some(reference);
+        }
+
+        let diagnostic = self.diagnostics.iter().find(|diagnostic| {
+            unresolved_import_role(diagnostic.code).is_some()
+                && (diagnostic
+                    .labels
+                    .iter()
+                    .find(|label| label.role == LabelRole::Primary)
+                    .is_some_and(|label| span_contains(label.span, offset))
+                    || (diagnostic.labels.is_empty() && span_contains(diagnostic.span, offset)))
+        })?;
+        let role = unresolved_import_role(diagnostic.code)?;
+        let token = doriac::lex_source("import-candidate.doria", text.to_string())
+            .ok()?
+            .into_iter()
+            .find(|token| span_contains(token.span, offset))?;
+        let TokenKind::Identifier(spelling) = token.kind else {
+            return None;
+        };
+        Some(UnresolvedImportReference {
+            spelling,
+            span: token.span,
+            role,
+        })
+    }
+
+    pub(crate) fn import_candidate_for_target(
+        &self,
+        source: &SourceIdentity,
+        target: String,
+        reference_span: Span,
+        class_like: Option<bool>,
+    ) -> Option<ImportCandidate> {
+        let class_like =
+            class_like.unwrap_or_else(|| self.import_target_is_class_like(source, &target));
+        let imports = self
+            .global_symbols
+            .imports
+            .iter()
+            .filter(|import| import.source_identity == *source)
+            .collect::<Vec<_>>();
+        if let Some(existing) = imports.iter().find(|import| import.target == target) {
+            return Some(ImportCandidate {
+                class_like,
+                target,
+                alias: existing.alias.clone(),
+                reference_span,
+                requires_import: false,
+            });
+        }
+
+        let alias = target.rsplit('\\').next()?.to_string();
+        let namespace = self
+            .global_symbols
+            .namespaces
+            .iter()
+            .find(|namespace| namespace.source_identity == *source)
+            .map(|namespace| namespace.name.canonical());
+        if namespace
+            .as_ref()
+            .is_some_and(|namespace| format!("{namespace}\\{alias}") == target)
+        {
+            return None;
+        }
+        let alias_conflicts =
+            imports
+                .iter()
+                .any(|import| import.alias == alias && import.target != target)
+                || self.global_symbols.declarations.iter().any(|declaration| {
+                    declaration.qualified_name
+                        == namespace.as_ref().map_or_else(
+                            || alias.clone(),
+                            |namespace| format!("{namespace}\\{alias}"),
+                        )
+                })
+                || self.global_symbols.compiler_known.iter().any(|symbol| {
+                    symbol.source_name == alias && symbol.id.qualified_name != target
+                });
+        if alias_conflicts {
+            return None;
+        }
+
+        Some(ImportCandidate {
+            class_like,
+            target,
+            alias,
+            reference_span,
+            requires_import: true,
+        })
+    }
+
+    pub(crate) fn semantic_imports(&self, source: &SourceIdentity) -> Vec<SemanticImport> {
+        self.global_symbols
+            .imports
+            .iter()
+            .filter(|import| import.source_identity == *source)
+            .map(|import| SemanticImport {
+                target: import.target.clone(),
+                alias: import.alias.clone(),
+                class_like: self.import_target_is_class_like(source, &import.target),
+            })
+            .collect()
+    }
+
+    fn import_target_is_class_like(&self, source: &SourceIdentity, target: &str) -> bool {
+        if let Some(kind) = self
+            .global_symbols
+            .declarations
+            .iter()
+            .find(|declaration| declaration.qualified_name == target)
+            .map(|declaration| declaration.kind)
+            .or_else(|| {
+                self.global_symbols
+                    .compiler_known
+                    .iter()
+                    .find(|symbol| symbol.id.qualified_name == target)
+                    .map(|symbol| symbol.kind)
+            })
+        {
+            return class_like_symbol_kind(kind);
+        }
+
+        self.global_symbols.references.iter().any(|reference| {
+            reference.source_identity == *source
+                && reference.symbol_id.qualified_name == target
+                && class_like_reference_role(reference.role)
+        }) || self.global_symbols.unresolved.iter().any(|reference| {
+            reference.source_identity == *source
+                && reference.source_spelling == target
+                && class_like_reference_role(reference.role)
+        })
     }
 
     pub(crate) fn attribute_info(&self) -> &AttributeSemanticInfo {
@@ -592,6 +1064,16 @@ impl AnalysisSnapshot {
         spans
     }
 
+    pub(crate) fn declaration_span_at_offset(&self, offset: usize) -> Option<Span> {
+        let symbol = self.symbol_at_offset(offset)?;
+        self.occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.symbol == symbol && occurrence.role == OccurrenceRole::Declaration
+            })
+            .map(|occurrence| occurrence.span)
+    }
+
     pub(crate) fn semantic_token_spans(&self) -> Vec<(Span, u32)> {
         let mut spans = self
             .occurrences
@@ -635,6 +1117,58 @@ impl AnalysisSnapshot {
             .min_by_key(|occurrence| occurrence.span.end.saturating_sub(occurrence.span.start))
             .map(|occurrence| occurrence.symbol)
     }
+}
+
+fn importable_reference_role(role: GlobalReferenceRole) -> bool {
+    !matches!(
+        role,
+        GlobalReferenceRole::ImportTarget
+            | GlobalReferenceRole::ImportAliasUse
+            | GlobalReferenceRole::Include
+    )
+}
+
+fn unresolved_import_role(code: &str) -> Option<GlobalReferenceRole> {
+    match code {
+        "E0401" => Some(GlobalReferenceRole::Type),
+        "E0305" => Some(GlobalReferenceRole::StaticQualifier),
+        "E0309" => Some(GlobalReferenceRole::FunctionCall),
+        "E0491" => Some(GlobalReferenceRole::Value),
+        "E0686" => Some(GlobalReferenceRole::AttributeClass),
+        _ => None,
+    }
+}
+
+fn class_like_symbol_kind(kind: GlobalSymbolKind) -> bool {
+    matches!(
+        kind,
+        GlobalSymbolKind::Class
+            | GlobalSymbolKind::Enum
+            | GlobalSymbolKind::Interface
+            | GlobalSymbolKind::Trait
+            | GlobalSymbolKind::CompilerKnownType
+            | GlobalSymbolKind::CompilerKnownAttribute
+    )
+}
+
+fn is_member_owner_kind(kind: Option<GlobalSymbolKind>) -> bool {
+    kind.is_some_and(class_like_symbol_kind)
+}
+
+fn class_like_reference_role(role: GlobalReferenceRole) -> bool {
+    matches!(
+        role,
+        GlobalReferenceRole::Type
+            | GlobalReferenceRole::Constructor
+            | GlobalReferenceRole::StaticQualifier
+            | GlobalReferenceRole::Extends
+            | GlobalReferenceRole::Implements
+            | GlobalReferenceRole::Throws
+            | GlobalReferenceRole::Catch
+            | GlobalReferenceRole::TypeTest
+            | GlobalReferenceRole::MatchPattern
+            | GlobalReferenceRole::AttributeClass
+    )
 }
 
 fn directive_semantic_tokens(program: &Program) -> Vec<(Span, u32)> {
@@ -755,6 +1289,7 @@ struct SnapshotBuilder<'a> {
     class_parents: HashMap<String, String>,
     class_members: HashMap<String, Vec<ClassMemberCompletion>>,
     class_property_symbols: HashMap<(String, String), usize>,
+    class_constant_symbols: HashMap<(String, String), usize>,
     enum_case_completions: HashMap<String, Vec<SemanticCompletion>>,
     enum_member_completions: HashMap<String, Vec<SemanticCompletion>>,
     methods: HashMap<(String, String), usize>,
@@ -768,6 +1303,10 @@ struct SnapshotBuilder<'a> {
     semantic_hovers: Vec<SemanticHover>,
     attribute_semantic_tokens: Vec<(Span, u32)>,
     attribute_parameter_occurrences: Vec<AttributeParameterOccurrence>,
+    missing_callables: Vec<MissingCallable>,
+    member_occurrences: Vec<MemberOccurrence>,
+    member_parents: Vec<MemberParent>,
+    statement_expression_span: Option<Span>,
     when_depth: usize,
 }
 
@@ -794,6 +1333,7 @@ impl<'a> SnapshotBuilder<'a> {
             class_parents: HashMap::new(),
             class_members: HashMap::new(),
             class_property_symbols: HashMap::new(),
+            class_constant_symbols: HashMap::new(),
             enum_case_completions: HashMap::new(),
             enum_member_completions: HashMap::new(),
             methods: HashMap::new(),
@@ -807,6 +1347,10 @@ impl<'a> SnapshotBuilder<'a> {
             semantic_hovers: Vec::new(),
             attribute_semantic_tokens: Vec::new(),
             attribute_parameter_occurrences: Vec::new(),
+            missing_callables: Vec::new(),
+            member_occurrences: Vec::new(),
+            member_parents: Vec::new(),
+            statement_expression_span: None,
             when_depth: 0,
         }
     }
@@ -822,6 +1366,17 @@ impl<'a> SnapshotBuilder<'a> {
             .map_or_else(AttributeSemanticInfo::default, |info| {
                 info.attributes.clone()
             });
+        let class_declarations = program
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Class(class) => Some(ClassDeclaration {
+                    name: class.name.clone(),
+                    span: class.span,
+                }),
+                _ => None,
+            })
+            .collect();
         AnalysisSnapshot {
             diagnostics: self.diagnostics,
             compilation_context: CompilationContext::default(),
@@ -841,6 +1396,10 @@ impl<'a> SnapshotBuilder<'a> {
             local_visibilities: self.local_visibilities,
             call_signatures: self.call_signatures,
             semantic_hovers: self.semantic_hovers,
+            missing_callables: self.missing_callables,
+            class_declarations,
+            member_occurrences: self.member_occurrences,
+            member_parents: self.member_parents,
         }
     }
 
@@ -1441,6 +2000,13 @@ impl<'a> SnapshotBuilder<'a> {
             );
             self.enum_cases
                 .insert((declaration.name.clone(), case.name.clone()), case_symbol);
+            self.record_member_occurrence(
+                &declaration.name,
+                &case.name,
+                MemberKind::EnumCase,
+                case.name_span,
+                true,
+            );
             completions.push(SemanticCompletion {
                 label: case.name.clone(),
                 kind: 20,
@@ -1508,6 +2074,14 @@ impl<'a> SnapshotBuilder<'a> {
         if let Some(parent) = &class.parent {
             self.class_parents
                 .insert(class.name.clone(), parent.clone());
+            if let (Some(child), Some(parent)) = (
+                self.member_owner(&class.name, class.name_span, true),
+                class
+                    .parent_span
+                    .and_then(|span| self.member_owner(parent, span, false)),
+            ) {
+                self.member_parents.push(MemberParent { child, parent });
+            }
         }
 
         for member in &class.members {
@@ -1546,6 +2120,13 @@ impl<'a> SnapshotBuilder<'a> {
                     );
                     self.class_property_symbols
                         .insert((class.name.clone(), property.name.clone()), property_symbol);
+                    self.record_member_occurrence(
+                        &class.name,
+                        &property.name,
+                        MemberKind::Property,
+                        selection_span,
+                        true,
+                    );
                     self.class_members
                         .entry(class.name.clone())
                         .or_default()
@@ -1563,7 +2144,23 @@ impl<'a> SnapshotBuilder<'a> {
                             is_static: property.is_static,
                         });
                 }
-                ClassMember::Constant(_) => {}
+                ClassMember::Constant(constant) => {
+                    let constant_symbol = self.add_declaration_symbol(
+                        constant.name_span,
+                        format!("{}::{}", class.name, constant.name),
+                        phpdoc_before(self.text, constant.span.start),
+                        SymbolKind::Plain,
+                    );
+                    self.class_constant_symbols
+                        .insert((class.name.clone(), constant.name.clone()), constant_symbol);
+                    self.record_member_occurrence(
+                        &class.name,
+                        &constant.name,
+                        MemberKind::Constant,
+                        constant.name_span,
+                        true,
+                    );
+                }
             }
         }
     }
@@ -1582,6 +2179,13 @@ impl<'a> SnapshotBuilder<'a> {
         self.record_callable_parameters(symbol, method);
         self.methods
             .insert((class_name.to_string(), method.name.clone()), symbol);
+        self.record_member_occurrence(
+            class_name,
+            &method.name,
+            MemberKind::Method,
+            selection_span,
+            true,
+        );
     }
 
     fn append_callable_effect_documentation(
@@ -1689,6 +2293,82 @@ impl<'a> SnapshotBuilder<'a> {
             symbol,
             role: OccurrenceRole::Reference,
         });
+    }
+
+    fn record_member_occurrence(
+        &mut self,
+        owner_name: &str,
+        name: &str,
+        kind: MemberKind,
+        span: Span,
+        declaration: bool,
+    ) {
+        let Some(owner) = self.member_owner(owner_name, span, declaration) else {
+            return;
+        };
+        let kind = if kind == MemberKind::Constant
+            && self.semantic_info.is_some_and(|info| {
+                info.global_symbols.declarations.iter().any(|declaration| {
+                    declaration.id == owner && declaration.kind == GlobalSymbolKind::Enum
+                })
+            }) {
+            MemberKind::EnumCase
+        } else {
+            kind
+        };
+        self.member_occurrences.push(MemberOccurrence {
+            identity: MemberIdentity {
+                owner,
+                name: name.to_string(),
+                kind,
+            },
+            span,
+            declaration,
+        });
+    }
+
+    fn member_owner(
+        &self,
+        owner_name: &str,
+        span: Span,
+        declaration: bool,
+    ) -> Option<GlobalSymbolId> {
+        let facts = &self.semantic_info?.global_symbols;
+        if !declaration {
+            if let Some(reference) = facts.references.iter().find(|reference| {
+                reference.source_span.source == span.source
+                    && (span_contains(span, reference.source_span.start)
+                        || (reference.role == GlobalReferenceRole::StaticQualifier
+                            && reference.source_span.end <= span.start
+                            && span.start.saturating_sub(reference.source_span.end) <= 2))
+                    && is_member_owner_kind(
+                        facts
+                            .declarations
+                            .iter()
+                            .find(|candidate| candidate.id == reference.symbol_id)
+                            .map(|candidate| candidate.kind),
+                    )
+            }) {
+                return Some(reference.symbol_id.clone());
+            }
+        }
+        facts
+            .declarations
+            .iter()
+            .filter(|candidate| is_member_owner_kind(Some(candidate.kind)))
+            .find(|candidate| {
+                candidate.qualified_name == owner_name
+                    || (candidate.name_span.source == self.source_id
+                        && candidate.source_name == owner_name)
+            })
+            .map(|candidate| candidate.id.clone())
+            .or_else(|| {
+                facts
+                    .compiler_known
+                    .iter()
+                    .find(|candidate| candidate.id.qualified_name == owner_name)
+                    .map(|candidate| candidate.id.clone())
+            })
     }
 
     fn record_callable_parameters(&mut self, symbol: usize, function: &FunctionDecl) {
@@ -1944,7 +2624,11 @@ impl<'a> SnapshotBuilder<'a> {
             Stmt::Increment(increment) => {
                 self.visit_expr(&increment.target, current_class, parent_class)
             }
-            Stmt::Expr { expr, .. } => self.visit_expr(expr, current_class, parent_class),
+            Stmt::Expr { expr, .. } => {
+                let previous = self.statement_expression_span.replace(expr.span());
+                self.visit_expr(expr, current_class, parent_class);
+                self.statement_expression_span = previous;
+            }
             _ => {}
         }
     }
@@ -2312,11 +2996,41 @@ impl<'a> SnapshotBuilder<'a> {
                     Some(CallableTarget::Method {
                         class_type,
                         method_name,
-                    }) if method_name == method => Some(class_type.name.as_str()),
-                    _ if matches!(object.as_ref(), Expr::This { .. }) => current_class,
+                    }) if method_name == method => Some(class_type.name.clone()),
+                    _ if matches!(object.as_ref(), Expr::This { .. }) => {
+                        current_class.map(ToOwned::to_owned)
+                    }
                     _ => None,
                 };
-                if let Some(class_name) = resolved_class {
+                if target.is_none() && self.has_diagnostic("E0304", *span) {
+                    if let (Some(method_span), Some(class_name)) = (
+                        method_span,
+                        self.method_receiver_class_name(object, current_class),
+                    ) {
+                        self.record_missing_callable(
+                            method,
+                            method_span,
+                            args,
+                            *span,
+                            MissingCallableTarget::Method {
+                                class_name,
+                                is_static: false,
+                            },
+                        );
+                    }
+                }
+                if let (Some(class_name), Some(method_span)) =
+                    (resolved_class.as_deref(), method_span)
+                {
+                    self.record_member_occurrence(
+                        class_name,
+                        method,
+                        MemberKind::Method,
+                        method_span,
+                        false,
+                    );
+                }
+                if let Some(class_name) = resolved_class.as_deref() {
                     if let Some(symbol) = self.resolve_method(class_name, method) {
                         if let Some(method_span) = method_span {
                             self.record_reference(method_span, symbol);
@@ -2333,6 +3047,17 @@ impl<'a> SnapshotBuilder<'a> {
                     self.semantic_info.and_then(|info| info.call_target(*span)),
                     Some(CallableTarget::Function { name: resolved }) if resolved == name
                 );
+                if !resolved && self.has_diagnostic("E0309", *span) {
+                    if let Some(name_span) = find_identifier_span(self.tokens, *span, name) {
+                        self.record_missing_callable(
+                            name,
+                            name_span,
+                            args,
+                            *span,
+                            MissingCallableTarget::Function,
+                        );
+                    }
+                }
                 if resolved {
                     let Some(symbol) = self.functions.get(name).copied() else {
                         return;
@@ -2382,12 +3107,51 @@ impl<'a> SnapshotBuilder<'a> {
                     Some(CallableTarget::Method {
                         class_type,
                         method_name,
-                    }) if method_name == method => Some(class_type.name.as_str()),
-                    _ if matches!(qualifier, StaticQualifier::SelfType) => current_class,
-                    _ if matches!(qualifier, StaticQualifier::Parent) => parent_class,
+                    }) if method_name == method => Some(class_type.name.clone()),
+                    _ if matches!(qualifier, StaticQualifier::SelfType) => {
+                        current_class.map(ToOwned::to_owned)
+                    }
+                    _ if matches!(qualifier, StaticQualifier::Parent) => {
+                        parent_class.map(ToOwned::to_owned)
+                    }
                     _ => None,
                 };
-                if let Some(class_name) = class_name {
+                if target.is_none() && self.has_diagnostic("E0304", *span) {
+                    let class_name = match qualifier {
+                        StaticQualifier::Class(name) => Some(name.clone()),
+                        StaticQualifier::SelfType => current_class.map(ToOwned::to_owned),
+                        StaticQualifier::Parent => parent_class.map(ToOwned::to_owned),
+                        StaticQualifier::InvalidStatic => None,
+                    };
+                    if let (Some(method_span), Some(class_name)) = (
+                        self.member_name_span(Span::new(qualifier_span.end, span.end), method),
+                        class_name,
+                    ) {
+                        self.record_missing_callable(
+                            method,
+                            method_span,
+                            args,
+                            *span,
+                            MissingCallableTarget::Method {
+                                class_name,
+                                is_static: true,
+                            },
+                        );
+                    }
+                }
+                let method_span =
+                    self.member_name_span(Span::new(qualifier_span.end, span.end), method);
+                if let (Some(class_name), Some(method_span)) = (class_name.as_deref(), method_span)
+                {
+                    self.record_member_occurrence(
+                        class_name,
+                        method,
+                        MemberKind::Method,
+                        method_span,
+                        false,
+                    );
+                }
+                if let Some(class_name) = class_name.as_deref() {
                     if let Some(symbol) = self.resolve_method(class_name, method) {
                         if let Some(method_span) =
                             self.member_name_span(Span::new(qualifier_span.end, span.end), method)
@@ -2480,6 +3244,18 @@ impl<'a> SnapshotBuilder<'a> {
                 if let (Some(class_name), Some(property_span)) =
                     (receiver.and_then(member_receiver_class_name), property_span)
                 {
+                    if self
+                        .semantic_info
+                        .is_some_and(|info| info.expression_type(*span).is_some())
+                    {
+                        self.record_member_occurrence(
+                            class_name,
+                            property,
+                            MemberKind::Property,
+                            property_span,
+                            false,
+                        );
+                    }
                     if let Some(symbol) = self.resolve_property(class_name, property) {
                         self.record_reference(property_span, symbol);
                     }
@@ -2535,7 +3311,31 @@ impl<'a> SnapshotBuilder<'a> {
                 member_span,
                 ..
             } => {
-                self.record_enum_static_reference(qualifier, *qualifier_span, member, *member_span);
+                if !self.record_enum_static_reference(
+                    qualifier,
+                    *qualifier_span,
+                    member,
+                    *member_span,
+                ) {
+                    let owner = match qualifier {
+                        StaticQualifier::Class(name) => Some(name.as_str()),
+                        StaticQualifier::SelfType => current_class,
+                        StaticQualifier::Parent => parent_class,
+                        StaticQualifier::InvalidStatic => None,
+                    };
+                    if let Some(owner) = owner {
+                        self.record_member_occurrence(
+                            owner,
+                            member,
+                            MemberKind::Constant,
+                            *member_span,
+                            false,
+                        );
+                        if let Some(symbol) = self.resolve_constant(owner, member) {
+                            self.record_reference(*member_span, symbol);
+                        }
+                    }
+                }
             }
             Expr::IsType { expr, .. } | Expr::Grouped { expr, .. } | Expr::Unary { expr, .. } => {
                 self.visit_expr(expr, current_class, parent_class)
@@ -2810,6 +3610,24 @@ impl<'a> SnapshotBuilder<'a> {
         None
     }
 
+    fn resolve_constant(&self, class_name: &str, constant: &str) -> Option<usize> {
+        let mut current = Some(class_name);
+        let mut visited = HashSet::new();
+        while let Some(class_name) = current {
+            if !visited.insert(class_name) {
+                break;
+            }
+            if let Some(symbol) = self
+                .class_constant_symbols
+                .get(&(class_name.to_string(), constant.to_string()))
+            {
+                return Some(*symbol);
+            }
+            current = self.class_parents.get(class_name).map(String::as_str);
+        }
+        None
+    }
+
     fn record_enum_static_reference(
         &mut self,
         qualifier: &StaticQualifier,
@@ -2835,6 +3653,7 @@ impl<'a> SnapshotBuilder<'a> {
         {
             self.record_reference(member_span, case_symbol);
         }
+        self.record_member_occurrence(enum_name, member, MemberKind::EnumCase, member_span, false);
         true
     }
 
@@ -2864,6 +3683,116 @@ impl<'a> SnapshotBuilder<'a> {
             current_class: current_class.map(ToOwned::to_owned),
             writable_payload_access: !is_readonly_shared_projection(object, self.semantic_info),
         });
+    }
+
+    fn has_diagnostic(&self, code: &str, span: Span) -> bool {
+        self.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == code && diagnostic_overlaps_span(diagnostic, span))
+    }
+
+    fn method_receiver_class_name(
+        &self,
+        object: &Expr,
+        current_class: Option<&str>,
+    ) -> Option<String> {
+        if let Some(class_name) = self
+            .semantic_info
+            .and_then(|info| info.expression_type(object.span()))
+            .and_then(member_receiver_class_name)
+        {
+            return Some(class_name.to_string());
+        }
+        if matches!(object, Expr::This { .. }) {
+            current_class.map(ToOwned::to_owned)
+        } else {
+            None
+        }
+    }
+
+    fn record_missing_callable(
+        &mut self,
+        name: &str,
+        name_span: Span,
+        arguments: &[doriac::ast::Argument],
+        call_span: Span,
+        target: MissingCallableTarget,
+    ) {
+        let mut used_names = HashSet::new();
+        let parameters = arguments
+            .iter()
+            .enumerate()
+            .map(|(index, argument)| {
+                let preferred_name = argument
+                    .name
+                    .as_ref()
+                    .map(|name| name.text.clone())
+                    .or_else(|| match &argument.value {
+                        Expr::Variable { name, .. } => Some(name.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| format!("arg{}", index + 1));
+                let name = unique_parameter_name(preferred_name, &mut used_names);
+                let ty = self.generated_argument_type(&argument.value);
+                GeneratedParameter { name, ty }
+            })
+            .collect();
+        let return_type = if self.statement_expression_span == Some(call_span) {
+            "void".to_string()
+        } else {
+            "mixed".to_string()
+        };
+        self.missing_callables.push(MissingCallable {
+            name: name.to_string(),
+            name_span,
+            parameters,
+            return_type,
+            target,
+        });
+    }
+
+    fn generated_argument_type(&self, expression: &Expr) -> String {
+        if let Some(ty) = self
+            .semantic_info
+            .and_then(|info| info.expression_type(expression.span()))
+        {
+            return generated_parameter_type(ty);
+        }
+        match expression {
+            Expr::Variable { name, .. } => self
+                .resolve_local(name)
+                .and_then(|symbol| self.symbols.get(symbol))
+                .and_then(|symbol| symbol.signature.split_once(" $").map(|(ty, _)| ty))
+                .and_then(|ty| ty.split_whitespace().last())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| "mixed".to_string()),
+            Expr::String { .. } | Expr::InterpolatedString { .. } => "string".to_string(),
+            Expr::Int { .. } => "int".to_string(),
+            Expr::Float { .. } => "float".to_string(),
+            Expr::Bool { .. } => "bool".to_string(),
+            Expr::New { class_type, .. } => class_type.to_string(),
+            _ => "mixed".to_string(),
+        }
+    }
+}
+
+fn unique_parameter_name(preferred: String, used: &mut HashSet<String>) -> String {
+    if used.insert(preferred.clone()) {
+        return preferred;
+    }
+    for suffix in 2.. {
+        let candidate = format!("{preferred}{suffix}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("an unused parameter suffix always exists")
+}
+
+fn generated_parameter_type(ty: &ResolvedType) -> String {
+    match ty {
+        ResolvedType::Null | ResolvedType::Unsupported | ResolvedType::Void => "mixed".to_string(),
+        _ => display_resolved_type(ty),
     }
 }
 

@@ -9,6 +9,7 @@ It provides:
 - `.doria` file recognition.
 - Basic syntax highlighting for Doria keywords, variables, types, attributes, strings, string interpolation, comments, numbers, operators, punctuation, accepted OOP declaration vocabulary, namespace/import/include/directive vocabulary, and rejected strict-comparison/preprocessor spellings.
 - Doria code-style settings and formatting for tabs, indentation, continuation indentation, spacing, braces, and preserved blank lines.
+- PHPDoc-compatible documentation comments. Pressing Enter after `/*` continues a structured block; pressing Enter after `/**` asks `doria-lsp` to pre-fill declaration-aware `@template`, `@param`, `@return`, `@throws`, and `@var` tags. Doria parameter modifiers remain distinctly highlighted inside `@param` tags.
 - Separate **New > Doria File** and **New > Doria Class** workflows. The class dialog can create a class, interface, trait, or enum and exposes class inheritance controls only for class templates. Namespace suggestions use the nearest `Baton.toml` `[autoload.namespaces]` and `[autoload-dev.namespaces]` roots. Without a matching mapping, the namespace remains editable for explicit entry. Moving a Doria file does not rewrite its namespace or references; automatic move retargeting waits for compiler-owned reference information.
 - A Doria settings page for configuring the language server path.
 - `doria-lsp` integration through the IntelliJ Platform LSP API.
@@ -82,6 +83,13 @@ Make sure `*.doria` is listed under `Doria`, and remove it from `Text` or `Plain
 
 The syntax highlighter, file type registration, comments, and settings page only require the IntelliJ Platform module. `doria-lsp` integration is enabled when the IDE also provides JetBrains' LSP module.
 
+Documentation-comment generation uses the running language server so its tags
+stay aligned with the compiler's declaration grammar. The plugin's Enter handler
+bridges the standard `textDocument/onTypeFormatting` request on the supported
+2025.2 platform; newer platform-native on-type formatting can consume the same
+server capability. Plain block comments are structured without inventing semantic
+documentation.
+
 Double-quoted interpolation uses the ordinary Doria expression grammar, so expressions such as `{left() + right()}` receive normal token scopes inside the string. Literal opening braces use `\{`; single-quoted strings remain non-interpolating.
 
 The presentation lexer recognizes accepted Stage 30a callable syntax: `fn` arrow
@@ -127,6 +135,14 @@ php scripts/check_editor_highlighting.php
 Files under `editors/fixtures/` are syntax-highlighting smoke fixtures. The IntelliJ LSP adapter keeps them out of `doria-lsp` diagnostics so highlighting can be exercised independently of language-server diagnostics.
 
 Doria uses distinct spellings for imports and trait composition: file/namespace-scope `use` imports individual, aliased, or grouped names from namespaces, while class-body or trait-body `uses` composes traits. The IntelliJ highlighter keeps these scopes separate as import use and trait-composition uses. It also presents namespace declarations and literal `include` directives; the compiler owns all resolution and diagnostics.
+
+The intention menu offers `Use import for ...` through the bundled language
+server for compiler-classified fully qualified names and unresolved short names
+that match workspace declarations. Applying it shortens qualified occurrences
+and maintains sorted `use` declarations: class-like imports first, followed by
+alphabetized function and constant imports in a separate block. Existing aliases
+are reused, ambiguous matches remain explicit choices, and alias collisions or
+import blocks with interleaved comments are not rewritten.
 
 ## Run in a sandbox IDE
 

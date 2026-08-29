@@ -40,7 +40,13 @@ positions; explanations and Help remain readable diagnostic detail; stable
 codes, severity, kind, development-only status, cause identity, documentation
 links, and structured fixes are retained. Duplicate and cause grouping stay compiler-owned. Only
 Machine Applicable fixes become automatic code actions, so clients never guess
-at a semantic correction.
+at a semantic correction. Equivalent diagnostic titles and primary-label text
+are collapsed at this boundary so every client receives one concise message.
+
+Import actions also remain compiler-backed. The server uses canonical global
+symbol identity and reference roles to shorten a qualified occurrence, reject
+alias collisions, and organize existing imports into class-like and non-class
+blocks. Editor clients only present and apply the returned LSP workspace edit.
 
 The server may organize IDE-friendly data but must not create a second semantic checker.
 Each open document has one versioned compiler-backed analysis snapshot containing

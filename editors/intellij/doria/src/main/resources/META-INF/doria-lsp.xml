@@ -1,5 +1,18 @@
 <idea-plugin>
   <extensions defaultExtensionNs="com.intellij">
     <platform.lsp.serverSupportProvider implementation="dev.doria.intellij.lsp.DoriaLspServerSupportProvider" />
+    <enterHandlerDelegate implementation="dev.doria.intellij.documentation.DoriaDocumentationEnterHandler" />
+    <intentionAction>
+      <className>dev.doria.intellij.actions.DoriaImportIntention</className>
+      <category>Doria</category>
+    </intentionAction>
+    <intentionAction>
+      <className>dev.doria.intellij.actions.DoriaGenerateMethodIntention</className>
+      <category>Doria</category>
+    </intentionAction>
+    <intentionAction>
+      <className>dev.doria.intellij.actions.DoriaGenerateFunctionIntention</className>
+      <category>Doria</category>
+    </intentionAction>
   </extensions>
 </idea-plugin>

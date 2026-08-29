@@ -42,9 +42,30 @@ fn assert_lsp_diagnostic_matches_compiler(name: &str, source: &str, code: &str) 
             DiagnosticSeverity::Note => 3,
         }
     );
+    let primary_message = compiler_diagnostic
+        .labels
+        .iter()
+        .find(|label| label.role == LabelRole::Primary)
+        .or_else(|| compiler_diagnostic.labels.first())
+        .map(|label| label.message.as_str())
+        .unwrap_or_default();
+    let normalize = |text: &str| {
+        text.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim_end_matches(['.', ':', ';'])
+            .to_lowercase()
+    };
+    let expected_prefix = if !primary_message.is_empty()
+        && normalize(&compiler_diagnostic.title) == normalize(primary_message)
+    {
+        primary_message
+    } else {
+        &compiler_diagnostic.title
+    };
     assert!(lsp_diagnostic["message"]
         .as_str()
-        .is_some_and(|message| message.starts_with(&compiler_diagnostic.title)));
+        .is_some_and(|message| message.starts_with(expected_prefix)));
     assert_eq!(
         lsp_diagnostic["data"]["kind"],
         compiler_diagnostic.kind.as_str()

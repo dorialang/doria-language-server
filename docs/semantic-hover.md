@@ -158,6 +158,15 @@ Hover preserves the summary and body text and presents `@param`, `@return`, and
 `@throws` tags in dedicated Markdown sections. Unknown tags remain visible instead
 of being discarded.
 
+Both editor clients request documentation-comment generation from `doria-lsp`.
+Pressing Enter after `/**` creates a PHPDoc-compatible block for the next compiler
+declaration and pre-fills the tags that declaration requires: `@template`,
+`@param`, `@return`, source-ordered `@throws`, and `@var`. Parameter tags preserve
+Doria's `internal`, `take`, and `writable` modifiers. The server reads these facts
+from the compiler AST; the VS Code and JetBrains clients do not maintain their own
+signature parsers. Ordinary `/*` comments receive the same leading-asterisk block
+shape but never receive semantic tags.
+
 ## Ownership boundary
 
 The compiler remains the semantic authority. The server builds an IDE-oriented
@@ -176,6 +185,15 @@ explicit aliases, and declines for duplicates, implicit aliases, or incomplete
 inputs. Completion offers current-namespace declarations, explicit aliases,
 prelude/compiler-known names, and qualified open-document declarations without
 treating every dependency short name as imported.
+
+The same compiler-owned global-symbol facts drive the `Use import for ...` code
+action. It handles qualified references and unresolved short names matched by
+role against declarations in the workspace symbol graph. It reuses an existing
+alias, presents ambiguous canonical targets as separate actions, and declines
+when introducing the short name would collide. The resulting import section
+groups class-like symbols before functions and constants, sorts each group by
+canonical qualified name, and preserves comments by refusing to normalize an
+interleaved block.
 
 The graph is intentionally bounded to supplied open text. It resolves explicit
 includes available through that in-memory source provider, but it does not read

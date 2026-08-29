@@ -11,6 +11,14 @@ contributes a Doria launch profile to VS Code's Run and Debug view.
 
 New lines inside paired delimiters use VS Code's active indentation settings, including spaces versus tabs and the configured tab size.
 
+Block comments follow VS Code's PHP-like editing behavior. Pressing Enter after
+`/*` continues a leading-asterisk block. Pressing Enter after `/**` also requests
+compiler-backed documentation tags from `doria-lsp`, including `@template`,
+`@param`, `@return`, `@throws`, and `@var` where the next declaration requires
+them. Doria's `internal`, `take`, and `writable` parameter modifiers receive
+dedicated documentation scopes. The extension enables format-on-type for Doria by
+default; users can still override `editor.formatOnType` in their settings.
+
 Double-quoted interpolation uses the ordinary Doria expression grammar, so expressions such as `{left() + right()}` receive normal token scopes inside the string. Literal opening braces use `\{`; single-quoted strings remain non-interpolating.
 
 The TextMate grammar recognizes accepted Stage 30a callable syntax: `fn` arrow
@@ -147,3 +155,11 @@ php scripts/check_editor_highlighting.php
 Files under `editors/fixtures/` are shared syntax-highlighting smoke fixtures and are excluded from `doria-lsp` diagnostics.
 
 Doria uses distinct spellings for imports and trait composition: file/namespace-scope `use` imports individual, aliased, or grouped names from namespaces, while class-body or trait-body `uses` composes traits. The TextMate grammar keeps these scopes separate as import use and trait-composition uses. It also presents namespace declarations and literal `include` directives; the compiler owns all resolution and diagnostics.
+
+The Quick Fix menu offers `Use import for ...` for compiler-classified fully
+qualified names and unresolved short names that match workspace declarations.
+The language server shortens qualified occurrences and maintains the file's
+`use` declarations. Class-like imports are listed first alphabetically; function
+and constant imports follow alphabetically in a separate block. Existing aliases
+are reused, ambiguous short names remain explicit choices, and unsafe alias
+collisions or comment-interleaved import blocks are left unchanged.
