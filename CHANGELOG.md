@@ -6,10 +6,14 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
-- Presented unresolved function and method calls as actionable editor warnings
-  while retaining compiler-error semantics, and added shared LSP quick fixes
-  that generate conservative free, instance, and static callable stubs in VS
-  Code and JetBrains editors.
+- Added compiler-resolved go-to-definition and conservative rename for local
+  bindings and cross-file methods, properties, class constants, and enum cases,
+  with standard LSP navigation and workspace edits exposed in both official
+  editor integrations.
+- Preserved compiler error severity for unresolved function and method calls,
+  and added explicit LSP refactor actions that generate conservative free,
+  instance, and static callable stubs in VS Code and JetBrains editors without
+  presenting inferred edits as compiler-approved automatic fixes.
 - Completed Stage 32 tooling by pinning the typed-attribute compiler and using
   its schemas, canonical identities, bound constant values, and source spans for
   scoped marker/schema and named-argument completion, typed metadata hover,

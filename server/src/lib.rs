@@ -597,7 +597,7 @@ impl Server {
             .map_or("", |document| document.text.as_str());
         let mut value = json!({
             "range": span_to_range(text, primary_span),
-            "severity": lsp_diagnostic_severity(diagnostic),
+            "severity": lsp_severity(diagnostic.severity),
             "code": diagnostic.code,
             "source": "doriac",
             "message": message,
@@ -935,18 +935,24 @@ impl Server {
     }
 
     fn definition(&self, params: Option<&Value>) -> Value {
-        let Some((uri, _, offset)) = self.uri_document_and_offset(params) else {
+        let Some((uri, document, offset)) = self.uri_document_and_offset(params) else {
             return Value::Null;
         };
-        let Some(location) = self.document_index.definition(&uri, offset) else {
-            return Value::Null;
-        };
-        let Some(document) = self.documents.get(&location.uri) else {
+        if let Some(location) = self.document_index.definition(&uri, offset) {
+            let Some(target_document) = self.documents.get(&location.uri) else {
+                return Value::Null;
+            };
+            return json!({
+                "uri": location.uri,
+                "range": span_to_range(&target_document.text, location.span),
+            });
+        }
+        let Some(span) = document.analysis.declaration_span_at_offset(offset) else {
             return Value::Null;
         };
         json!({
-            "uri": location.uri,
-            "range": span_to_range(&document.text, location.span),
+            "uri": uri,
+            "range": span_to_range(&document.text, span),
         })
     }
 
@@ -1172,12 +1178,15 @@ impl Server {
             }
         };
 
-        let diagnostic = prepare_diagnostics(document.analysis.diagnostics())
+        let has_diagnostic = prepare_diagnostics(document.analysis.diagnostics())
             .into_iter()
-            .find(|diagnostic| {
+            .any(|diagnostic| {
                 matches!(diagnostic.code, "E0304" | "E0309")
                     && spans_overlap(diagnostic.span, callable.name_span)
-            })?;
+            });
+        if !has_diagnostic {
+            return None;
+        }
         let mut changes = serde_json::Map::new();
         changes.insert(
             destination_uri,
@@ -1188,9 +1197,7 @@ impl Server {
         );
         Some(json!({
             "title": title,
-            "kind": "quickfix",
-            "diagnostics": [self.graph_diagnostic_to_lsp(uri, &diagnostic)],
-            "isPreferred": true,
+            "kind": "refactor.rewrite",
             "edit": { "changes": changes },
         }))
     }
@@ -2942,7 +2949,7 @@ fn diagnostic_to_lsp(uri: &str, text: &str, diagnostic: &Diagnostic) -> Value {
 
     let mut value = json!({
         "range": span_to_range(text, primary_span),
-        "severity": lsp_diagnostic_severity(diagnostic),
+        "severity": lsp_severity(diagnostic.severity),
         "code": diagnostic.code,
         "source": "doriac",
         "message": message,
@@ -3055,14 +3062,6 @@ fn lsp_severity(severity: DiagnosticSeverity) -> u8 {
         DiagnosticSeverity::Error => 1,
         DiagnosticSeverity::Warning => 2,
         DiagnosticSeverity::Note => 3,
-    }
-}
-
-fn lsp_diagnostic_severity(diagnostic: &Diagnostic) -> u8 {
-    if matches!(diagnostic.code, "E0304" | "E0309") {
-        2
-    } else {
-        lsp_severity(diagnostic.severity)
     }
 }
 
@@ -5299,7 +5298,7 @@ function relay(take Failure $failure): void throws Failure
     }
 
     #[test]
-    fn unresolved_calls_are_editor_warnings_without_weakening_compiler_diagnostics() {
+    fn unresolved_calls_preserve_compiler_error_severity() {
         let source = r#"class Application
 {
     function run(): void
@@ -5319,7 +5318,7 @@ function main(): void
                 .iter()
                 .find(|diagnostic| diagnostic["code"] == code)
                 .unwrap_or_else(|| panic!("missing {code}: {diagnostics:#?}"));
-            assert_eq!(diagnostic["severity"], 2);
+            assert_eq!(diagnostic["severity"], 1);
         }
         let compiler = doriac::check_source("missing-callables.doria", source)
             .expect_err("unresolved calls remain compiler errors");
@@ -5363,8 +5362,9 @@ function main(): void
                     .find(|action| action["title"] == "Generate method `start`")
             })
             .unwrap_or_else(|| panic!("missing method action: {method_actions:#?}"));
-        assert_eq!(method["kind"], "quickfix");
-        assert_eq!(method["diagnostics"][0]["severity"], 2);
+        assert_eq!(method["kind"], "refactor.rewrite");
+        assert!(method.get("diagnostics").is_none());
+        assert!(method.get("isPreferred").is_none());
         let method_text = method["edit"]["changes"][uri][0]["newText"]
             .as_str()
             .expect("generated method text");
@@ -5387,6 +5387,9 @@ function main(): void
                     .find(|action| action["title"] == "Generate function `launch`")
             })
             .unwrap_or_else(|| panic!("missing function action: {function_actions:#?}"));
+        assert_eq!(function["kind"], "refactor.rewrite");
+        assert!(function.get("diagnostics").is_none());
+        assert!(function.get("isPreferred").is_none());
         let function_text = function["edit"]["changes"][uri][0]["newText"]
             .as_str()
             .expect("generated function text");
@@ -6204,6 +6207,106 @@ function inspect(): void {
                 "missing same-namespace completion {name}"
             );
         }
+    }
+
+    #[test]
+    fn navigation_and_rename_follow_resolved_members_across_files() {
+        let declarations_uri = "file:///workspace/domain.doria";
+        let consumer_uri = "file:///workspace/app.doria";
+        let declarations = r#"namespace Acme;
+class Model
+{
+    int $identifier = 1;
+    const int VERSION = 1;
+    function render(): string { return "ready"; }
+}
+enum State { case Ready; }
+"#;
+        let consumer = r#"namespace Acme;
+function inspect(Model $model): void
+{
+    echo $model->identifier;
+    echo $model->render();
+    echo Model::VERSION;
+    State $state = State::Ready;
+}
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, declarations_uri, declarations);
+        open_stage31_document(&mut server, consumer_uri, consumer);
+        assert!(server.documents[consumer_uri]
+            .analysis
+            .diagnostics()
+            .is_empty());
+
+        for (name, declaration_name) in [
+            ("identifier", "$identifier"),
+            ("render", "render"),
+            ("VERSION", "VERSION"),
+            ("Ready", "Ready"),
+        ] {
+            let offset = consumer.find(name).unwrap();
+            let definition = server.definition(Some(&params_at(consumer_uri, consumer, offset)));
+            assert_eq!(
+                definition["uri"], declarations_uri,
+                "{name}: {definition:#?}"
+            );
+            let expected =
+                byte_offset_to_position(declarations, declarations.find(declaration_name).unwrap());
+            assert_eq!(definition["range"]["start"]["line"], expected.line);
+            assert_eq!(
+                definition["range"]["start"]["character"],
+                expected.character
+            );
+        }
+
+        let render = consumer.find("render").unwrap();
+        let rename = server.rename(Some(&json!({
+            "textDocument": { "uri": consumer_uri },
+            "position": params_at(consumer_uri, consumer, render)["position"].clone(),
+            "newName": "display",
+        })));
+        assert_eq!(
+            rename["changes"][declarations_uri].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            rename["changes"][consumer_uri].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert!(rename["changes"][declarations_uri]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(rename["changes"][consumer_uri].as_array().unwrap())
+            .all(|edit| edit["newText"] == "display"));
+    }
+
+    #[test]
+    fn definition_falls_back_to_same_document_local_bindings() {
+        let uri = "file:///workspace/local.doria";
+        let source = r#"function main(): void
+{
+    int $value = 1;
+    echo $value;
+}
+"#;
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document::new(uri, source.to_string(), Some(1)),
+        );
+        server.rebuild_document_index();
+
+        let reference = source.rfind("$value").unwrap();
+        let definition = server.definition(Some(&params_at(uri, source, reference)));
+        let expected = byte_offset_to_position(source, source.find("$value").unwrap());
+        assert_eq!(definition["uri"], uri);
+        assert_eq!(definition["range"]["start"]["line"], expected.line);
+        assert_eq!(
+            definition["range"]["start"]["character"],
+            expected.character
+        );
     }
 
     #[test]

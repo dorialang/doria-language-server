@@ -301,6 +301,8 @@ pub(crate) struct AnalysisSnapshot {
     semantic_hovers: Vec<SemanticHover>,
     missing_callables: Vec<MissingCallable>,
     class_declarations: Vec<ClassDeclaration>,
+    member_occurrences: Vec<MemberOccurrence>,
+    member_parents: Vec<MemberParent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -316,6 +318,34 @@ pub(crate) struct AttributeParameterOccurrence {
     pub(crate) span: Span,
     pub(crate) declaration: bool,
     pub(crate) spelling: AttributeParameterSpelling,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MemberKind {
+    Method,
+    Property,
+    Constant,
+    EnumCase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct MemberIdentity {
+    pub(crate) owner: GlobalSymbolId,
+    pub(crate) name: String,
+    pub(crate) kind: MemberKind,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MemberOccurrence {
+    pub(crate) identity: MemberIdentity,
+    pub(crate) span: Span,
+    pub(crate) declaration: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MemberParent {
+    pub(crate) child: GlobalSymbolId,
+    pub(crate) parent: GlobalSymbolId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -492,6 +522,14 @@ impl AnalysisSnapshot {
 
     pub(crate) fn global_symbols(&self) -> &GlobalSymbolFacts {
         &self.global_symbols
+    }
+
+    pub(crate) fn member_occurrences(&self) -> &[MemberOccurrence] {
+        &self.member_occurrences
+    }
+
+    pub(crate) fn member_parents(&self) -> &[MemberParent] {
+        &self.member_parents
     }
 
     pub(crate) fn missing_callable_at_offset(&self, offset: usize) -> Option<&MissingCallable> {
@@ -1026,6 +1064,16 @@ impl AnalysisSnapshot {
         spans
     }
 
+    pub(crate) fn declaration_span_at_offset(&self, offset: usize) -> Option<Span> {
+        let symbol = self.symbol_at_offset(offset)?;
+        self.occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.symbol == symbol && occurrence.role == OccurrenceRole::Declaration
+            })
+            .map(|occurrence| occurrence.span)
+    }
+
     pub(crate) fn semantic_token_spans(&self) -> Vec<(Span, u32)> {
         let mut spans = self
             .occurrences
@@ -1101,6 +1149,10 @@ fn class_like_symbol_kind(kind: GlobalSymbolKind) -> bool {
             | GlobalSymbolKind::CompilerKnownType
             | GlobalSymbolKind::CompilerKnownAttribute
     )
+}
+
+fn is_member_owner_kind(kind: Option<GlobalSymbolKind>) -> bool {
+    kind.is_some_and(class_like_symbol_kind)
 }
 
 fn class_like_reference_role(role: GlobalReferenceRole) -> bool {
@@ -1237,6 +1289,7 @@ struct SnapshotBuilder<'a> {
     class_parents: HashMap<String, String>,
     class_members: HashMap<String, Vec<ClassMemberCompletion>>,
     class_property_symbols: HashMap<(String, String), usize>,
+    class_constant_symbols: HashMap<(String, String), usize>,
     enum_case_completions: HashMap<String, Vec<SemanticCompletion>>,
     enum_member_completions: HashMap<String, Vec<SemanticCompletion>>,
     methods: HashMap<(String, String), usize>,
@@ -1251,6 +1304,8 @@ struct SnapshotBuilder<'a> {
     attribute_semantic_tokens: Vec<(Span, u32)>,
     attribute_parameter_occurrences: Vec<AttributeParameterOccurrence>,
     missing_callables: Vec<MissingCallable>,
+    member_occurrences: Vec<MemberOccurrence>,
+    member_parents: Vec<MemberParent>,
     statement_expression_span: Option<Span>,
     when_depth: usize,
 }
@@ -1278,6 +1333,7 @@ impl<'a> SnapshotBuilder<'a> {
             class_parents: HashMap::new(),
             class_members: HashMap::new(),
             class_property_symbols: HashMap::new(),
+            class_constant_symbols: HashMap::new(),
             enum_case_completions: HashMap::new(),
             enum_member_completions: HashMap::new(),
             methods: HashMap::new(),
@@ -1292,6 +1348,8 @@ impl<'a> SnapshotBuilder<'a> {
             attribute_semantic_tokens: Vec::new(),
             attribute_parameter_occurrences: Vec::new(),
             missing_callables: Vec::new(),
+            member_occurrences: Vec::new(),
+            member_parents: Vec::new(),
             statement_expression_span: None,
             when_depth: 0,
         }
@@ -1340,6 +1398,8 @@ impl<'a> SnapshotBuilder<'a> {
             semantic_hovers: self.semantic_hovers,
             missing_callables: self.missing_callables,
             class_declarations,
+            member_occurrences: self.member_occurrences,
+            member_parents: self.member_parents,
         }
     }
 
@@ -1940,6 +2000,13 @@ impl<'a> SnapshotBuilder<'a> {
             );
             self.enum_cases
                 .insert((declaration.name.clone(), case.name.clone()), case_symbol);
+            self.record_member_occurrence(
+                &declaration.name,
+                &case.name,
+                MemberKind::EnumCase,
+                case.name_span,
+                true,
+            );
             completions.push(SemanticCompletion {
                 label: case.name.clone(),
                 kind: 20,
@@ -2007,6 +2074,14 @@ impl<'a> SnapshotBuilder<'a> {
         if let Some(parent) = &class.parent {
             self.class_parents
                 .insert(class.name.clone(), parent.clone());
+            if let (Some(child), Some(parent)) = (
+                self.member_owner(&class.name, class.name_span, true),
+                class
+                    .parent_span
+                    .and_then(|span| self.member_owner(parent, span, false)),
+            ) {
+                self.member_parents.push(MemberParent { child, parent });
+            }
         }
 
         for member in &class.members {
@@ -2045,6 +2120,13 @@ impl<'a> SnapshotBuilder<'a> {
                     );
                     self.class_property_symbols
                         .insert((class.name.clone(), property.name.clone()), property_symbol);
+                    self.record_member_occurrence(
+                        &class.name,
+                        &property.name,
+                        MemberKind::Property,
+                        selection_span,
+                        true,
+                    );
                     self.class_members
                         .entry(class.name.clone())
                         .or_default()
@@ -2062,7 +2144,23 @@ impl<'a> SnapshotBuilder<'a> {
                             is_static: property.is_static,
                         });
                 }
-                ClassMember::Constant(_) => {}
+                ClassMember::Constant(constant) => {
+                    let constant_symbol = self.add_declaration_symbol(
+                        constant.name_span,
+                        format!("{}::{}", class.name, constant.name),
+                        phpdoc_before(self.text, constant.span.start),
+                        SymbolKind::Plain,
+                    );
+                    self.class_constant_symbols
+                        .insert((class.name.clone(), constant.name.clone()), constant_symbol);
+                    self.record_member_occurrence(
+                        &class.name,
+                        &constant.name,
+                        MemberKind::Constant,
+                        constant.name_span,
+                        true,
+                    );
+                }
             }
         }
     }
@@ -2081,6 +2179,13 @@ impl<'a> SnapshotBuilder<'a> {
         self.record_callable_parameters(symbol, method);
         self.methods
             .insert((class_name.to_string(), method.name.clone()), symbol);
+        self.record_member_occurrence(
+            class_name,
+            &method.name,
+            MemberKind::Method,
+            selection_span,
+            true,
+        );
     }
 
     fn append_callable_effect_documentation(
@@ -2188,6 +2293,82 @@ impl<'a> SnapshotBuilder<'a> {
             symbol,
             role: OccurrenceRole::Reference,
         });
+    }
+
+    fn record_member_occurrence(
+        &mut self,
+        owner_name: &str,
+        name: &str,
+        kind: MemberKind,
+        span: Span,
+        declaration: bool,
+    ) {
+        let Some(owner) = self.member_owner(owner_name, span, declaration) else {
+            return;
+        };
+        let kind = if kind == MemberKind::Constant
+            && self.semantic_info.is_some_and(|info| {
+                info.global_symbols.declarations.iter().any(|declaration| {
+                    declaration.id == owner && declaration.kind == GlobalSymbolKind::Enum
+                })
+            }) {
+            MemberKind::EnumCase
+        } else {
+            kind
+        };
+        self.member_occurrences.push(MemberOccurrence {
+            identity: MemberIdentity {
+                owner,
+                name: name.to_string(),
+                kind,
+            },
+            span,
+            declaration,
+        });
+    }
+
+    fn member_owner(
+        &self,
+        owner_name: &str,
+        span: Span,
+        declaration: bool,
+    ) -> Option<GlobalSymbolId> {
+        let facts = &self.semantic_info?.global_symbols;
+        if !declaration {
+            if let Some(reference) = facts.references.iter().find(|reference| {
+                reference.source_span.source == span.source
+                    && (span_contains(span, reference.source_span.start)
+                        || (reference.role == GlobalReferenceRole::StaticQualifier
+                            && reference.source_span.end <= span.start
+                            && span.start.saturating_sub(reference.source_span.end) <= 2))
+                    && is_member_owner_kind(
+                        facts
+                            .declarations
+                            .iter()
+                            .find(|candidate| candidate.id == reference.symbol_id)
+                            .map(|candidate| candidate.kind),
+                    )
+            }) {
+                return Some(reference.symbol_id.clone());
+            }
+        }
+        facts
+            .declarations
+            .iter()
+            .filter(|candidate| is_member_owner_kind(Some(candidate.kind)))
+            .find(|candidate| {
+                candidate.qualified_name == owner_name
+                    || (candidate.name_span.source == self.source_id
+                        && candidate.source_name == owner_name)
+            })
+            .map(|candidate| candidate.id.clone())
+            .or_else(|| {
+                facts
+                    .compiler_known
+                    .iter()
+                    .find(|candidate| candidate.id.qualified_name == owner_name)
+                    .map(|candidate| candidate.id.clone())
+            })
     }
 
     fn record_callable_parameters(&mut self, symbol: usize, function: &FunctionDecl) {
@@ -2815,8 +2996,10 @@ impl<'a> SnapshotBuilder<'a> {
                     Some(CallableTarget::Method {
                         class_type,
                         method_name,
-                    }) if method_name == method => Some(class_type.name.as_str()),
-                    _ if matches!(object.as_ref(), Expr::This { .. }) => current_class,
+                    }) if method_name == method => Some(class_type.name.clone()),
+                    _ if matches!(object.as_ref(), Expr::This { .. }) => {
+                        current_class.map(ToOwned::to_owned)
+                    }
                     _ => None,
                 };
                 if target.is_none() && self.has_diagnostic("E0304", *span) {
@@ -2836,7 +3019,18 @@ impl<'a> SnapshotBuilder<'a> {
                         );
                     }
                 }
-                if let Some(class_name) = resolved_class {
+                if let (Some(class_name), Some(method_span)) =
+                    (resolved_class.as_deref(), method_span)
+                {
+                    self.record_member_occurrence(
+                        class_name,
+                        method,
+                        MemberKind::Method,
+                        method_span,
+                        false,
+                    );
+                }
+                if let Some(class_name) = resolved_class.as_deref() {
                     if let Some(symbol) = self.resolve_method(class_name, method) {
                         if let Some(method_span) = method_span {
                             self.record_reference(method_span, symbol);
@@ -2913,9 +3107,13 @@ impl<'a> SnapshotBuilder<'a> {
                     Some(CallableTarget::Method {
                         class_type,
                         method_name,
-                    }) if method_name == method => Some(class_type.name.as_str()),
-                    _ if matches!(qualifier, StaticQualifier::SelfType) => current_class,
-                    _ if matches!(qualifier, StaticQualifier::Parent) => parent_class,
+                    }) if method_name == method => Some(class_type.name.clone()),
+                    _ if matches!(qualifier, StaticQualifier::SelfType) => {
+                        current_class.map(ToOwned::to_owned)
+                    }
+                    _ if matches!(qualifier, StaticQualifier::Parent) => {
+                        parent_class.map(ToOwned::to_owned)
+                    }
                     _ => None,
                 };
                 if target.is_none() && self.has_diagnostic("E0304", *span) {
@@ -2941,7 +3139,19 @@ impl<'a> SnapshotBuilder<'a> {
                         );
                     }
                 }
-                if let Some(class_name) = class_name {
+                let method_span =
+                    self.member_name_span(Span::new(qualifier_span.end, span.end), method);
+                if let (Some(class_name), Some(method_span)) = (class_name.as_deref(), method_span)
+                {
+                    self.record_member_occurrence(
+                        class_name,
+                        method,
+                        MemberKind::Method,
+                        method_span,
+                        false,
+                    );
+                }
+                if let Some(class_name) = class_name.as_deref() {
                     if let Some(symbol) = self.resolve_method(class_name, method) {
                         if let Some(method_span) =
                             self.member_name_span(Span::new(qualifier_span.end, span.end), method)
@@ -3034,6 +3244,18 @@ impl<'a> SnapshotBuilder<'a> {
                 if let (Some(class_name), Some(property_span)) =
                     (receiver.and_then(member_receiver_class_name), property_span)
                 {
+                    if self
+                        .semantic_info
+                        .is_some_and(|info| info.expression_type(*span).is_some())
+                    {
+                        self.record_member_occurrence(
+                            class_name,
+                            property,
+                            MemberKind::Property,
+                            property_span,
+                            false,
+                        );
+                    }
                     if let Some(symbol) = self.resolve_property(class_name, property) {
                         self.record_reference(property_span, symbol);
                     }
@@ -3089,7 +3311,31 @@ impl<'a> SnapshotBuilder<'a> {
                 member_span,
                 ..
             } => {
-                self.record_enum_static_reference(qualifier, *qualifier_span, member, *member_span);
+                if !self.record_enum_static_reference(
+                    qualifier,
+                    *qualifier_span,
+                    member,
+                    *member_span,
+                ) {
+                    let owner = match qualifier {
+                        StaticQualifier::Class(name) => Some(name.as_str()),
+                        StaticQualifier::SelfType => current_class,
+                        StaticQualifier::Parent => parent_class,
+                        StaticQualifier::InvalidStatic => None,
+                    };
+                    if let Some(owner) = owner {
+                        self.record_member_occurrence(
+                            owner,
+                            member,
+                            MemberKind::Constant,
+                            *member_span,
+                            false,
+                        );
+                        if let Some(symbol) = self.resolve_constant(owner, member) {
+                            self.record_reference(*member_span, symbol);
+                        }
+                    }
+                }
             }
             Expr::IsType { expr, .. } | Expr::Grouped { expr, .. } | Expr::Unary { expr, .. } => {
                 self.visit_expr(expr, current_class, parent_class)
@@ -3364,6 +3610,24 @@ impl<'a> SnapshotBuilder<'a> {
         None
     }
 
+    fn resolve_constant(&self, class_name: &str, constant: &str) -> Option<usize> {
+        let mut current = Some(class_name);
+        let mut visited = HashSet::new();
+        while let Some(class_name) = current {
+            if !visited.insert(class_name) {
+                break;
+            }
+            if let Some(symbol) = self
+                .class_constant_symbols
+                .get(&(class_name.to_string(), constant.to_string()))
+            {
+                return Some(*symbol);
+            }
+            current = self.class_parents.get(class_name).map(String::as_str);
+        }
+        None
+    }
+
     fn record_enum_static_reference(
         &mut self,
         qualifier: &StaticQualifier,
@@ -3389,6 +3653,7 @@ impl<'a> SnapshotBuilder<'a> {
         {
             self.record_reference(member_span, case_symbol);
         }
+        self.record_member_occurrence(enum_name, member, MemberKind::EnumCase, member_span, false);
         true
     }
 

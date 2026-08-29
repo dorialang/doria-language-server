@@ -62,6 +62,27 @@ class DoriaLanguageClient {
           provideHover: (document, position) => this.provideHover(document, position)
         }
       ),
+      vscode.languages.registerDefinitionProvider(
+        { language: "doria" },
+        {
+          provideDefinition: (document, position) =>
+            this.provideDefinition(document, position)
+        }
+      ),
+      vscode.languages.registerReferenceProvider(
+        { language: "doria" },
+        {
+          provideReferences: (document, position, context) =>
+            this.provideReferences(document, position, context)
+        }
+      ),
+      vscode.languages.registerRenameProvider(
+        { language: "doria" },
+        {
+          provideRenameEdits: (document, position, newName) =>
+            this.provideRenameEdits(document, position, newName)
+        }
+      ),
       vscode.languages.registerCompletionItemProvider(
         { language: "doria" },
         {
@@ -78,7 +99,10 @@ class DoriaLanguageClient {
             this.provideCodeActions(document, range)
         },
         {
-          providedCodeActionKinds: [vscode.CodeActionKind.QuickFix]
+          providedCodeActionKinds: [
+            vscode.CodeActionKind.QuickFix,
+            vscode.CodeActionKind.RefactorRewrite
+          ]
         }
       ),
       vscode.languages.registerOnTypeFormattingEditProvider(
@@ -364,6 +388,61 @@ class DoriaLanguageClient {
         }
         return new vscode.Hover(toHoverContents(hover.contents), hover.range ? toRange(hover.range) : undefined);
       })
+      .catch(() => undefined);
+  }
+
+  provideDefinition(document, position) {
+    if (!isDoriaSource(document) || !this.process) {
+      return undefined;
+    }
+
+    return this.sendRequest("textDocument/definition", {
+      textDocument: {
+        uri: document.uri.toString()
+      },
+      position: toLspPosition(position)
+    })
+      .then((result) => {
+        if (!result) {
+          return undefined;
+        }
+        const locations = Array.isArray(result) ? result : [result];
+        return locations.map(toLocation);
+      })
+      .catch(() => undefined);
+  }
+
+  provideRenameEdits(document, position, newName) {
+    if (!isDoriaSource(document) || !this.process) {
+      return undefined;
+    }
+
+    return this.sendRequest("textDocument/rename", {
+      textDocument: {
+        uri: document.uri.toString()
+      },
+      position: toLspPosition(position),
+      newName
+    })
+      .then((edit) => edit ? toWorkspaceEdit(edit) : undefined)
+      .catch(() => undefined);
+  }
+
+  provideReferences(document, position, context) {
+    if (!isDoriaSource(document) || !this.process) {
+      return undefined;
+    }
+
+    return this.sendRequest("textDocument/references", {
+      textDocument: {
+        uri: document.uri.toString()
+      },
+      position: toLspPosition(position),
+      context: {
+        includeDeclaration: context.includeDeclaration
+      }
+    })
+      .then((locations) => (locations ?? []).map(toLocation))
       .catch(() => undefined);
   }
 
@@ -783,6 +862,26 @@ function toRange(range) {
   );
 }
 
+function toLocation(location) {
+  return new vscode.Location(
+    vscode.Uri.parse(location.uri),
+    toRange(location.range)
+  );
+}
+
+function toWorkspaceEdit(workspaceEdit) {
+  const edit = new vscode.WorkspaceEdit();
+  for (const [uri, changes] of Object.entries(workspaceEdit.changes ?? {})) {
+    edit.set(
+      vscode.Uri.parse(uri),
+      changes.map((change) =>
+        vscode.TextEdit.replace(toRange(change.range), change.newText)
+      )
+    );
+  }
+  return edit;
+}
+
 function toHoverContents(contents) {
   if (typeof contents === "string") {
     return contents;
@@ -813,23 +912,15 @@ function toCompletionKind(kind) {
 }
 
 function toCodeAction(action) {
-  const kind = action.kind === "quickfix"
-    ? vscode.CodeActionKind.QuickFix
-    : undefined;
+  const kind = {
+    quickfix: vscode.CodeActionKind.QuickFix,
+    "refactor.rewrite": vscode.CodeActionKind.RefactorRewrite
+  }[action.kind];
   const result = new vscode.CodeAction(action.title, kind);
   result.isPreferred = action.isPreferred;
 
   if (action.edit?.changes) {
-    const edit = new vscode.WorkspaceEdit();
-    for (const [uri, changes] of Object.entries(action.edit.changes)) {
-      edit.set(
-        vscode.Uri.parse(uri),
-        changes.map((change) =>
-          vscode.TextEdit.replace(toRange(change.range), change.newText)
-        )
-      );
-    }
-    result.edit = edit;
+    result.edit = toWorkspaceEdit(action.edit);
   }
   return result;
 }

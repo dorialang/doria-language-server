@@ -5,7 +5,10 @@ use doriac::attributes::{AttributeClassIdentity, AttributeClassSchema, Attribute
 use doriac::names::{GlobalReferenceRole, GlobalSymbolId, GlobalSymbolKind, PackageIdentity};
 use doriac::source::Span;
 
-use crate::analysis::{AnalysisSnapshot, AttributeParameterIdentity, AttributeParameterSpelling};
+use crate::analysis::{
+    AnalysisSnapshot, AttributeParameterIdentity, AttributeParameterSpelling, MemberIdentity,
+    MemberOccurrence,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct AliasIdentity {
@@ -19,6 +22,7 @@ pub(crate) enum SymbolTarget {
     Canonical(GlobalSymbolId),
     Alias(AliasIdentity),
     AttributeParameter(AttributeParameterIdentity),
+    Member(MemberIdentity),
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +89,12 @@ struct IndexedAttributeParameterOccurrence {
 }
 
 #[derive(Debug, Clone)]
+struct IndexedMemberOccurrence {
+    uri: String,
+    occurrence: MemberOccurrence,
+}
+
+#[derive(Debug, Clone)]
 struct DocumentSummary {
     package: PackageIdentity,
     namespace: Option<String>,
@@ -104,6 +114,8 @@ pub(crate) struct OpenDocumentIndex {
     symbol_access: HashMap<GlobalSymbolId, MemberAccess>,
     attribute_schemas: HashMap<AttributeClassIdentity, AttributeClassSchema>,
     attribute_parameter_occurrences: Vec<IndexedAttributeParameterOccurrence>,
+    member_occurrences: Vec<IndexedMemberOccurrence>,
+    member_parents: HashMap<GlobalSymbolId, GlobalSymbolId>,
     documents: HashMap<String, DocumentSummary>,
 }
 
@@ -131,6 +143,18 @@ impl OpenDocumentIndex {
                     right.span.end,
                 ))
             });
+        index.member_occurrences.sort_by(|left, right| {
+            (
+                &left.uri,
+                left.occurrence.span.start,
+                left.occurrence.span.end,
+            )
+                .cmp(&(
+                    &right.uri,
+                    right.occurrence.span.start,
+                    right.occurrence.span.end,
+                ))
+        });
         index
     }
 
@@ -274,6 +298,22 @@ impl OpenDocumentIndex {
                     spelling: occurrence.spelling,
                 }),
         );
+        self.member_occurrences
+            .extend(
+                snapshot
+                    .member_occurrences()
+                    .iter()
+                    .cloned()
+                    .map(|occurrence| IndexedMemberOccurrence {
+                        uri: uri.to_string(),
+                        occurrence,
+                    }),
+            );
+        for parent in snapshot.member_parents() {
+            self.member_parents
+                .entry(parent.child.clone())
+                .or_insert_with(|| parent.parent.clone());
+        }
 
         if !facts.unresolved.is_empty() {
             self.incomplete_packages.insert(package);
@@ -293,6 +333,11 @@ impl OpenDocumentIndex {
         {
             return Some(SymbolTarget::AttributeParameter(
                 occurrence.identity.clone(),
+            ));
+        }
+        if let Some(occurrence) = self.member_occurrence_at(uri, offset) {
+            return Some(SymbolTarget::Member(
+                self.resolved_member_identity(&occurrence.occurrence.identity),
             ));
         }
         let occurrence = self
@@ -320,6 +365,45 @@ impl OpenDocumentIndex {
             .or_else(|| Some(SymbolTarget::Canonical(occurrence.symbol.clone())))
     }
 
+    fn member_occurrence_at(&self, uri: &str, offset: usize) -> Option<&IndexedMemberOccurrence> {
+        self.member_occurrences
+            .iter()
+            .filter(|candidate| {
+                candidate.uri == uri && span_contains_offset(candidate.occurrence.span, offset)
+            })
+            .min_by_key(|candidate| {
+                candidate
+                    .occurrence
+                    .span
+                    .end
+                    .saturating_sub(candidate.occurrence.span.start)
+            })
+    }
+
+    fn resolved_member_identity(&self, identity: &MemberIdentity) -> MemberIdentity {
+        let mut resolved = identity.clone();
+        let mut owner = identity.owner.clone();
+        let mut visited = HashSet::new();
+        while visited.insert(owner.clone()) {
+            let candidate = MemberIdentity {
+                owner: owner.clone(),
+                name: identity.name.clone(),
+                kind: identity.kind,
+            };
+            if self.member_occurrences.iter().any(|occurrence| {
+                occurrence.occurrence.declaration && occurrence.occurrence.identity == candidate
+            }) {
+                return candidate;
+            }
+            let Some(parent) = self.member_parents.get(&owner) else {
+                break;
+            };
+            owner = parent.clone();
+            resolved.owner = owner.clone();
+        }
+        resolved
+    }
+
     pub(crate) fn references(
         &self,
         target: &SymbolTarget,
@@ -339,6 +423,20 @@ impl OpenDocumentIndex {
                 })
                 .collect();
         }
+        if let SymbolTarget::Member(identity) = target {
+            return self
+                .member_occurrences
+                .iter()
+                .filter(|candidate| {
+                    self.resolved_member_identity(&candidate.occurrence.identity) == *identity
+                        && (include_declaration || !candidate.occurrence.declaration)
+                })
+                .map(|candidate| IndexedLocation {
+                    uri: candidate.uri.clone(),
+                    span: candidate.occurrence.span,
+                })
+                .collect();
+        }
         self.occurrences
             .iter()
             .filter(|occurrence| match target {
@@ -352,6 +450,7 @@ impl OpenDocumentIndex {
                         && (include_declaration || occurrence.role != IndexedRole::AliasDeclaration)
                 }
                 SymbolTarget::AttributeParameter(_) => false,
+                SymbolTarget::Member(_) => false,
             })
             .map(|occurrence| IndexedLocation {
                 uri: occurrence.uri.clone(),
@@ -361,6 +460,18 @@ impl OpenDocumentIndex {
     }
 
     pub(crate) fn definition(&self, uri: &str, offset: usize) -> Option<IndexedLocation> {
+        if let Some(SymbolTarget::Member(identity)) = self.target_at(uri, offset) {
+            return self
+                .member_occurrences
+                .iter()
+                .find(|candidate| {
+                    candidate.occurrence.declaration && candidate.occurrence.identity == identity
+                })
+                .map(|candidate| IndexedLocation {
+                    uri: candidate.uri.clone(),
+                    span: candidate.occurrence.span,
+                });
+        }
         if let Some(SymbolTarget::AttributeParameter(identity)) = self.target_at(uri, offset) {
             return self
                 .attribute_parameter_occurrences
@@ -502,6 +613,43 @@ impl OpenDocumentIndex {
                 edits.dedup_by(|left, right| left.uri == right.uri && left.span == right.span);
                 (!edits.is_empty()).then_some(edits)
             }
+            SymbolTarget::Member(identity) => {
+                let package = symbol_package(&identity.owner)?;
+                if self.incomplete_packages.contains(package)
+                    || self
+                        .member_occurrences
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.occurrence.declaration
+                                && candidate.occurrence.identity == *identity
+                        })
+                        .count()
+                        != 1
+                {
+                    return None;
+                }
+                let mut edits = self
+                    .member_occurrences
+                    .iter()
+                    .filter(|candidate| {
+                        self.resolved_member_identity(&candidate.occurrence.identity) == *identity
+                    })
+                    .map(|candidate| IndexedEdit {
+                        uri: candidate.uri.clone(),
+                        span: candidate.occurrence.span,
+                        replacement: new_name.to_string(),
+                    })
+                    .collect::<Vec<_>>();
+                edits.sort_by(|left, right| {
+                    (&left.uri, left.span.start, left.span.end).cmp(&(
+                        &right.uri,
+                        right.span.start,
+                        right.span.end,
+                    ))
+                });
+                edits.dedup_by(|left, right| left.uri == right.uri && left.span == right.span);
+                (!edits.is_empty()).then_some(edits)
+            }
         }
     }
 
@@ -530,6 +678,7 @@ impl OpenDocumentIndex {
                     ),
                 });
             }
+            SymbolTarget::Member(_) => return None,
         };
         let kind = self.symbol_kinds.get(&symbol)?;
         let occurrence = self.occurrences.iter().find(|occurrence| {
