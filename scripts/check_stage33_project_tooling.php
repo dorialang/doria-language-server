@@ -33,14 +33,17 @@ $vscode = stage33_text($root . '/editors/vscode/doria/extension.js');
 $vscodeManifest = stage33_text($root . '/editors/vscode/doria/package.json');
 $intellijSettings = stage33_text($root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/settings/DoriaSettings.kt');
 $intellijDescriptor = stage33_text($root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/lsp/DoriaLspServerDescriptor.kt');
+$intellijRefresh = stage33_text($root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/actions/DoriaRefreshProjectAction.kt');
+$intellijLspConfig = stage33_text($root . '/editors/intellij/doria/src/main/resources/META-INF/doria-lsp.xml');
 $docs = stage33_text($root . '/README.md')
     . stage33_text($root . '/server/README.md')
     . stage33_text($root . '/docs/architecture.md')
     . stage33_text($root . '/docs/semantic-hover.md');
 
-$compiler = 'f619d3dc175c1a671504fea3aff3613c61b05151';
-stage33_require(str_contains($manifest, 'rev = "' . $compiler . '"'), 'doriac must use the final green Stage 33 compiler pin.');
-stage33_require(substr_count($lock, 'rev=' . $compiler . '#' . $compiler) >= 3, 'Cargo.lock must resolve every compiler-owned package to the final pin.');
+preg_match('/doriac\s*=\s*\{[^\n]*\brev\s*=\s*"([0-9a-f]{40})"/', $manifest, $manifestPin);
+stage33_require(isset($manifestPin[1]), 'Cargo.toml must pin doriac to an exact compiler commit.');
+$compiler = $manifestPin[1];
+stage33_require(substr_count($lock, 'rev=' . $compiler . '#' . $compiler) >= 3, 'Cargo.lock must resolve every compiler-owned package to the exact manifest pin.');
 
 foreach (['"project"', '"--json"', '"--workspace"', '"--development"', '"--offline"'] as $argument) {
     stage33_require(str_contains($discovery, $argument), "Baton discovery is missing {$argument}.");
@@ -98,13 +101,16 @@ stage33_require(
 );
 stage33_require(
     str_contains($intellijSettings, 'batonPath')
-        && str_contains($intellijDescriptor, 'DORIA_BATON_PATH'),
-    'IntelliJ Baton override is missing.',
+        && str_contains($intellijDescriptor, 'DORIA_BATON_PATH')
+        && str_contains($intellijRefresh, 'doria.refreshProject')
+        && str_contains($intellijRefresh, 'executeCommand')
+        && str_contains($intellijLspConfig, 'DoriaRefreshProjectAction'),
+    'IntelliJ Baton override or explicit project refresh is missing.',
 );
 foreach (['Stage 33 and Phase F are complete', 'Stage 34 single class inheritance', 'never parses `Baton.toml`'] as $fact) {
     stage33_require(str_contains($docs, $fact), "Stage 33 documentation is missing {$fact}.");
 }
-foreach (['stage33_project_graph_indexes_unopened_sources_and_overlays_open_buffers', 'project_inventory_replaces_watchers_with_exact_package_roots', 'generated_and_git_sources_are_read_only', 'scheduling_is_non_blocking_debounced_and_cancels_superseded_work'] as $coverage) {
+foreach (['stage33_project_graph_indexes_unopened_sources_and_overlays_open_buffers', 'project_inventory_replaces_watchers_with_exact_package_roots', 'modified_doria_sources_schedule_project_rediscovery', 'generated_and_git_sources_are_read_only', 'scheduling_is_non_blocking_debounced_and_cancels_superseded_work', 'cancelled_roots_keep_monotonic_generations_and_reject_stale_results'] as $coverage) {
     stage33_require(str_contains($server . $project . $discovery, $coverage), "Stage 33 regression coverage is missing {$coverage}.");
 }
 
