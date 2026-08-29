@@ -71,8 +71,11 @@ project discovery is unavailable.
 Stage 33 adds complete project authority without a second project parser. Baton
 runs asynchronously with offline project-discovery arguments and returns strict
 schema-1 JSON containing its source inventory and compiler tooling build plan.
-The server overlays unsaved buffers, loads that plan through one reusable complete
-compiler graph session, and indexes supplied unopened sources. Generated sources
+The server overlays unsaved buffers and, for an aggregate workspace, derives one
+package-rooted dependency closure per member from that supplied plan. Each closure
+uses a reusable complete compiler graph session, so unrelated member entrypoints
+and declarations remain isolated while real dependency navigation remains intact.
+The server indexes supplied unopened sources. Generated sources
 and Git cache sources are navigation-only; workspace and path sources may receive
 safe compiler edits. Editor file watchers debounce structural refreshes. Baton is
 never invoked by hover, completion, or another per-request path, and the server

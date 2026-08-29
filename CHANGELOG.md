@@ -10,6 +10,8 @@ This project follows the Doria toolchain CalVer.
   schema-1 project document asynchronously, loading complete compiler graphs with
   unsaved overlays, indexing unopened and generated sources, refusing edits to
   generated and Git-cache sources, and retaining bounded partial-graph fallback.
+  Aggregate workspaces are analyzed as isolated member dependency closures, so
+  unrelated entrypoints cannot collide while declared dependencies remain navigable.
   Added debounced project watchers, manual refresh, and one Baton path override
   to both official editor integrations. Stage 34 single class inheritance is next.
 

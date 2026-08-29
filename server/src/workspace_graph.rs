@@ -189,6 +189,7 @@ pub(crate) fn analyze_open_graph(
 
 pub(crate) fn analyze_project_graph(
     project: &ProjectDocument,
+    plan: &BuildPlan,
     open_sources: &[OpenSource<'_>],
     session: &mut CompilationSession,
 ) -> Result<ProjectGraphAnalysis, OpenGraphFailure> {
@@ -214,7 +215,7 @@ pub(crate) fn analyze_project_graph(
         filesystem: FileSystemSourceProvider,
         overlays,
     };
-    let plan = project.tooling_build_plan.clone();
+    let plan = plan.clone();
     let text =
         doriac::build_plan::encode_build_plan(&plan).map_err(|diagnostics| OpenGraphFailure {
             diagnostics,

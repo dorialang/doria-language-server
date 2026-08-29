@@ -1,7 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use doriac::build_plan::{validate_build_plan, BuildPlan, SourceOrigin};
+use doriac::build_plan::{
+    validate_build_plan, BuildPlan, SelectedTarget, SourceOrigin, TargetKind,
+};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -157,6 +159,74 @@ impl ProjectDocument {
                     PackageSource::Workspace | PackageSource::Path => SourceEditPolicy::Editable,
                 }
             })
+    }
+
+    pub(crate) fn analysis_plans(&self) -> Vec<(String, BuildPlan)> {
+        if self.selection.kind == SelectionKind::Package {
+            return vec![(
+                self.tooling_build_plan.root_package.clone(),
+                self.tooling_build_plan.clone(),
+            )];
+        }
+
+        let packages = self
+            .tooling_build_plan
+            .packages
+            .iter()
+            .map(|package| (package.identity.as_str(), package))
+            .collect::<HashMap<_, _>>();
+        let mut roots = self
+            .workspace
+            .as_ref()
+            .into_iter()
+            .flat_map(|workspace| workspace.members.iter())
+            .map(|member| member.compiler_package.clone())
+            .collect::<Vec<_>>();
+        roots.sort();
+        roots.dedup();
+        roots
+            .into_iter()
+            .map(|root| {
+                let mut included = BTreeSet::from([root.clone()]);
+                let mut pending = vec![root.clone()];
+                while let Some(identity) = pending.pop() {
+                    let package = packages
+                        .get(identity.as_str())
+                        .expect("validated workspace member is present in tooling plan");
+                    for dependency in &package.dependencies {
+                        if included.insert(dependency.package.clone()) {
+                            pending.push(dependency.package.clone());
+                        }
+                    }
+                }
+                let plan_packages = self
+                    .tooling_build_plan
+                    .packages
+                    .iter()
+                    .filter(|package| included.contains(&package.identity))
+                    .cloned()
+                    .collect();
+                let plan = BuildPlan {
+                    schema_version: self.tooling_build_plan.schema_version,
+                    edition: self.tooling_build_plan.edition.clone(),
+                    root_package: root.clone(),
+                    selected_target: SelectedTarget {
+                        package: root.clone(),
+                        name: "baton-tooling".to_string(),
+                        kind: TargetKind::Library,
+                        entry_source: None,
+                        active_scopes: self
+                            .tooling_build_plan
+                            .selected_target
+                            .active_scopes
+                            .clone(),
+                    },
+                    packages: plan_packages,
+                    compiler: self.tooling_build_plan.compiler.clone(),
+                };
+                (root, plan)
+            })
+            .collect()
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -335,6 +405,12 @@ impl ProjectDocument {
                 require_absolute(&member.manifest, "workspace member manifest")?;
                 if member.package.trim().is_empty() || member.compiler_package.trim().is_empty() {
                     return Err("workspace member identities cannot be empty".to_string());
+                }
+                if !compiler_packages.contains(member.compiler_package.as_str()) {
+                    return Err(format!(
+                        "workspace member `{}` is absent from the tooling build plan",
+                        member.compiler_package
+                    ));
                 }
             }
         }
@@ -619,5 +695,149 @@ mod tests {
         assert!(ProjectDocument::parse(&value.to_string())
             .unwrap_err()
             .contains("expected"));
+    }
+
+    #[test]
+    fn workspace_analysis_plans_isolate_members_and_keep_real_dependency_closures() {
+        let root = std::env::temp_dir().join("doria-lsp-project-workspace-plans");
+        let app_root = root.join("apps/app");
+        let support_root = root.join("packages/support");
+        let processor_root = root.join("tools/processor");
+        let digest = "0".repeat(64);
+        let mut value = project_value(&app_root);
+        value["workspace"] = json!({
+            "root": root,
+            "manifest": root.join("Baton.toml"),
+            "lock": { "path": root.join("Baton.lock"), "sha256": digest },
+            "members": [
+                {
+                    "package": "acme/app",
+                    "compilerPackage": "acme/app",
+                    "root": app_root,
+                    "manifest": app_root.join("Baton.toml")
+                },
+                {
+                    "package": "acme/processor",
+                    "compilerPackage": "acme/processor",
+                    "root": processor_root,
+                    "manifest": processor_root.join("Baton.toml")
+                },
+                {
+                    "package": "acme/support",
+                    "compilerPackage": "acme/support",
+                    "root": support_root,
+                    "manifest": support_root.join("Baton.toml")
+                }
+            ]
+        });
+        value["selection"] = json!({
+            "kind": "workspace",
+            "package": null,
+            "development": true
+        });
+        value["packages"][0]["dependencies"] =
+            json!([{ "package": "acme/support", "kind": "normal" }]);
+        value["toolingBuildPlan"]["packages"][0]["dependencies"] =
+            json!([{ "package": "acme/support", "kind": "normal" }]);
+        value["packages"].as_array_mut().unwrap().extend([
+            json!({
+                "package": "acme/processor",
+                "compilerPackage": "acme/processor",
+                "root": processor_root,
+                "manifest": processor_root.join("Baton.toml"),
+                "manifestFingerprint": digest,
+                "source": "workspace",
+                "dependencies": [],
+                "sources": [{
+                    "identity": "acme/processor:src/main.doria",
+                    "path": processor_root.join("src/main.doria"),
+                    "scope": "main",
+                    "origin": "explicit",
+                    "generatedFor": null,
+                    "producer": null,
+                    "sha256": digest
+                }]
+            }),
+            json!({
+                "package": "acme/support",
+                "compilerPackage": "acme/support",
+                "root": support_root,
+                "manifest": support_root.join("Baton.toml"),
+                "manifestFingerprint": digest,
+                "source": "workspace",
+                "dependencies": [],
+                "sources": [{
+                    "identity": "acme/support:src/Support.doria",
+                    "path": support_root.join("src/Support.doria"),
+                    "scope": "main",
+                    "origin": "autoload",
+                    "generatedFor": null,
+                    "producer": null,
+                    "sha256": digest
+                }]
+            }),
+        ]);
+        value["toolingBuildPlan"]["packages"]
+            .as_array_mut()
+            .unwrap()
+            .extend([
+                json!({
+                    "identity": "acme/processor",
+                    "root": processor_root,
+                    "namespaceMappings": [],
+                    "sources": [{
+                        "identity": "acme/processor:src/main.doria",
+                        "path": "src/main.doria",
+                        "scope": "main",
+                        "origin": "explicit",
+                        "generatedFor": null
+                    }],
+                    "dependencies": []
+                }),
+                json!({
+                    "identity": "acme/support",
+                    "root": support_root,
+                    "namespaceMappings": [],
+                    "sources": [{
+                        "identity": "acme/support:src/Support.doria",
+                        "path": "src/Support.doria",
+                        "scope": "main",
+                        "origin": "autoload",
+                        "generatedFor": null
+                    }],
+                    "dependencies": []
+                }),
+            ]);
+
+        let project = ProjectDocument::parse(&value.to_string()).unwrap();
+        let plans = project.analysis_plans();
+        assert_eq!(
+            plans
+                .iter()
+                .map(|(root, _)| root.as_str())
+                .collect::<Vec<_>>(),
+            ["acme/app", "acme/processor", "acme/support"]
+        );
+        assert_eq!(
+            plans[0]
+                .1
+                .packages
+                .iter()
+                .map(|package| package.identity.as_str())
+                .collect::<Vec<_>>(),
+            ["acme/app", "acme/support"]
+        );
+        assert_eq!(
+            plans[1]
+                .1
+                .packages
+                .iter()
+                .map(|package| package.identity.as_str())
+                .collect::<Vec<_>>(),
+            ["acme/processor"]
+        );
+        for (_, plan) in plans {
+            validate_build_plan(&plan).unwrap();
+        }
     }
 }

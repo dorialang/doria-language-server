@@ -40,7 +40,9 @@ For project-aware tooling, Baton is resolved from one explicit editor override,
 `baton project --json --workspace --development --offline` asynchronously and
 retries package selection only for Baton's exact workspace-selection diagnostic.
 Its strict schema-1 project document supplies the complete compiler build plan,
-source inventory, generated provenance, and edit policy. Open buffers overlay
+source inventory, generated provenance, and edit policy. Aggregate workspaces use
+one compiler session per member dependency closure rather than one flattened
+semantic program. Open buffers overlay
 matching sources without writing to disk; unopened sources participate in
 navigation and diagnostics. Generated and Git-cache sources remain readonly.
 Project watcher registrations are rooted at the exact package paths supplied by

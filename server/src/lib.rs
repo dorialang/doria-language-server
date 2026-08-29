@@ -1667,8 +1667,6 @@ impl Server {
             })
             .collect::<Vec<_>>();
         for (root_uri, project) in projects {
-            let group = format!("project:{root_uri}");
-            active_groups.insert(group.clone());
             let sources = self
                 .documents
                 .iter()
@@ -1687,24 +1685,30 @@ impl Server {
                     text,
                 })
                 .collect::<Vec<_>>();
-            let session = self.workspace_sessions.entry(group.clone()).or_default();
-            let Ok(graph) = analyze_project_graph(&project, &open_sources, session) else {
-                continue;
-            };
-            self.source_uris.extend(graph.source_uris);
-            self.incremental_facts
-                .insert(group.clone(), graph.incremental);
-            self.include_edges.insert(group, graph.include_edges);
-            for (uri, graph_document) in graph.documents {
-                self.source_edit_policies
-                    .insert(uri.clone(), graph_document.edit_policy);
-                if let Some(version) = self.documents.get(&uri).map(|document| document.version) {
-                    consumed.insert(uri.clone());
-                    self.documents
-                        .insert(uri, Document::from_graph(graph_document, version));
-                } else {
-                    self.project_documents
-                        .insert(uri, Document::from_graph(graph_document, None));
+            for (member, plan) in project.analysis_plans() {
+                let group = format!("project:{root_uri}:{member}");
+                active_groups.insert(group.clone());
+                let session = self.workspace_sessions.entry(group.clone()).or_default();
+                let Ok(graph) = analyze_project_graph(&project, &plan, &open_sources, session)
+                else {
+                    continue;
+                };
+                self.source_uris.extend(graph.source_uris);
+                self.incremental_facts
+                    .insert(group.clone(), graph.incremental);
+                self.include_edges.insert(group, graph.include_edges);
+                for (uri, graph_document) in graph.documents {
+                    self.source_edit_policies
+                        .insert(uri.clone(), graph_document.edit_policy);
+                    if let Some(version) = self.documents.get(&uri).map(|document| document.version)
+                    {
+                        consumed.insert(uri.clone());
+                        self.documents
+                            .insert(uri, Document::from_graph(graph_document, version));
+                    } else {
+                        self.project_documents
+                            .insert(uri, Document::from_graph(graph_document, None));
+                    }
                 }
             }
         }
@@ -7302,6 +7306,7 @@ function main(): void {}
         let mut session = CompilationSession::default();
         analyze_project_graph(
             &project,
+            &project.tooling_build_plan,
             &[OpenSource {
                 uri: &usage_uri,
                 relative_path: "src/main.doria".to_string(),

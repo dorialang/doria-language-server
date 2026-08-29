@@ -54,8 +54,10 @@ is next. Ordinary analysis remains target-neutral, and highlighting remains
 presentation only.
 
 Project-aware tooling asks Baton asynchronously for its strict schema-1 project
-document and gives the supplied tooling build plan to the compiler as a complete
-graph. Unsaved editor text overlays the matching supplied source; unopened
+document and gives each package-rooted dependency closure from the supplied
+tooling plan to its own reusable compiler session. This preserves workspace
+member isolation without flattening Baton's complete inventory. Unsaved editor
+text overlays the matching supplied source; unopened
 workspace, path-dependency, and generated sources remain indexed for diagnostics
 and navigation. Generated and Git-cache sources are readable but never rename or
 fix targets. Manifest, lock, source-inventory, and generated-output changes trigger
