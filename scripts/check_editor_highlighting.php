@@ -37,6 +37,7 @@ $intellijDocumentationEnterHandler = $root . '/editors/intellij/doria/src/main/k
 $intellijPluginXml = $root . '/editors/intellij/doria/src/main/resources/META-INF/plugin.xml';
 $intellijLspPluginXml = $root . '/editors/intellij/doria/src/main/resources/META-INF/doria-lsp.xml';
 $intellijImportIntention = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/actions/DoriaImportIntention.kt';
+$intellijLspCodeActionIntention = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/actions/DoriaLspCodeActionIntention.kt';
 $intellijPluginIcon = $root . '/editors/intellij/doria/src/main/resources/META-INF/pluginIcon.svg';
 $intellijCreateClassAction = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/actions/DoriaCreateClassAction.kt';
 $intellijAutoloadNamespaceResolver = $root . '/editors/intellij/doria/src/main/kotlin/dev/doria/intellij/actions/DoriaAutoloadNamespaceResolver.kt';
@@ -1554,7 +1555,7 @@ function check_documentation_comment_support(): void
 function check_import_actions_and_diagnostic_messages(): void
 {
     global $vscodeExtension, $lspAnalysis, $lspServer;
-    global $intellijImportIntention, $intellijLspPluginXml;
+    global $intellijImportIntention, $intellijLspCodeActionIntention, $intellijLspPluginXml;
 
     $extensionText = read_text($vscodeExtension);
     $analysisText = read_text($lspAnalysis);
@@ -1566,13 +1567,20 @@ function check_import_actions_and_diagnostic_messages(): void
         'VS Code must expose compiler-backed Doria code actions as workspace edits',
     );
     $intellijIntentionText = read_text($intellijImportIntention);
+    $intellijLspCodeActionText = read_text($intellijLspCodeActionIntention);
     $intellijLspPluginText = read_text($intellijLspPluginXml);
     require_check(
         str_contains($intellijLspPluginText, 'DoriaImportIntention')
-            && str_contains($intellijIntentionText, 'textDocumentService.codeAction(params)')
-            && str_contains($intellijIntentionText, 'IMPORT_ACTION_PREFIX')
-            && str_contains($intellijIntentionText, 'WriteCommandAction.runWriteCommandAction'),
+            && str_contains($intellijIntentionText, 'Use import for ')
+            && str_contains($intellijLspCodeActionText, 'textDocumentService.codeAction(params)')
+            && str_contains($intellijLspCodeActionText, 'WriteCommandAction.runWriteCommandAction'),
         'IntelliJ must expose shared LSP import actions through its intention menu',
+    );
+    require_check(
+        str_contains($intellijLspPluginText, 'DoriaGenerateMethodIntention')
+            && str_contains($intellijLspPluginText, 'DoriaGenerateFunctionIntention')
+            && str_contains($intellijLspCodeActionText, 'action.edit?.changes'),
+        'IntelliJ must expose server-owned missing callable generation actions',
     );
     require_check(
         str_contains($analysisText, 'import_candidate_at_offset')

@@ -11,7 +11,9 @@ use doriac::diagnostics::{
 };
 use doriac::incremental::{CompilationSession, IncrementalFacts};
 use doriac::lexer::{Token, TokenKind};
-use doriac::names::{CompilationContext, Edition, PackageIdentity, SourceIdentity};
+use doriac::names::{
+    CompilationContext, Edition, GlobalSymbolKind, PackageIdentity, SourceIdentity,
+};
 use doriac::source::{SourceId, Span};
 
 mod analysis;
@@ -20,8 +22,8 @@ mod workspace_graph;
 mod workspace_index;
 
 use analysis::{
-    documentation_comment_template, AnalysisSnapshot, ImportCandidate, SemanticCompletion,
-    SemanticImport,
+    documentation_comment_template, AnalysisSnapshot, ImportCandidate, MissingCallable,
+    MissingCallableTarget, SemanticCompletion, SemanticImport,
 };
 use string_surface::{STRING_COMPANION_METHODS, STRING_PROPERTIES};
 use workspace_graph::{analyze_open_graph, OpenSource};
@@ -595,7 +597,7 @@ impl Server {
             .map_or("", |document| document.text.as_str());
         let mut value = json!({
             "range": span_to_range(text, primary_span),
-            "severity": lsp_severity(diagnostic.severity),
+            "severity": lsp_diagnostic_severity(diagnostic),
             "code": diagnostic.code,
             "source": "doriac",
             "message": message,
@@ -1115,8 +1117,134 @@ impl Server {
                     actions.push(action);
                 }
             }
+            if let Some(callable) = document.analysis.missing_callable_at_offset(offset) {
+                if let Some(action) = self.missing_callable_code_action(uri, document, callable) {
+                    actions.push(action);
+                }
+            }
         }
         Value::Array(actions)
+    }
+
+    fn missing_callable_code_action(
+        &self,
+        uri: &str,
+        document: &Document,
+        callable: &MissingCallable,
+    ) -> Option<Value> {
+        let (destination_uri, destination, edit_span, replacement, title) = match &callable.target {
+            MissingCallableTarget::Function => {
+                let edit_span = trailing_whitespace_span(&document.text);
+                let replacement =
+                    render_missing_function(&document.text, edit_span.start, callable);
+                (
+                    uri.to_string(),
+                    document,
+                    edit_span,
+                    replacement,
+                    format!("Generate function `{}`", callable.name),
+                )
+            }
+            MissingCallableTarget::Method {
+                class_name,
+                is_static,
+            } => {
+                let (destination_uri, destination, declaration_span) =
+                    self.class_declaration_document(document, class_name)?;
+                let close = class_closing_brace(&destination.text, declaration_span)?;
+                let edit_span =
+                    Span::new(trailing_whitespace_start(&destination.text, close), close);
+                let replacement = render_missing_method(
+                    &destination.text,
+                    declaration_span,
+                    edit_span.start,
+                    close,
+                    callable,
+                    *is_static,
+                );
+                (
+                    destination_uri,
+                    destination,
+                    edit_span,
+                    replacement,
+                    format!("Generate method `{}`", callable.name),
+                )
+            }
+        };
+
+        let diagnostic = prepare_diagnostics(document.analysis.diagnostics())
+            .into_iter()
+            .find(|diagnostic| {
+                matches!(diagnostic.code, "E0304" | "E0309")
+                    && spans_overlap(diagnostic.span, callable.name_span)
+            })?;
+        let mut changes = serde_json::Map::new();
+        changes.insert(
+            destination_uri,
+            json!([{
+                "range": span_to_range(&destination.text, edit_span),
+                "newText": replacement,
+            }]),
+        );
+        Some(json!({
+            "title": title,
+            "kind": "quickfix",
+            "diagnostics": [self.graph_diagnostic_to_lsp(uri, &diagnostic)],
+            "isPreferred": true,
+            "edit": { "changes": changes },
+        }))
+    }
+
+    fn class_declaration_document<'a>(
+        &'a self,
+        current: &Document,
+        class_name: &str,
+    ) -> Option<(String, &'a Document, Span)> {
+        let imported_target = current
+            .analysis
+            .semantic_imports(&current.source_identity)
+            .into_iter()
+            .find(|import| import.alias == class_name)
+            .map(|import| import.target);
+        let class_name = imported_target.as_deref().unwrap_or(class_name);
+        let current_package = &current.analysis.compilation_context().package;
+        let mut exact = Vec::new();
+        let mut short = Vec::new();
+        for (uri, document) in &self.documents {
+            if document.analysis.compilation_context().package != *current_package {
+                continue;
+            }
+            for declaration in document
+                .analysis
+                .global_symbols()
+                .declarations
+                .iter()
+                .filter(|declaration| {
+                    declaration.kind == GlobalSymbolKind::Class
+                        && declaration.source_identity == document.source_identity
+                })
+            {
+                let Some(class_span) = document
+                    .analysis
+                    .class_declaration_span(&declaration.source_name)
+                else {
+                    continue;
+                };
+                let candidate = (uri.clone(), document, class_span);
+                if declaration.qualified_name == class_name {
+                    exact.push(candidate);
+                } else if declaration.source_name == class_name
+                    || declaration
+                        .qualified_name
+                        .strip_suffix(class_name)
+                        .is_some_and(|prefix| prefix.ends_with('\\'))
+                {
+                    short.push(candidate);
+                }
+            }
+        }
+        let mut candidates = if exact.is_empty() { short } else { exact };
+        (candidates.len() == 1).then(|| candidates.remove(0))
     }
 
     fn configure_workspace_roots(&mut self, params: Option<&Value>) {
@@ -1385,6 +1513,143 @@ fn import_code_action(
             "changes": changes,
         },
     }))
+}
+
+fn trailing_whitespace_span(text: &str) -> Span {
+    Span::new(text.trim_end_matches(char::is_whitespace).len(), text.len())
+}
+
+fn trailing_whitespace_start(text: &str, end: usize) -> usize {
+    text[..end].trim_end_matches(char::is_whitespace).len()
+}
+
+fn class_closing_brace(text: &str, declaration: Span) -> Option<usize> {
+    let tokens = doriac::lex_source("generated-method.doria", text).ok()?;
+    let opening = tokens.iter().position(|token| {
+        token.kind == TokenKind::LeftBrace && token.span.start >= declaration.start
+    })?;
+    let mut depth = 0_usize;
+    for token in &tokens[opening..] {
+        match token.kind {
+            TokenKind::LeftBrace => depth += 1,
+            TokenKind::RightBrace => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(token.span.start);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn class_opening_brace(text: &str, declaration: Span) -> Option<usize> {
+    doriac::lex_source("generated-method.doria", text)
+        .ok()?
+        .into_iter()
+        .find(|token| token.kind == TokenKind::LeftBrace && token.span.start >= declaration.start)
+        .map(|token| token.span.start)
+}
+
+fn render_missing_function(text: &str, insertion: usize, callable: &MissingCallable) -> String {
+    let newline = source_newline(text);
+    let prefix = if text[..insertion].trim().is_empty() {
+        String::new()
+    } else {
+        format!("{newline}{newline}")
+    };
+    format!(
+        "{prefix}{}{}",
+        render_callable(callable, false, "", "    ", newline),
+        newline,
+    )
+}
+
+fn render_missing_method(
+    text: &str,
+    declaration: Span,
+    insertion: usize,
+    close: usize,
+    callable: &MissingCallable,
+    is_static: bool,
+) -> String {
+    let newline = source_newline(text);
+    let close_indent = line_indent(text, close);
+    let member_indent = inferred_member_indent(text, declaration, insertion, close_indent);
+    let indent_unit = member_indent
+        .strip_prefix(close_indent)
+        .filter(|indent| !indent.is_empty())
+        .unwrap_or("    ");
+    let body_start = class_opening_brace(text, declaration)
+        .map(|brace| brace + 1)
+        .unwrap_or(declaration.start);
+    let body_has_members = !text[body_start..insertion].trim().is_empty();
+    let separator = if body_has_members {
+        format!("{newline}{newline}")
+    } else {
+        newline.to_string()
+    };
+    format!(
+        "{separator}{}{newline}{close_indent}",
+        render_callable(callable, is_static, &member_indent, indent_unit, newline),
+    )
+}
+
+fn render_callable(
+    callable: &MissingCallable,
+    is_static: bool,
+    indent: &str,
+    indent_unit: &str,
+    newline: &str,
+) -> String {
+    let parameters = callable
+        .parameters
+        .iter()
+        .map(|parameter| format!("{} ${}", parameter.ty, parameter.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let static_modifier = if is_static { "static " } else { "" };
+    let body = if callable.return_type == "void" {
+        String::new()
+    } else {
+        format!("{indent}{indent_unit}return null;{newline}")
+    };
+    format!(
+        "{indent}{static_modifier}function {}({parameters}): {}{newline}{indent}{{{newline}{body}{indent}}}",
+        callable.name, callable.return_type,
+    )
+}
+
+fn line_indent(text: &str, offset: usize) -> &str {
+    let line_start = text[..offset].rfind('\n').map_or(0, |index| index + 1);
+    let line = &text[line_start..offset];
+    &line[..line
+        .find(|character: char| !matches!(character, ' ' | '\t'))
+        .unwrap_or(line.len())]
+}
+
+fn inferred_member_indent<'a>(
+    text: &'a str,
+    declaration: Span,
+    insertion: usize,
+    close_indent: &'a str,
+) -> String {
+    text[declaration.start..insertion]
+        .lines()
+        .filter_map(|line| {
+            let content = line.trim();
+            if content.is_empty() || matches!(content, "{" | "}") {
+                return None;
+            }
+            let indent = &line[..line
+                .find(|character: char| !matches!(character, ' ' | '\t'))
+                .unwrap_or(line.len())];
+            (indent.len() > close_indent.len() && indent.starts_with(close_indent))
+                .then(|| indent.to_string())
+        })
+        .min_by_key(String::len)
+        .unwrap_or_else(|| format!("{close_indent}    "))
 }
 
 fn sort_imports(imports: &mut [SemanticImport]) {
@@ -2677,7 +2942,7 @@ fn diagnostic_to_lsp(uri: &str, text: &str, diagnostic: &Diagnostic) -> Value {
 
     let mut value = json!({
         "range": span_to_range(text, primary_span),
-        "severity": lsp_severity(diagnostic.severity),
+        "severity": lsp_diagnostic_severity(diagnostic),
         "code": diagnostic.code,
         "source": "doriac",
         "message": message,
@@ -2791,6 +3056,18 @@ fn lsp_severity(severity: DiagnosticSeverity) -> u8 {
         DiagnosticSeverity::Warning => 2,
         DiagnosticSeverity::Note => 3,
     }
+}
+
+fn lsp_diagnostic_severity(diagnostic: &Diagnostic) -> u8 {
+    if matches!(diagnostic.code, "E0304" | "E0309") {
+        2
+    } else {
+        lsp_severity(diagnostic.severity)
+    }
+}
+
+fn spans_overlap(left: Span, right: Span) -> bool {
+    left.start < right.end && right.start < left.end
 }
 
 fn diagnostic_source_uri(current_uri: &str, source: &DiagnosticSource) -> Option<String> {
@@ -5019,6 +5296,183 @@ function relay(take Failure $failure): void throws Failure
             },
             "context": { "diagnostics": [] },
         })
+    }
+
+    #[test]
+    fn unresolved_calls_are_editor_warnings_without_weakening_compiler_diagnostics() {
+        let source = r#"class Application
+{
+    function run(): void
+    {
+        $this->start();
+    }
+}
+
+function main(): void
+{
+    launch();
+}
+"#;
+        let diagnostics = diagnostics_for_document("file:///missing-callables.doria", source);
+        for code in ["E0304", "E0309"] {
+            let diagnostic = diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic["code"] == code)
+                .unwrap_or_else(|| panic!("missing {code}: {diagnostics:#?}"));
+            assert_eq!(diagnostic["severity"], 2);
+        }
+        let compiler = doriac::check_source("missing-callables.doria", source)
+            .expect_err("unresolved calls remain compiler errors");
+        assert!(compiler.iter().any(|diagnostic| {
+            diagnostic.code == "E0304" && diagnostic.severity == DiagnosticSeverity::Error
+        }));
+        assert!(compiler.iter().any(|diagnostic| {
+            diagnostic.code == "E0309" && diagnostic.severity == DiagnosticSeverity::Error
+        }));
+    }
+
+    #[test]
+    fn missing_callable_actions_generate_typed_function_and_method_stubs() {
+        let uri = "file:///workspace/app.doria";
+        let source = r#"class Application
+{
+    function run(string $name): void
+    {
+        $this->start($name, retries: 2);
+    }
+}
+
+function main(): void
+{
+    launch("Doria");
+}
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+
+        let method_actions = server.code_actions(Some(&code_action_params_at(
+            uri,
+            source,
+            source.find("start").unwrap(),
+        )));
+        let method = method_actions
+            .as_array()
+            .and_then(|actions| {
+                actions
+                    .iter()
+                    .find(|action| action["title"] == "Generate method `start`")
+            })
+            .unwrap_or_else(|| panic!("missing method action: {method_actions:#?}"));
+        assert_eq!(method["kind"], "quickfix");
+        assert_eq!(method["diagnostics"][0]["severity"], 2);
+        let method_text = method["edit"]["changes"][uri][0]["newText"]
+            .as_str()
+            .expect("generated method text");
+        assert!(
+            method_text.contains("function start(string $name, int $retries): void"),
+            "{method_text:?}"
+        );
+        assert!(method_text.contains("\n    {\n    }\n"), "{method_text:?}");
+
+        let function_actions = server.code_actions(Some(&code_action_params_at(
+            uri,
+            source,
+            source.find("launch").unwrap(),
+        )));
+        let function = function_actions
+            .as_array()
+            .and_then(|actions| {
+                actions
+                    .iter()
+                    .find(|action| action["title"] == "Generate function `launch`")
+            })
+            .unwrap_or_else(|| panic!("missing function action: {function_actions:#?}"));
+        let function_text = function["edit"]["changes"][uri][0]["newText"]
+            .as_str()
+            .expect("generated function text");
+        assert!(function_text.contains("function launch(string $arg1): void"));
+    }
+
+    #[test]
+    fn missing_method_action_edits_the_open_declaring_class() {
+        let worker_uri = "file:///workspace/Worker.doria";
+        let app_uri = "file:///workspace/app.doria";
+        let worker = "namespace Acme\\Model;\nclass Worker\n{\n}\n";
+        let app = r#"namespace Acme\App;
+use Acme\Model\Worker as Runner;
+
+function main(): void
+{
+    let $worker = new Runner();
+    $worker->process(42);
+    Runner::reset();
+}
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, worker_uri, worker);
+        open_stage31_document(&mut server, app_uri, app);
+
+        for (name, expected) in [
+            ("process", "function process(int $arg1): void"),
+            ("reset", "static function reset(): void"),
+        ] {
+            let actions = server.code_actions(Some(&code_action_params_at(
+                app_uri,
+                app,
+                app.find(name).unwrap(),
+            )));
+            let action = actions
+                .as_array()
+                .and_then(|actions| {
+                    actions
+                        .iter()
+                        .find(|action| action["title"] == format!("Generate method `{name}`"))
+                })
+                .unwrap_or_else(|| panic!("missing {name} action: {actions:#?}"));
+            assert!(action["edit"]["changes"].get(app_uri).is_none());
+            let generated = action["edit"]["changes"][worker_uri][0]["newText"]
+                .as_str()
+                .expect("generated method text");
+            assert!(generated.contains(expected), "{generated:?}");
+        }
+    }
+
+    #[test]
+    fn expression_call_generation_uses_a_valid_conservative_return() {
+        let uri = "file:///workspace/value.doria";
+        let source = "function main(): void\n{\n    let $value = calculate(1);\n}\n";
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+        let actions = server.code_actions(Some(&code_action_params_at(
+            uri,
+            source,
+            source.find("calculate").unwrap(),
+        )));
+        let action = actions
+            .as_array()
+            .and_then(|actions| {
+                actions
+                    .iter()
+                    .find(|action| action["title"] == "Generate function `calculate`")
+            })
+            .unwrap_or_else(|| panic!("missing function action: {actions:#?}"));
+        let edit = &action["edit"]["changes"][uri][0];
+        let start = position_to_byte_offset(
+            source,
+            edit["range"]["start"]["line"].as_u64().unwrap() as u32,
+            edit["range"]["start"]["character"].as_u64().unwrap() as u32,
+        );
+        let end = position_to_byte_offset(
+            source,
+            edit["range"]["end"]["line"].as_u64().unwrap() as u32,
+            edit["range"]["end"]["character"].as_u64().unwrap() as u32,
+        );
+        let mut generated = source.to_string();
+        generated.replace_range(start..end, edit["newText"].as_str().unwrap());
+        assert!(generated.contains("function calculate(int $arg1): mixed"));
+        assert!(generated.contains("return null;"));
+        doriac::check_source("value.doria", &generated)
+            .unwrap_or_else(|diagnostics| panic!("generated source must check: {diagnostics:#?}"));
     }
 
     fn apply_workspace_edits(source: &str, action: &Value, uri: &str) -> String {

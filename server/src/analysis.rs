@@ -63,6 +63,33 @@ pub(crate) struct SemanticImport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MissingCallable {
+    pub(crate) name: String,
+    pub(crate) name_span: Span,
+    pub(crate) parameters: Vec<GeneratedParameter>,
+    pub(crate) return_type: String,
+    pub(crate) target: MissingCallableTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClassDeclaration {
+    name: String,
+    span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GeneratedParameter {
+    pub(crate) name: String,
+    pub(crate) ty: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MissingCallableTarget {
+    Function,
+    Method { class_name: String, is_static: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UnresolvedImportReference {
     pub(crate) spelling: String,
     pub(crate) span: Span,
@@ -272,6 +299,8 @@ pub(crate) struct AnalysisSnapshot {
     local_visibilities: Vec<LocalVisibility>,
     call_signatures: Vec<CallSignatureContext>,
     semantic_hovers: Vec<SemanticHover>,
+    missing_callables: Vec<MissingCallable>,
+    class_declarations: Vec<ClassDeclaration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -463,6 +492,27 @@ impl AnalysisSnapshot {
 
     pub(crate) fn global_symbols(&self) -> &GlobalSymbolFacts {
         &self.global_symbols
+    }
+
+    pub(crate) fn missing_callable_at_offset(&self, offset: usize) -> Option<&MissingCallable> {
+        self.missing_callables
+            .iter()
+            .filter(|callable| span_contains(callable.name_span, offset))
+            .min_by_key(|callable| {
+                callable
+                    .name_span
+                    .end
+                    .saturating_sub(callable.name_span.start)
+            })
+    }
+
+    pub(crate) fn class_declaration_span(&self, name: &str) -> Option<Span> {
+        let mut declarations = self
+            .class_declarations
+            .iter()
+            .filter(|declaration| declaration.name == name);
+        let declaration = declarations.next()?;
+        declarations.next().is_none().then_some(declaration.span)
     }
 
     pub(crate) fn import_candidate_at_offset(
@@ -1200,6 +1250,8 @@ struct SnapshotBuilder<'a> {
     semantic_hovers: Vec<SemanticHover>,
     attribute_semantic_tokens: Vec<(Span, u32)>,
     attribute_parameter_occurrences: Vec<AttributeParameterOccurrence>,
+    missing_callables: Vec<MissingCallable>,
+    statement_expression_span: Option<Span>,
     when_depth: usize,
 }
 
@@ -1239,6 +1291,8 @@ impl<'a> SnapshotBuilder<'a> {
             semantic_hovers: Vec::new(),
             attribute_semantic_tokens: Vec::new(),
             attribute_parameter_occurrences: Vec::new(),
+            missing_callables: Vec::new(),
+            statement_expression_span: None,
             when_depth: 0,
         }
     }
@@ -1254,6 +1308,17 @@ impl<'a> SnapshotBuilder<'a> {
             .map_or_else(AttributeSemanticInfo::default, |info| {
                 info.attributes.clone()
             });
+        let class_declarations = program
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Class(class) => Some(ClassDeclaration {
+                    name: class.name.clone(),
+                    span: class.span,
+                }),
+                _ => None,
+            })
+            .collect();
         AnalysisSnapshot {
             diagnostics: self.diagnostics,
             compilation_context: CompilationContext::default(),
@@ -1273,6 +1338,8 @@ impl<'a> SnapshotBuilder<'a> {
             local_visibilities: self.local_visibilities,
             call_signatures: self.call_signatures,
             semantic_hovers: self.semantic_hovers,
+            missing_callables: self.missing_callables,
+            class_declarations,
         }
     }
 
@@ -2376,7 +2443,11 @@ impl<'a> SnapshotBuilder<'a> {
             Stmt::Increment(increment) => {
                 self.visit_expr(&increment.target, current_class, parent_class)
             }
-            Stmt::Expr { expr, .. } => self.visit_expr(expr, current_class, parent_class),
+            Stmt::Expr { expr, .. } => {
+                let previous = self.statement_expression_span.replace(expr.span());
+                self.visit_expr(expr, current_class, parent_class);
+                self.statement_expression_span = previous;
+            }
             _ => {}
         }
     }
@@ -2748,6 +2819,23 @@ impl<'a> SnapshotBuilder<'a> {
                     _ if matches!(object.as_ref(), Expr::This { .. }) => current_class,
                     _ => None,
                 };
+                if target.is_none() && self.has_diagnostic("E0304", *span) {
+                    if let (Some(method_span), Some(class_name)) = (
+                        method_span,
+                        self.method_receiver_class_name(object, current_class),
+                    ) {
+                        self.record_missing_callable(
+                            method,
+                            method_span,
+                            args,
+                            *span,
+                            MissingCallableTarget::Method {
+                                class_name,
+                                is_static: false,
+                            },
+                        );
+                    }
+                }
                 if let Some(class_name) = resolved_class {
                     if let Some(symbol) = self.resolve_method(class_name, method) {
                         if let Some(method_span) = method_span {
@@ -2765,6 +2853,17 @@ impl<'a> SnapshotBuilder<'a> {
                     self.semantic_info.and_then(|info| info.call_target(*span)),
                     Some(CallableTarget::Function { name: resolved }) if resolved == name
                 );
+                if !resolved && self.has_diagnostic("E0309", *span) {
+                    if let Some(name_span) = find_identifier_span(self.tokens, *span, name) {
+                        self.record_missing_callable(
+                            name,
+                            name_span,
+                            args,
+                            *span,
+                            MissingCallableTarget::Function,
+                        );
+                    }
+                }
                 if resolved {
                     let Some(symbol) = self.functions.get(name).copied() else {
                         return;
@@ -2819,6 +2918,29 @@ impl<'a> SnapshotBuilder<'a> {
                     _ if matches!(qualifier, StaticQualifier::Parent) => parent_class,
                     _ => None,
                 };
+                if target.is_none() && self.has_diagnostic("E0304", *span) {
+                    let class_name = match qualifier {
+                        StaticQualifier::Class(name) => Some(name.clone()),
+                        StaticQualifier::SelfType => current_class.map(ToOwned::to_owned),
+                        StaticQualifier::Parent => parent_class.map(ToOwned::to_owned),
+                        StaticQualifier::InvalidStatic => None,
+                    };
+                    if let (Some(method_span), Some(class_name)) = (
+                        self.member_name_span(Span::new(qualifier_span.end, span.end), method),
+                        class_name,
+                    ) {
+                        self.record_missing_callable(
+                            method,
+                            method_span,
+                            args,
+                            *span,
+                            MissingCallableTarget::Method {
+                                class_name,
+                                is_static: true,
+                            },
+                        );
+                    }
+                }
                 if let Some(class_name) = class_name {
                     if let Some(symbol) = self.resolve_method(class_name, method) {
                         if let Some(method_span) =
@@ -3296,6 +3418,116 @@ impl<'a> SnapshotBuilder<'a> {
             current_class: current_class.map(ToOwned::to_owned),
             writable_payload_access: !is_readonly_shared_projection(object, self.semantic_info),
         });
+    }
+
+    fn has_diagnostic(&self, code: &str, span: Span) -> bool {
+        self.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == code && diagnostic_overlaps_span(diagnostic, span))
+    }
+
+    fn method_receiver_class_name(
+        &self,
+        object: &Expr,
+        current_class: Option<&str>,
+    ) -> Option<String> {
+        if let Some(class_name) = self
+            .semantic_info
+            .and_then(|info| info.expression_type(object.span()))
+            .and_then(member_receiver_class_name)
+        {
+            return Some(class_name.to_string());
+        }
+        if matches!(object, Expr::This { .. }) {
+            current_class.map(ToOwned::to_owned)
+        } else {
+            None
+        }
+    }
+
+    fn record_missing_callable(
+        &mut self,
+        name: &str,
+        name_span: Span,
+        arguments: &[doriac::ast::Argument],
+        call_span: Span,
+        target: MissingCallableTarget,
+    ) {
+        let mut used_names = HashSet::new();
+        let parameters = arguments
+            .iter()
+            .enumerate()
+            .map(|(index, argument)| {
+                let preferred_name = argument
+                    .name
+                    .as_ref()
+                    .map(|name| name.text.clone())
+                    .or_else(|| match &argument.value {
+                        Expr::Variable { name, .. } => Some(name.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| format!("arg{}", index + 1));
+                let name = unique_parameter_name(preferred_name, &mut used_names);
+                let ty = self.generated_argument_type(&argument.value);
+                GeneratedParameter { name, ty }
+            })
+            .collect();
+        let return_type = if self.statement_expression_span == Some(call_span) {
+            "void".to_string()
+        } else {
+            "mixed".to_string()
+        };
+        self.missing_callables.push(MissingCallable {
+            name: name.to_string(),
+            name_span,
+            parameters,
+            return_type,
+            target,
+        });
+    }
+
+    fn generated_argument_type(&self, expression: &Expr) -> String {
+        if let Some(ty) = self
+            .semantic_info
+            .and_then(|info| info.expression_type(expression.span()))
+        {
+            return generated_parameter_type(ty);
+        }
+        match expression {
+            Expr::Variable { name, .. } => self
+                .resolve_local(name)
+                .and_then(|symbol| self.symbols.get(symbol))
+                .and_then(|symbol| symbol.signature.split_once(" $").map(|(ty, _)| ty))
+                .and_then(|ty| ty.split_whitespace().last())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| "mixed".to_string()),
+            Expr::String { .. } | Expr::InterpolatedString { .. } => "string".to_string(),
+            Expr::Int { .. } => "int".to_string(),
+            Expr::Float { .. } => "float".to_string(),
+            Expr::Bool { .. } => "bool".to_string(),
+            Expr::New { class_type, .. } => class_type.to_string(),
+            _ => "mixed".to_string(),
+        }
+    }
+}
+
+fn unique_parameter_name(preferred: String, used: &mut HashSet<String>) -> String {
+    if used.insert(preferred.clone()) {
+        return preferred;
+    }
+    for suffix in 2.. {
+        let candidate = format!("{preferred}{suffix}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("an unused parameter suffix always exists")
+}
+
+fn generated_parameter_type(ty: &ResolvedType) -> String {
+    match ty {
+        ResolvedType::Null | ResolvedType::Unsupported | ResolvedType::Void => "mixed".to_string(),
+        _ => display_resolved_type(ty),
     }
 }
 

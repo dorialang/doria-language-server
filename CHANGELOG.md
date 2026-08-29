@@ -6,6 +6,10 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Presented unresolved function and method calls as actionable editor warnings
+  while retaining compiler-error semantics, and added shared LSP quick fixes
+  that generate conservative free, instance, and static callable stubs in VS
+  Code and JetBrains editors.
 - Completed Stage 32 tooling by pinning the typed-attribute compiler and using
   its schemas, canonical identities, bound constant values, and source spans for
   scoped marker/schema and named-argument completion, typed metadata hover,

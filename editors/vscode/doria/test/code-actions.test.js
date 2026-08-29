@@ -17,3 +17,9 @@ test("bridges compiler-backed Doria code actions into VS Code workspace edits", 
   assert.match(extension, /new vscode\.WorkspaceEdit\(\)/);
   assert.match(extension, /vscode\.TextEdit\.replace\(toRange\(change\.range\), change\.newText\)/);
 });
+
+test("keeps server-owned callable generation actions generic across documents", () => {
+  assert.match(extension, /for \(const \[uri, changes\] of Object\.entries\(action\.edit\.changes\)\)/);
+  assert.match(extension, /edit\.set\(\s*vscode\.Uri\.parse\(uri\)/);
+  assert.doesNotMatch(extension, /Generate (?:method|function)/);
+});
