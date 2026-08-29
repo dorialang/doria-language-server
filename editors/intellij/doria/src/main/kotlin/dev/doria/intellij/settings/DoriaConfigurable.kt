@@ -11,6 +11,7 @@ import javax.swing.JTextField
 
 class DoriaConfigurable : SearchableConfigurable {
     private var languageServerPathField: JTextField? = null
+    private var batonPathField: JTextField? = null
 
     override fun getId(): String = "dev.doria.intellij.settings"
 
@@ -44,21 +45,49 @@ class DoriaConfigurable : SearchableConfigurable {
             constraints,
         )
 
+        constraints.gridx = 0
+        constraints.gridy = 2
+        constraints.insets = Insets(12, 0, 8, 8)
+        constraints.fill = GridBagConstraints.NONE
+        panel.add(JBLabel("Baton path:"), constraints)
+
+        batonPathField = JTextField(settings.batonPath, 40)
+        constraints.gridx = 1
+        constraints.weightx = 1.0
+        constraints.fill = GridBagConstraints.HORIZONTAL
+        panel.add(batonPathField, constraints)
+
+        constraints.gridy = 3
+        constraints.insets = Insets(0, 0, 0, 0)
+        constraints.fill = GridBagConstraints.NONE
+        constraints.weightx = 0.0
+        panel.add(
+            JBLabel("Leave empty to use DORIA_BATON_PATH, the installed toolchain, or Baton on PATH."),
+            constraints,
+        )
+
         return panel
     }
 
-    override fun isModified(): Boolean =
-        languageServerPathField?.text.orEmpty() != DoriaSettings.getInstance().state.languageServerPath
+    override fun isModified(): Boolean {
+        val settings = DoriaSettings.getInstance().state
+        return languageServerPathField?.text.orEmpty() != settings.languageServerPath ||
+            batonPathField?.text.orEmpty() != settings.batonPath
+    }
 
     override fun apply() {
-        DoriaSettings.getInstance().state.languageServerPath = languageServerPathField?.text.orEmpty().trim()
+        val settings = DoriaSettings.getInstance().state
+        settings.languageServerPath = languageServerPathField?.text.orEmpty().trim()
+        settings.batonPath = batonPathField?.text.orEmpty().trim()
     }
 
     override fun reset() {
         languageServerPathField?.text = DoriaSettings.getInstance().state.languageServerPath
+        batonPathField?.text = DoriaSettings.getInstance().state.batonPath
     }
 
     override fun disposeUIResources() {
         languageServerPathField = null
+        batonPathField = null
     }
 }

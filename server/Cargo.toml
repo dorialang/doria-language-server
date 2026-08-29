@@ -7,9 +7,9 @@ repository.workspace = true
 
 [dependencies]
 doriac.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 
 [[bin]]
 name = "doria-lsp"
 path = "src/main.rs"
-

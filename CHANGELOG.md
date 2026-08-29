@@ -6,6 +6,13 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Completed Stage 33 project tooling and Phase F by consuming Baton's strict
+  schema-1 project document asynchronously, loading complete compiler graphs with
+  unsaved overlays, indexing unopened and generated sources, refusing edits to
+  generated and Git-cache sources, and retaining bounded partial-graph fallback.
+  Added debounced project watchers, manual refresh, and one Baton path override
+  to both official editor integrations. Stage 34 single class inheritance is next.
+
 - Added compiler-resolved go-to-definition and conservative rename for local
   bindings and cross-file methods, properties, class constants, and enum cases,
   with standard LSP navigation and workspace edits exposed in both official
@@ -30,8 +37,8 @@ This project follows the Doria toolchain CalVer.
   compilation graph, and adding compiler-backed cross-file definition,
   references, conservative rename, rich hover, same-namespace completion,
   multi-source diagnostics and fixes, include facts, incremental invalidation,
-  and stale-result clearing. Project inventories remain open-document-only;
-  Baton parsing and unopened-file discovery remain Stage 33 work.
+  and stale-result clearing. This partial-graph path remains the Stage 33 fallback
+  when authoritative Baton project discovery is unavailable.
 - Completed Stage 31 Slice 1 editor alignment: pinned the namespace-aware
   compiler, assigned synthetic package identities by longest workspace root,
   indexed compiler-owned canonical symbols across open documents, and added

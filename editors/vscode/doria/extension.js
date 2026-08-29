@@ -49,9 +49,13 @@ class DoriaLanguageClient {
     this.diagnostics = vscode.languages.createDiagnosticCollection("doria");
     this.process = undefined;
     this.started = false;
+    this.projectWatchers = [];
+    this.dynamicProjectWatchers = new Map();
 
     context.subscriptions.push(this.diagnostics);
     context.subscriptions.push(
+      vscode.commands.registerCommand("doria.refreshProject", () => this.refreshProject()),
+      vscode.workspace.onDidChangeWorkspaceFolders((event) => this.didChangeWorkspaceFolders(event)),
       vscode.workspace.onDidOpenTextDocument((document) => this.didOpen(document)),
       vscode.workspace.onDidChangeTextDocument((event) => this.didChange(event)),
       vscode.workspace.onDidCloseTextDocument((document) => this.didClose(document)),
@@ -114,6 +118,7 @@ class DoriaLanguageClient {
         "\n"
       )
     );
+    this.configureProjectWatchers();
   }
 
   start() {
@@ -128,8 +133,12 @@ class DoriaLanguageClient {
       workspaceRoot: workspaceRoot(),
       extensionPath: this.context.extensionPath
     });
+    const batonPath = vscode.workspace.getConfiguration("doria").get("baton.path")?.trim() ?? "";
     const child = cp.spawn(resolution.command, [], {
       cwd: workspaceRoot(),
+      env: batonPath
+        ? { ...process.env, DORIA_BATON_PATH: batonPath }
+        : process.env,
       stdio: ["pipe", "pipe", "pipe"]
     });
     this.process = child;
@@ -159,7 +168,21 @@ class DoriaLanguageClient {
     this.sendRequest("initialize", {
       processId: process.pid,
       rootUri: vscode.workspace.workspaceFolders?.[0]?.uri.toString() ?? null,
-      capabilities: {}
+      workspaceFolders: (vscode.workspace.workspaceFolders ?? []).map((folder) => ({
+        uri: folder.uri.toString(),
+        name: folder.name
+      })),
+      capabilities: {
+        workspace: {
+          didChangeWatchedFiles: {
+            dynamicRegistration: true
+          },
+          workspaceFolders: true
+        }
+      },
+      initializationOptions: {
+        batonPath: batonPath || null
+      }
     }).then(() => {
       this.sendNotification("initialized", {});
       for (const document of vscode.workspace.textDocuments) {
@@ -172,6 +195,11 @@ class DoriaLanguageClient {
 
   dispose() {
     this.diagnostics.dispose();
+    for (const watcher of this.projectWatchers) {
+      watcher.dispose();
+    }
+    this.projectWatchers = [];
+    this.disposeDynamicProjectWatchers();
     if (!this.process) {
       return Promise.resolve();
     }
@@ -249,6 +277,110 @@ class DoriaLanguageClient {
     this.diagnostics.delete(document.uri);
   }
 
+  didChangeWorkspaceFolders(event) {
+    this.configureProjectWatchers();
+    this.sendNotification("workspace/didChangeWorkspaceFolders", {
+      event: {
+        added: event.added.map((folder) => ({
+          uri: folder.uri.toString(),
+          name: folder.name
+        })),
+        removed: event.removed.map((folder) => ({
+          uri: folder.uri.toString(),
+          name: folder.name
+        }))
+      }
+    });
+  }
+
+  configureProjectWatchers() {
+    for (const watcher of this.projectWatchers) {
+      watcher.dispose();
+    }
+    this.projectWatchers = [];
+    const patterns = [
+      "Baton.toml",
+      "Baton.lock",
+      "**/*.doria",
+      ".doria/build/**",
+      "build/.baton/**"
+    ];
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      for (const pattern of patterns) {
+        const watcher = vscode.workspace.createFileSystemWatcher(
+          new vscode.RelativePattern(folder, pattern)
+        );
+        watcher.onDidCreate((uri) => this.didChangeWatchedFile(uri, 1));
+        watcher.onDidChange((uri) => this.didChangeWatchedFile(uri, 2));
+        watcher.onDidDelete((uri) => this.didChangeWatchedFile(uri, 3));
+        this.projectWatchers.push(watcher);
+      }
+    }
+  }
+
+  didChangeWatchedFile(uri, type) {
+    this.sendNotification("workspace/didChangeWatchedFiles", {
+      changes: [{ uri: uri.toString(), type }]
+    });
+  }
+
+  registerDynamicProjectWatchers(registrations) {
+    for (const registration of registrations ?? []) {
+      if (registration.method !== "workspace/didChangeWatchedFiles") {
+        continue;
+      }
+      this.unregisterDynamicProjectWatchers([{ id: registration.id }]);
+      const disposables = [];
+      for (const entry of registration.registerOptions?.watchers ?? []) {
+        const glob = entry.globPattern;
+        if (!glob || typeof glob === "string" || !glob.baseUri || !glob.pattern) {
+          continue;
+        }
+        const watcher = vscode.workspace.createFileSystemWatcher(
+          new vscode.RelativePattern(vscode.Uri.parse(glob.baseUri), glob.pattern)
+        );
+        const kind = entry.kind ?? 7;
+        if ((kind & 1) !== 0) {
+          disposables.push(watcher.onDidCreate((uri) => this.didChangeWatchedFile(uri, 1)));
+        }
+        if ((kind & 2) !== 0) {
+          disposables.push(watcher.onDidChange((uri) => this.didChangeWatchedFile(uri, 2)));
+        }
+        if ((kind & 4) !== 0) {
+          disposables.push(watcher.onDidDelete((uri) => this.didChangeWatchedFile(uri, 3)));
+        }
+        disposables.push(watcher);
+      }
+      this.dynamicProjectWatchers.set(registration.id, disposables);
+    }
+  }
+
+  unregisterDynamicProjectWatchers(unregistrations) {
+    for (const registration of unregistrations ?? []) {
+      const disposables = this.dynamicProjectWatchers.get(registration.id) ?? [];
+      for (const disposable of disposables) {
+        disposable.dispose();
+      }
+      this.dynamicProjectWatchers.delete(registration.id);
+    }
+  }
+
+  disposeDynamicProjectWatchers() {
+    this.unregisterDynamicProjectWatchers(
+      [...this.dynamicProjectWatchers.keys()].map((id) => ({ id }))
+    );
+  }
+
+  refreshProject() {
+    if (!this.process) {
+      return Promise.resolve();
+    }
+    return this.sendRequest("workspace/executeCommand", {
+      command: "doria.refreshProject",
+      arguments: []
+    });
+  }
+
   sendRequest(method, params) {
     if (!this.process) {
       return Promise.reject(new Error("Doria language server is not running"));
@@ -288,6 +420,7 @@ class DoriaLanguageClient {
     this.started = false;
     this.buffer = Buffer.alloc(0);
     this.diagnostics.clear();
+    this.disposeDynamicProjectWatchers();
     this.rejectPending(error);
   }
 
@@ -327,6 +460,24 @@ class DoriaLanguageClient {
   }
 
   handleMessage(message) {
+    if (
+      Object.prototype.hasOwnProperty.call(message, "id")
+      && message.method === "client/registerCapability"
+    ) {
+      this.registerDynamicProjectWatchers(message.params?.registrations);
+      this.send({ jsonrpc: "2.0", id: message.id, result: null });
+      return;
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(message, "id")
+      && message.method === "client/unregisterCapability"
+    ) {
+      this.unregisterDynamicProjectWatchers(
+        message.params?.unregisterations ?? message.params?.unregistrations
+      );
+      this.send({ jsonrpc: "2.0", id: message.id, result: null });
+      return;
+    }
     if (Object.prototype.hasOwnProperty.call(message, "id")) {
       const pending = this.pending.get(message.id);
       if (pending) {
@@ -635,7 +786,7 @@ class DoriaDebugAdapterFactory {
       })
       : resolveBatonPath({
         configuredPath: configuration.get("baton.path"),
-        environmentPath: process.env.BATON_PATH,
+        environmentPath: process.env.DORIA_BATON_PATH,
         workspaceRoot: workspaceFolder?.uri.fsPath
       });
     return new vscode.DebugAdapterInlineImplementation(

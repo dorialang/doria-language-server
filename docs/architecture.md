@@ -49,7 +49,8 @@ alias collisions, and organize existing imports into class-like and non-class
 blocks. Editor clients only present and apply the returned LSP workspace edit.
 
 The server may organize IDE-friendly data but must not create a second semantic checker.
-Each open document has one versioned compiler-backed analysis snapshot containing
+Each source has one compiler-backed analysis snapshot, with open documents also
+retaining their editor version. Snapshots contain
 diagnostics, symbols, and resolved source occurrences. Diagnostics and semantic
 features consume that shared snapshot so an individual hover request does not
 re-parse or re-check the document.
@@ -64,8 +65,18 @@ dependency edges, diagnostics, and incremental invalidation. The bounded index
 only projects those facts into definition, references, conservative rename,
 hover, completion, and source-aware fixes. Open, change, save, close, and
 workspace-folder events reanalyze the relevant open-source graph and republish
-affected URIs. No source is written to disk, no unopened directory is scanned,
-and no Baton manifest is parsed; Stage 33 owns complete project inventory.
+affected URIs. This partial mode remains the bounded fallback when authoritative
+project discovery is unavailable.
+
+Stage 33 adds complete project authority without a second project parser. Baton
+runs asynchronously with offline project-discovery arguments and returns strict
+schema-1 JSON containing its source inventory and compiler tooling build plan.
+The server overlays unsaved buffers, loads that plan through one reusable complete
+compiler graph session, and indexes supplied unopened sources. Generated sources
+and Git cache sources are navigation-only; workspace and path sources may receive
+safe compiler edits. Editor file watchers debounce structural refreshes. Baton is
+never invoked by hover, completion, or another per-request path, and the server
+does not parse `Baton.toml` or `Baton.lock`.
 
 Stage 32 attribute tooling is another projection of that compiler graph. The
 server indexes compiler-owned attribute schemas, canonical class references,
@@ -94,6 +105,15 @@ JetBrains plugin packages all supported native servers and selects by host OS an
 architecture. Users never select a compiler: the compiler is an implementation
 dependency embedded in the bundled server. Explicit paths and environment
 overrides exist only for language-server and compiler development.
+
+Both official clients expose one Baton path override. It is passed as
+`DORIA_BATON_PATH`; otherwise the server uses the version-matched installed
+component or `PATH`. Clients watch manifests, locks, Doria source creation and
+deletion, generated output, and private inventory changes, and they expose an
+explicit project refresh command without performing discovery on the UI thread.
+After discovery, the server maintains bounded watchers rooted at the exact
+package paths supplied by Baton; it never watches the global dependency cache as
+one recursive root.
 
 ### Syntax highlighters
 

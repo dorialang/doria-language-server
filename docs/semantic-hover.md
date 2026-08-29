@@ -174,16 +174,18 @@ snapshot from `doriac` parser and semantic-analysis results, maps byte spans to 
 positions, caches the snapshot by document version, and renders protocol Markdown.
 It does not infer a parallel Doria type system.
 
-The server submits currently open documents to one compiler-owned partial graph
-per synthetic workspace package. Namespace and imported-symbol hover supplements
+The server submits Baton-supplied project sources to one compiler-owned complete
+graph per project, with unsaved open text overlaid by canonical path. When Baton
+is unavailable, currently open documents use the retained partial graph per
+synthetic workspace package. Namespace and imported-symbol hover supplements
 the resulting rich semantic facts with canonical qualified names, explicit
 aliases, edition-prelude provenance, or compiler-known provenance without
 exposing synthetic package IDs. Definition and references use canonical identity
-across open documents. Explicit alias rename is local to that file; canonical
-rename edits direct unambiguous open-document occurrences while preserving
+across supplied documents. Explicit alias rename is local to that file; canonical
+rename edits direct unambiguous editable occurrences while preserving
 explicit aliases, and declines for duplicates, implicit aliases, or incomplete
 inputs. Completion offers current-namespace declarations, explicit aliases,
-prelude/compiler-known names, and qualified open-document declarations without
+prelude/compiler-known names, and qualified supplied declarations without
 treating every dependency short name as imported.
 
 The same compiler-owned global-symbol facts drive the `Use import for ...` code
@@ -195,7 +197,9 @@ groups class-like symbols before functions and constants, sorts each group by
 canonical qualified name, and preserves comments by refusing to normalize an
 interleaved block.
 
-The graph is intentionally bounded to supplied open text. It resolves explicit
-includes available through that in-memory source provider, but it does not read
-unopened files, scan directories, or parse Baton manifests. Stage 33 will supply
-authoritative project inventories and unopened-file completeness.
+Project discovery is intentionally delegated to Baton. The server consumes its
+strict project JSON and complete compiler build plan; it does not read manifests,
+locks, or scan directories. Supplied unopened and generated sources participate
+in hover and navigation. Generated and Git-cache sources are readonly, so rename
+and machine edits are declined when any target is not editable. Partial graphs
+remain available for standalone files and discovery failure.

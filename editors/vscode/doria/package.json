@@ -19,7 +19,8 @@
   ],
   "activationEvents": [
     "onLanguage:doria",
-    "onDebug:doria"
+    "onDebug:doria",
+    "onCommand:doria.refreshProject"
   ],
   "main": "./extension.js",
   "scripts": {
@@ -52,6 +53,12 @@
         "language": "doria",
         "scopeName": "source.doria",
         "path": "./syntaxes/doria.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "doria.refreshProject",
+        "title": "Doria: Refresh Project"
       }
     ],
     "debuggers": [
@@ -181,7 +188,7 @@
         "doria.baton.path": {
           "type": "string",
           "default": "",
-          "description": "Path to the baton executable used by project launch profiles. Leave empty to use BATON_PATH or baton from PATH."
+          "description": "Path to the baton executable used by project tooling and launch profiles. Leave empty to use DORIA_BATON_PATH, a version-matched installed component, or baton from PATH."
         }
       }
     }

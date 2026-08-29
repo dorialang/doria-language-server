@@ -33,8 +33,8 @@ Valid closures are diagnostic-free in ordinary target-neutral editor analysis an
 execute through the compiler's debug and native targets and its supported PHP
 compatibility surface. Completion and concrete semantic hovers expose `map`,
 `filter`, and `reduce` on `List<T>` only; diagnostics remain compiler-owned.
-PHP remains secondary. Stages 30, 31, and 32 are complete; Stage 33 project
-integration is next. Attribute colors remain theme-dependent presentation,
+PHP remains secondary. Stages 30 through 33 and Phase F are complete; Stage 34
+single class inheritance is next. Attribute colors remain theme-dependent presentation,
 while `doria-lsp` supplies compiler-owned schema completion, typed metadata
 hover, semantic tokens, navigation, references, rename, and diagnostics. The
 extension does not implement attribute semantics, runtime reflection, test
@@ -97,7 +97,8 @@ No `.vscode/launch.json` is required. To keep an explicit profile:
 }
 ```
 
-Baton is resolved from `doria.baton.path`, then `BATON_PATH`, then `PATH`.
+Baton is resolved from `doria.baton.path`, then `DORIA_BATON_PATH`, a
+version-matched installed component, then `PATH`.
 Standalone source files can use the **Doria: Run standalone file** snippet,
 which runs the selected `program` through `doriac run`; that opt-in mode resolves
 the compiler from `doria.compiler.path`, `DORIAC_PATH`, Cargo's installed bin
@@ -105,6 +106,13 @@ directory, then `PATH`.
 
 These are execution profiles. Source-level breakpoints and stepping will remain
 disabled until the Doria toolchain exposes a debugger protocol.
+
+The same Baton override drives language-server project discovery. The extension
+watches `Baton.toml`, `Baton.lock`, source creation/deletion, generated output,
+and Baton's private inventory, then sends structural notifications to
+`doria-lsp` for debounced refresh. Use **Doria: Refresh Project** to request an
+immediate refresh. Discovery remains asynchronous; hover and completion never
+start Baton.
 
 ## Override the bundled language server
 

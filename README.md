@@ -49,17 +49,20 @@ completion, named-argument completion, evaluated metadata hover, semantic
 tokens, navigation, references, and conservative rename. `#[Test]` records
 metadata but does not run tests; `#[PHPExport]` records metadata but does not
 activate a bridge. Attributes remain compile-time metadata with no runtime
-reflection. Stage 33 project integration is next. Ordinary analysis remains
-target-neutral, and highlighting remains presentation only.
+reflection. Stage 33 and Phase F are complete; Stage 34 single class inheritance
+is next. Ordinary analysis remains target-neutral, and highlighting remains
+presentation only.
 
-Namespace-aware tooling analyzes the currently open sources under each workspace
-root as one compiler-owned partial compilation graph. The compiler supplies
-canonical identity, cross-file resolution, include edges, semantic diagnostics,
-and incremental invalidation; the LSP index supplies definition, references,
-conservative rename, rich hover, completion, and source-aware fixes over those
-facts. Changes and closes republish every affected open document and clear stale
-results. The server does not scan unopened files or parse `Baton.toml`, so full
-project inventory and unopened-file completeness wait for Stage 33.
+Project-aware tooling asks Baton asynchronously for its strict schema-1 project
+document and gives the supplied tooling build plan to the compiler as a complete
+graph. Unsaved editor text overlays the matching supplied source; unopened
+workspace, path-dependency, and generated sources remain indexed for diagnostics
+and navigation. Generated and Git-cache sources are readable but never rename or
+fix targets. Manifest, lock, source-inventory, and generated-output changes trigger
+a debounced refresh. When Baton is unavailable or rejects discovery, open documents
+continue in the compiler-owned partial-graph mode with one bounded status message.
+The server never parses `Baton.toml` or `Baton.lock` and never invokes Baton per
+hover, completion, or other interactive request.
 
 The compiler also accepts constructor-rooted mutation through definitely initialized
 writable property paths, owned initialization of instance properties, and replacement
