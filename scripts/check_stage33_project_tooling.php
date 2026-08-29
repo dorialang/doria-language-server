@@ -38,7 +38,7 @@ $docs = stage33_text($root . '/README.md')
     . stage33_text($root . '/docs/architecture.md')
     . stage33_text($root . '/docs/semantic-hover.md');
 
-$compiler = 'b543e37b7cfd177f802db1f1fedec42323d0bec8';
+$compiler = 'f619d3dc175c1a671504fea3aff3613c61b05151';
 stage33_require(str_contains($manifest, 'rev = "' . $compiler . '"'), 'doriac must use the final green Stage 33 compiler pin.');
 stage33_require(substr_count($lock, 'rev=' . $compiler . '#' . $compiler) >= 3, 'Cargo.lock must resolve every compiler-owned package to the final pin.');
 
