@@ -1472,13 +1472,7 @@ impl Server {
             let Some(uri) = change.get("uri").and_then(Value::as_str) else {
                 continue;
             };
-            let kind = change.get("type").and_then(Value::as_u64).unwrap_or(2);
-            let structural = uri.ends_with("/Baton.toml")
-                || uri.ends_with("/Baton.lock")
-                || uri.contains("/.doria/build/")
-                || uri.contains("/build/.baton/")
-                || (uri.ends_with(".doria") && kind != 2);
-            if !structural {
+            if !project_file_change_requires_refresh(uri) {
                 continue;
             }
             for root in &self.workspace_roots {
@@ -3606,6 +3600,14 @@ fn register_project_watchers<W: Write>(writer: &mut W) -> Result<(), String> {
             }
         }),
     )
+}
+
+fn project_file_change_requires_refresh(uri: &str) -> bool {
+    uri.ends_with("/Baton.toml")
+        || uri.ends_with("/Baton.lock")
+        || uri.contains("/.doria/build/")
+        || uri.contains("/build/.baton/")
+        || uri.ends_with(".doria")
 }
 
 fn send_message<W: Write>(writer: &mut W, message: &Value) -> Result<(), String> {
@@ -7432,6 +7434,30 @@ function main(): void {}
         ] {
             assert!(output.contains(path));
         }
+    }
+
+    #[test]
+    fn modified_doria_sources_schedule_project_rediscovery() {
+        let root_uri = "file:///workspace".to_string();
+        let mut server = Server {
+            workspace_roots: vec![WorkspaceRoot {
+                uri: root_uri.clone(),
+                package: "workspace/project".to_string(),
+            }],
+            ..Server::default()
+        };
+
+        server.did_change_watched_files(Some(&json!({
+            "changes": [{
+                "uri": "file:///workspace/src/Changed.doria",
+                "type": 2
+            }]
+        })));
+
+        assert_eq!(
+            server.project_discovery.pending_generation(&root_uri),
+            Some(1)
+        );
     }
 
     #[test]

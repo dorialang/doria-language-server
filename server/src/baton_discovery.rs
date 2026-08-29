@@ -115,18 +115,14 @@ impl ProjectDiscovery {
     }
 
     pub(crate) fn schedule(&mut self, request: DiscoveryRequest, delay: Duration) {
-        let generation = self
-            .generations
-            .entry(request.root_uri.clone())
-            .and_modify(|generation| *generation += 1)
-            .or_insert(1);
+        let generation = self.advance_generation(&request.root_uri);
         if let Some(active) = self.active.remove(&request.root_uri) {
             active.cancelled.store(true, Ordering::Release);
         }
         self.pending.insert(
             request.root_uri.clone(),
             PendingDiscovery {
-                generation: *generation,
+                generation,
                 due: Instant::now() + delay,
                 request,
             },
@@ -138,7 +134,7 @@ impl ProjectDiscovery {
         if let Some(active) = self.active.remove(root_uri) {
             active.cancelled.store(true, Ordering::Release);
         }
-        self.generations.remove(root_uri);
+        self.advance_generation(root_uri);
     }
 
     pub(crate) fn poll(&mut self) -> Vec<DiscoveryUpdate> {
@@ -187,6 +183,19 @@ impl ProjectDiscovery {
                 });
             });
         }
+    }
+
+    fn advance_generation(&mut self, root_uri: &str) -> u64 {
+        let generation = self.generations.entry(root_uri.to_string()).or_default();
+        *generation = generation
+            .checked_add(1)
+            .expect("project discovery generation overflow");
+        *generation
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_generation(&self, root_uri: &str) -> Option<u64> {
+        self.pending.get(root_uri).map(|pending| pending.generation)
     }
 }
 
@@ -504,5 +513,36 @@ mod tests {
             updates[0].result.as_ref().unwrap_err(),
             "fake project result"
         );
+    }
+
+    #[test]
+    fn cancelled_roots_keep_monotonic_generations_and_reject_stale_results() {
+        let mut discovery = ProjectDiscovery::with_runner(Arc::new(FakeRunner {
+            calls: Arc::new(AtomicUsize::new(0)),
+            delay: Duration::ZERO,
+        }));
+        let request = DiscoveryRequest {
+            root_uri: "file:///workspace".to_string(),
+            root_path: PathBuf::from("/workspace"),
+            baton_override: None,
+        };
+
+        discovery.schedule(request.clone(), Duration::from_secs(60));
+        assert_eq!(discovery.pending_generation(&request.root_uri), Some(1));
+        discovery.cancel(&request.root_uri);
+        discovery.schedule(request.clone(), Duration::from_secs(60));
+        assert_eq!(discovery.pending_generation(&request.root_uri), Some(3));
+
+        discovery
+            .sender
+            .send(ThreadResult {
+                generation: 1,
+                update: DiscoveryUpdate {
+                    root_uri: request.root_uri,
+                    result: Err("stale project result".to_string()),
+                },
+            })
+            .unwrap();
+        assert!(discovery.poll().is_empty());
     }
 }

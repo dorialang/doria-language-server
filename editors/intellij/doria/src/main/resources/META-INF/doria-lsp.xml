@@ -15,4 +15,13 @@
       <category>Doria</category>
     </intentionAction>
   </extensions>
+  <actions>
+    <action
+      id="dev.doria.intellij.actions.DoriaRefreshProjectAction"
+      class="dev.doria.intellij.actions.DoriaRefreshProjectAction"
+      text="Refresh Doria Project"
+      description="Refresh Doria project metadata and diagnostics">
+      <add-to-group group-id="ToolsMenu" anchor="last" />
+    </action>
+  </actions>
 </idea-plugin>
