@@ -23,7 +23,6 @@ function stage32_require(bool $condition, string $message): void
     }
 }
 
-$compilerCommit = '9735332b9c6ae776d7cf8b959e02fd70e313ea1a';
 $manifest = stage32_read($root . '/Cargo.toml');
 $lock = stage32_read($root . '/Cargo.lock');
 $analysis = stage32_read($root . '/server/src/analysis.rs');
@@ -40,10 +39,9 @@ $docs = stage32_read($root . '/README.md')
     . stage32_read($root . '/docs/architecture.md')
     . stage32_read($root . '/docs/semantic-hover.md');
 
-stage32_require(
-    str_contains($manifest, 'rev = "' . $compilerCommit . '"'),
-    'Cargo.toml must pin the final Stage 32 compiler commit.',
-);
+preg_match('/doriac\s*=\s*\{[^\n]*\brev\s*=\s*"([0-9a-f]{40})"/', $manifest, $manifestPin);
+stage32_require(isset($manifestPin[1]), 'Cargo.toml must pin doriac to an exact compiler commit.');
+$compilerCommit = $manifestPin[1];
 preg_match_all(
     '/github\.com\/dorialang\/doria\?rev=([0-9a-f]{40})#([0-9a-f]{40})/',
     $lock,
@@ -54,7 +52,7 @@ stage32_require(count($sources) >= 3, 'Cargo.lock must contain compiler-owned gi
 foreach ($sources as $source) {
     stage32_require(
         $source[1] === $compilerCommit && $source[2] === $compilerCommit,
-        'every compiler-owned lockfile package must resolve to the Stage 32 pin.',
+        'every compiler-owned lockfile package must resolve to the exact manifest pin.',
     );
 }
 
@@ -113,7 +111,8 @@ stage32_require(
 
 foreach ([
     'Stage 32 is complete',
-    'Stage 33 project integration is next',
+    'Stage 33 and Phase F are complete',
+    'Stage 34 single class inheritance',
     'compiler-owned',
     'no runtime reflection',
 ] as $fact) {

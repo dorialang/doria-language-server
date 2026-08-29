@@ -12,7 +12,7 @@ object DoriaLspServerPathResolver {
     fun resolve(project: Project): String {
         val configured = DoriaSettings.getInstance().state.languageServerPath.trim()
         if (configured.isNotEmpty()) {
-            return expandProjectPath(configured, project)
+            return expandConfiguredPath(configured, project.basePath)
         }
 
         val fromEnvironment = System.getenv("DORIA_LSP_PATH")?.trim().orEmpty()
@@ -75,14 +75,17 @@ object DoriaLspServerPathResolver {
 
     private fun executableName(): String = if (SystemInfo.isWindows) "doria-lsp.exe" else "doria-lsp"
 
-    private fun expandProjectPath(path: String, project: Project): String {
+    internal fun expandConfiguredPath(
+        path: String,
+        projectBasePath: String?,
+        userHome: String = System.getProperty("user.home"),
+    ): String {
         var expanded = path
-        val basePath = project.basePath
-        if (basePath != null) {
-            expanded = expanded.replace("\$PROJECT_DIR$", basePath)
+        if (projectBasePath != null) {
+            expanded = expanded.replace("\$PROJECT_DIR$", projectBasePath)
         }
         if (expanded == "~" || expanded.startsWith("~/")) {
-            expanded = System.getProperty("user.home") + expanded.removePrefix("~")
+            expanded = userHome + expanded.removePrefix("~")
         }
         return expanded
     }

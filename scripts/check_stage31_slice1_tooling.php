@@ -107,10 +107,10 @@ require_fact(
     'the presentation index must not fabricate identities for unresolved symbols.',
 );
 require_fact(
-    !str_contains($server . $analysis . $index . $graph, 'Baton.toml')
-        && !str_contains($server . $analysis . $index . $graph, 'read_dir(')
-        && !str_contains($server . $analysis . $index . $graph, 'WalkDir'),
-    'Stage 31 tooling must not read manifests or discover unopened files.',
+    !str_contains($analysis . $index, 'Baton.toml')
+        && !str_contains($analysis . $index, 'read_dir(')
+        && !str_contains($analysis . $index, 'WalkDir'),
+    'Stage 31 semantic projections must remain independent of project discovery.',
 );
 
 foreach ([
@@ -173,8 +173,8 @@ foreach ([
 require_fact(
     str_contains($docs, 'Stage 31 is complete')
         && str_contains($docs, 'Stage 32 is complete')
-        && str_contains($docs, 'Stage 33 project integration is next'),
-    'tooling documents must preserve the final Stage 31 status and boundaries.',
+        && str_contains($docs, 'Stage 33 and Phase F are complete'),
+    'tooling documents must preserve Stage 31 and Stage 33 completion.',
 );
 
 fwrite(STDOUT, "Stage 31 tooling guard passed.\n");

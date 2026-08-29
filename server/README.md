@@ -22,7 +22,8 @@ compatibility backend with independent limitations. Stage 30 is complete. Stage
 tokens, and diagnostics consume compiler-owned schemas, canonical identities,
 bound constant values, and source spans. The server does not execute attribute
 constructors, provide runtime reflection, run `#[Test]`, or activate
-`#[PHPExport]`. Stage 33 project integration is next.
+`#[PHPExport]`. Stage 33 and Phase F are complete; Stage 34 single class
+inheritance is next.
 
 The compiler classifies checked effects into source-required effects and ambient
 canonical I/O effects. Hovers keep source signatures focused on required
@@ -34,14 +35,20 @@ compiler's finalizer-precedence rules; `E0632` is historical and reserved. The
 server consumes compiler-owned effect profiles and does not classify effects by
 source spelling.
 
-For namespace-aware tooling, each longest-matching workspace root receives a
-stable synthetic package and one compiler `CompilationSession`. Open documents
-become an in-memory partial build plan and are checked as one compiler graph.
-Cross-file definitions, references, conservative rename, rich hover, completion,
-multi-source diagnostics, fixes, include edges, and incremental invalidation all
-consume compiler-owned identities and facts. The server does not scan files,
-read Baton manifests, or claim completeness for unopened sources; Stage 33 owns
-that project inventory integration.
+For project-aware tooling, Baton is resolved from one explicit editor override,
+`DORIA_BATON_PATH`, a sibling installed component, or `PATH`. The server runs
+`baton project --json --workspace --development --offline` asynchronously and
+retries package selection only for Baton's exact workspace-selection diagnostic.
+Its strict schema-1 project document supplies the complete compiler build plan,
+source inventory, generated provenance, and edit policy. Aggregate workspaces use
+one compiler session per member dependency closure rather than one flattened
+semantic program. Open buffers overlay
+matching sources without writing to disk; unopened sources participate in
+navigation and diagnostics. Generated and Git-cache sources remain readonly.
+Project watcher registrations are rooted at the exact package paths supplied by
+Baton rather than at the global dependency cache.
+Discovery failure falls back to the existing compiler-owned partial graph for
+open documents. The server never parses Baton manifests or locks.
 
 From the repository root:
 

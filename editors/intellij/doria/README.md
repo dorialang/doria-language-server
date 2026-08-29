@@ -104,8 +104,8 @@ Valid closures are diagnostic-free in ordinary target-neutral editor analysis an
 execute through the compiler's debug and native targets and its supported PHP
 compatibility surface. Completion and concrete semantic hovers expose `map`,
 `filter`, and `reduce` on `List<T>` only; diagnostics remain compiler-owned.
-PHP remains secondary. Stages 30, 31, and 32 are complete; Stage 33 project
-integration is next. Attribute colors remain presentation-only, while
+PHP remains secondary. Stages 30 through 33 and Phase F are complete; Stage 34
+single class inheritance is next. Attribute colors remain presentation-only, while
 `doria-lsp` supplies compiler-owned schema completion, typed metadata hover,
 semantic tokens, navigation, references, rename, and diagnostics. The plugin
 does not parse attribute semantics, provide runtime reflection, run tests, or
@@ -169,6 +169,13 @@ The plugin looks for `doria-lsp` in this order:
 ```
 
 On Windows, the executable name is `doria-lsp.exe`.
+
+The Doria settings page also provides one optional Baton path. It accepts
+`$PROJECT_DIR$` and is passed to the language server as `DORIA_BATON_PATH`.
+Otherwise `doria-lsp` resolves a version-matched sibling component or Baton on
+`PATH`. The LSP client registers project-structure watchers with the IDE, and
+all Baton discovery runs off the UI thread. The language server consumes Baton's
+strict project JSON; the plugin does not parse manifests or locks.
 
 Normal plugin installations use the bundled server automatically. The settings,
 environment, Cargo, and PATH forms are retained for contributors testing a local

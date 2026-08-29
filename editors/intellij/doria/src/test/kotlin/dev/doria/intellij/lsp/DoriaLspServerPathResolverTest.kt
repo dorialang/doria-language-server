@@ -75,4 +75,23 @@ class DoriaLspServerPathResolverTest : TestCase() {
             plugin.toFile().deleteRecursively()
         }
     }
+
+    fun testConfiguredToolPathsExpandProjectAndHomePortably() {
+        assertEquals(
+            "/workspace/tools/baton",
+            DoriaLspServerPathResolver.expandConfiguredPath(
+                "\$PROJECT_DIR$/tools/baton",
+                "/workspace",
+                "/home/test",
+            ),
+        )
+        assertEquals(
+            "/home/test/bin/baton",
+            DoriaLspServerPathResolver.expandConfiguredPath(
+                "~/bin/baton",
+                null,
+                "/home/test",
+            ),
+        )
+    }
 }

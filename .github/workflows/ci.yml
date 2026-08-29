@@ -89,11 +89,11 @@ jobs:
         working-directory: editors/vscode/doria
         run: npm ci --ignore-scripts
 
-      - name: Check cross-editor highlighting
-        run: php scripts/check_editor_highlighting.php
-
-      - name: Check Stage 32 attribute tooling
-        run: php scripts/check_stage32_attribute_tooling.php
+      - name: Check repository guardrails
+        run: |
+          for script in scripts/check_*.php; do
+            php "$script"
+          done
 
       - name: Check developer build entrypoint
         run: |

@@ -9,6 +9,7 @@ import com.intellij.openapi.components.Storage
 class DoriaSettings : PersistentStateComponent<DoriaSettings.State> {
     data class State(
         var languageServerPath: String = "",
+        var batonPath: String = "",
     )
 
     private var state = State()

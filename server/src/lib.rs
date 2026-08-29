@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -17,6 +20,9 @@ use doriac::names::{
 use doriac::source::{SourceId, Span};
 
 mod analysis;
+mod baton_discovery;
+mod file_uri;
+mod project;
 mod string_surface;
 mod workspace_graph;
 mod workspace_index;
@@ -25,8 +31,11 @@ use analysis::{
     documentation_comment_template, AnalysisSnapshot, ImportCandidate, MissingCallable,
     MissingCallableTarget, SemanticCompletion, SemanticImport,
 };
+use baton_discovery::{DiscoveryRequest, ProjectDiscovery};
+use file_uri::file_uri_to_path;
+use project::{ProjectDocument, SourceEditPolicy};
 use string_surface::{STRING_COMPANION_METHODS, STRING_PROPERTIES};
-use workspace_graph::{analyze_open_graph, OpenSource};
+use workspace_graph::{analyze_open_graph, analyze_project_graph, GraphDocument, OpenSource};
 use workspace_index::OpenDocumentIndex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +151,17 @@ impl Document {
             display_path: uri.to_string(),
         }
     }
+
+    fn from_graph(graph: GraphDocument, version: Option<i64>) -> Self {
+        Self {
+            text: graph.text,
+            version,
+            analysis: graph.analysis,
+            source_id: graph.source_id,
+            source_identity: graph.source_identity,
+            display_path: graph.display_path,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -153,8 +173,17 @@ struct WorkspaceRoot {
 #[derive(Default)]
 struct Server {
     documents: HashMap<String, Document>,
+    project_documents: HashMap<String, Document>,
     workspace_roots: Vec<WorkspaceRoot>,
     workspace_sessions: HashMap<String, CompilationSession>,
+    projects: HashMap<String, ProjectDocument>,
+    source_edit_policies: HashMap<String, SourceEditPolicy>,
+    baton_override: Option<String>,
+    supports_dynamic_watching: bool,
+    project_discovery: ProjectDiscovery,
+    project_status_messages: HashMap<String, String>,
+    project_watcher_registrations: HashMap<String, String>,
+    published_diagnostics: HashMap<String, Value>,
     source_uris: HashMap<String, String>,
     incremental_facts: HashMap<String, IncrementalFacts>,
     include_edges: HashMap<String, Vec<(SourceIdentity, SourceIdentity)>>,
@@ -162,21 +191,46 @@ struct Server {
 }
 
 pub fn run_stdio() -> Result<(), String> {
-    let stdin = io::stdin();
     let stdout = io::stdout();
-    let mut reader = io::BufReader::new(stdin.lock());
     let mut writer = io::BufWriter::new(stdout.lock());
     let mut server = Server::default();
 
-    while let Some(body) = read_message(&mut reader)? {
-        let message = serde_json::from_slice::<Value>(&body)
-            .map_err(|error| format!("failed to parse LSP message: {error}"))?;
-        if !server.handle_message(message, &mut writer)? {
-            break;
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let stdin = io::stdin();
+        let mut reader = io::BufReader::new(stdin.lock());
+        loop {
+            let message = read_message(&mut reader);
+            let finished = matches!(message, Ok(None) | Err(_));
+            if sender.send(message).is_err() || finished {
+                break;
+            }
         }
-        writer
-            .flush()
-            .map_err(|error| format!("failed to flush LSP response: {error}"))?;
+    });
+
+    loop {
+        match receiver.recv_timeout(Duration::from_millis(25)) {
+            Ok(Ok(Some(body))) => {
+                let message = serde_json::from_slice::<Value>(&body)
+                    .map_err(|error| format!("failed to parse LSP message: {error}"))?;
+                if !server.handle_message(message, &mut writer)? {
+                    break;
+                }
+                writer
+                    .flush()
+                    .map_err(|error| format!("failed to flush LSP response: {error}"))?;
+            }
+            Ok(Ok(None)) => break,
+            Ok(Err(error)) => return Err(error),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if server.poll_project_discovery(&mut writer)? {
+                    writer.flush().map_err(|error| {
+                        format!("failed to flush project discovery updates: {error}")
+                    })?;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
     }
 
     Ok(())
@@ -310,6 +364,7 @@ fn edits_overlap(edits: &[FixEdit]) -> bool {
 
 impl Server {
     fn handle_message<W: Write>(&mut self, message: Value, writer: &mut W) -> Result<bool, String> {
+        self.poll_project_discovery(writer)?;
         let Some(method) = message.get("method").and_then(Value::as_str) else {
             return Ok(true);
         };
@@ -317,11 +372,29 @@ impl Server {
         let id = message.get("id").cloned();
         match method {
             "initialize" => {
+                self.supports_dynamic_watching = message
+                    .get("params")
+                    .and_then(|params| params.get("capabilities"))
+                    .and_then(|capabilities| capabilities.get("workspace"))
+                    .and_then(|workspace| workspace.get("didChangeWatchedFiles"))
+                    .and_then(|watching| watching.get("dynamicRegistration"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                self.baton_override = message
+                    .get("params")
+                    .and_then(|params| params.get("initializationOptions"))
+                    .and_then(|options| options.get("batonPath"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(str::to_string);
                 self.configure_workspace_roots(message.get("params"));
+                self.schedule_all_project_refreshes(Duration::ZERO);
                 if let Some(id) = id {
                     send_response(writer, id, initialize_result())?;
                 }
             }
+            "initialized" if self.supports_dynamic_watching => register_project_watchers(writer)?,
             "initialized" => {}
             "shutdown" => {
                 if let Some(id) = id {
@@ -335,6 +408,28 @@ impl Server {
             "textDocument/didClose" => self.did_close(message.get("params"), writer)?,
             "workspace/didChangeWorkspaceFolders" => {
                 self.did_change_workspace_folders(message.get("params"), writer)?
+            }
+            "workspace/didChangeWatchedFiles" => {
+                self.did_change_watched_files(message.get("params"))
+            }
+            "workspace/executeCommand" => {
+                let command = message
+                    .get("params")
+                    .and_then(|params| params.get("command"))
+                    .and_then(Value::as_str);
+                if command == Some("doria.refreshProject") {
+                    self.schedule_all_project_refreshes(Duration::ZERO);
+                    if let Some(id) = id {
+                        send_response(writer, id, Value::Null)?;
+                    }
+                } else if let Some(id) = id {
+                    send_error(
+                        writer,
+                        id,
+                        -32602,
+                        "unknown Doria workspace command".to_string(),
+                    )?;
+                }
             }
             "textDocument/completion" => {
                 if let Some(id) = id {
@@ -538,19 +633,11 @@ impl Server {
 
         self.documents.remove(uri);
         self.reanalyze_documents();
-        send_notification(
-            writer,
-            "textDocument/publishDiagnostics",
-            json!({
-                "uri": uri,
-                "diagnostics": [],
-            }),
-        )?;
         self.publish_all_diagnostics(writer)
     }
 
-    fn publish_diagnostics<W: Write>(&self, uri: &str, writer: &mut W) -> Result<(), String> {
-        let Some(document) = self.documents.get(uri) else {
+    fn publish_diagnostics<W: Write>(&mut self, uri: &str, writer: &mut W) -> Result<(), String> {
+        let Some(document) = self.document(uri) else {
             return Ok(());
         };
 
@@ -567,12 +654,36 @@ impl Server {
             params["version"] = json!(version);
         }
 
-        send_notification(writer, "textDocument/publishDiagnostics", params)
+        if self.published_diagnostics.get(uri) == Some(&params) {
+            return Ok(());
+        }
+        send_notification(writer, "textDocument/publishDiagnostics", params.clone())?;
+        self.published_diagnostics.insert(uri.to_string(), params);
+        Ok(())
     }
 
-    fn publish_all_diagnostics<W: Write>(&self, writer: &mut W) -> Result<(), String> {
-        let mut uris = self.documents.keys().cloned().collect::<Vec<_>>();
+    fn publish_all_diagnostics<W: Write>(&mut self, writer: &mut W) -> Result<(), String> {
+        let mut uris = self
+            .all_documents()
+            .map(|(uri, _)| uri.clone())
+            .collect::<Vec<_>>();
         uris.sort();
+        let active = uris.iter().cloned().collect::<HashSet<_>>();
+        let mut removed = self
+            .published_diagnostics
+            .keys()
+            .filter(|uri| !active.contains(*uri))
+            .cloned()
+            .collect::<Vec<_>>();
+        removed.sort();
+        for uri in removed {
+            send_notification(
+                writer,
+                "textDocument/publishDiagnostics",
+                json!({ "uri": uri, "diagnostics": [] }),
+            )?;
+            self.published_diagnostics.remove(&uri);
+        }
         for uri in uris {
             self.publish_diagnostics(&uri, writer)?;
         }
@@ -592,8 +703,7 @@ impl Server {
             .unwrap_or_else(|| uri.to_string());
         let message = diagnostic_message(diagnostic);
         let text = self
-            .documents
-            .get(&primary_uri)
+            .document(&primary_uri)
             .map_or("", |document| document.text.as_str());
         let mut value = json!({
             "range": span_to_range(text, primary_span),
@@ -614,7 +724,10 @@ impl Server {
                 "applicability": fix.applicability.as_str(),
                 "edits": fix.edits.iter().filter_map(|edit| {
                     let edit_uri = self.diagnostic_location_uri(uri, &edit.source, edit.span)?;
-                    let edit_text = self.documents.get(&edit_uri)?.text.as_str();
+                    if !self.source_is_editable(&edit_uri) {
+                        return None;
+                    }
+                    let edit_text = self.document(&edit_uri)?.text.as_str();
                     Some(json!({
                         "uri": edit_uri,
                         "range": span_to_range(edit_text, edit.span),
@@ -633,7 +746,12 @@ impl Server {
             self.diagnostic_location_uri(uri, &edit.source, edit.span)
                 .map(|edit_uri| (edit_uri, edit))
         }) {
-            if let Some(edit_text) = self.documents.get(&edit_uri).map(|document| &document.text) {
+            if let Some(edit_text) = self
+                .source_is_editable(&edit_uri)
+                .then(|| self.document(&edit_uri))
+                .flatten()
+                .map(|document| &document.text)
+            {
                 value["data"]["fix"] = json!({
                     "uri": edit_uri,
                     "range": span_to_range(edit_text, edit.span),
@@ -648,7 +766,7 @@ impl Server {
             .filter(|(index, _)| selected.map(|(selected, _)| selected) != Some(*index))
             .filter_map(|(_, label)| {
                 let related_uri = self.diagnostic_location_uri(uri, &label.source, label.span)?;
-                let related_text = self.documents.get(&related_uri)?.text.as_str();
+                let related_text = self.document(&related_uri)?.text.as_str();
                 Some(json!({
                     "location": {
                         "uri": related_uri,
@@ -676,7 +794,10 @@ impl Server {
         let mut edits_by_uri = HashMap::<String, Vec<&FixEdit>>::new();
         for edit in &fix.edits {
             let edit_uri = self.diagnostic_location_uri(uri, &edit.source, edit.span)?;
-            self.documents.get(&edit_uri)?;
+            if !self.source_is_editable(&edit_uri) {
+                return None;
+            }
+            self.document(&edit_uri)?;
             edits_by_uri.entry(edit_uri).or_default().push(edit);
         }
         if edits_by_uri.values().any(|edits| {
@@ -686,7 +807,7 @@ impl Server {
         }
         let mut changes = serde_json::Map::new();
         for (edit_uri, edits) in edits_by_uri {
-            let text = &self.documents[&edit_uri].text;
+            let text = &self.document(&edit_uri)?.text;
             changes.insert(
                 edit_uri,
                 Value::Array(
@@ -737,12 +858,11 @@ impl Server {
         source_id: SourceId,
     ) -> Option<String> {
         let package = &self
-            .documents
-            .get(current_uri)?
+            .document(current_uri)?
             .analysis
             .compilation_context()
             .package;
-        self.documents.iter().find_map(|(uri, document)| {
+        self.all_documents().find_map(|(uri, document)| {
             (document.source_id == source_id
                 && document.analysis.compilation_context().package == *package)
                 .then(|| uri.clone())
@@ -763,7 +883,7 @@ impl Server {
             .get("position")
             .and_then(|position| position.get("character"))
             .and_then(Value::as_u64)? as u32;
-        let document = self.documents.get(uri)?;
+        let document = self.document(uri)?;
         let offset = position_to_byte_offset(&document.text, line, character);
         if let Some(hover) = document.analysis.namespace_hover_at_offset(offset) {
             return Some(json!({
@@ -915,7 +1035,7 @@ impl Server {
                     .references(&target, include_declaration)
                     .into_iter()
                     .filter_map(|location| {
-                        let target_document = self.documents.get(&location.uri)?;
+                        let target_document = self.document(&location.uri)?;
                         Some(json!({
                             "uri": location.uri,
                             "range": span_to_range(&target_document.text, location.span),
@@ -939,7 +1059,7 @@ impl Server {
             return Value::Null;
         };
         if let Some(location) = self.document_index.definition(&uri, offset) {
-            let Some(target_document) = self.documents.get(&location.uri) else {
+            let Some(target_document) = self.document(&location.uri) else {
                 return Value::Null;
             };
             return json!({
@@ -972,7 +1092,10 @@ impl Server {
             };
             let mut changes = serde_json::Map::new();
             for edit in edits {
-                let Some(target_document) = self.documents.get(&edit.uri) else {
+                if !self.source_is_editable(&edit.uri) {
+                    return Value::Null;
+                }
+                let Some(target_document) = self.document(&edit.uri) else {
                     return Value::Null;
                 };
                 changes
@@ -1016,7 +1139,7 @@ impl Server {
         else {
             return json!({ "data": [] });
         };
-        let Some(document) = self.documents.get(uri) else {
+        let Some(document) = self.document(uri) else {
             return json!({ "data": [] });
         };
 
@@ -1065,7 +1188,7 @@ impl Server {
             .get("position")
             .and_then(|position| position.get("character"))
             .and_then(Value::as_u64)? as u32;
-        let document = self.documents.get(uri)?;
+        let document = self.document(uri)?;
         let offset = position_to_byte_offset(&document.text, line, character);
         Some((uri.to_string(), document, offset))
     }
@@ -1078,9 +1201,12 @@ impl Server {
         else {
             return json!([]);
         };
-        let Some(document) = self.documents.get(uri) else {
+        let Some(document) = self.document(uri) else {
             return json!([]);
         };
+        if !self.source_is_editable(uri) {
+            return json!([]);
+        }
 
         let mut actions = prepare_diagnostics(document.analysis.diagnostics())
             .iter()
@@ -1157,6 +1283,9 @@ impl Server {
             } => {
                 let (destination_uri, destination, declaration_span) =
                     self.class_declaration_document(document, class_name)?;
+                if !self.source_is_editable(&destination_uri) {
+                    return None;
+                }
                 let close = class_closing_brace(&destination.text, declaration_span)?;
                 let edit_span =
                     Span::new(trailing_whitespace_start(&destination.text, close), close);
@@ -1217,7 +1346,7 @@ impl Server {
         let current_package = &current.analysis.compilation_context().package;
         let mut exact = Vec::new();
         let mut short = Vec::new();
-        for (uri, document) in &self.documents {
+        for (uri, document) in self.all_documents() {
             if document.analysis.compilation_context().package != *current_package {
                 continue;
             }
@@ -1300,6 +1429,12 @@ impl Server {
                 .filter_map(|folder| folder.get("uri").and_then(Value::as_str))
                 .map(normalize_root_uri)
                 .collect::<std::collections::HashSet<_>>();
+            for root in &removed {
+                self.project_discovery.cancel(root);
+                self.projects.remove(root);
+                self.project_status_messages.remove(root);
+                self.replace_project_watchers(root, None, writer)?;
+            }
             self.workspace_roots
                 .retain(|root| !removed.contains(&root.uri));
         }
@@ -1320,10 +1455,180 @@ impl Server {
         }
         self.workspace_roots
             .sort_by(|left, right| left.uri.cmp(&right.uri));
+        self.schedule_all_project_refreshes(Duration::ZERO);
         self.reanalyze_documents();
-        for uri in self.documents.keys() {
-            self.publish_diagnostics(uri, writer)?;
+        self.publish_all_diagnostics(writer)
+    }
+
+    fn did_change_watched_files(&mut self, params: Option<&Value>) {
+        let Some(changes) = params
+            .and_then(|params| params.get("changes"))
+            .and_then(Value::as_array)
+        else {
+            return;
+        };
+        let mut roots = HashSet::new();
+        for change in changes {
+            let Some(uri) = change.get("uri").and_then(Value::as_str) else {
+                continue;
+            };
+            if !project_file_change_requires_refresh(uri) {
+                continue;
+            }
+            for root in &self.workspace_roots {
+                let supplied_root = self.projects.get(&root.uri).is_some_and(|project| {
+                    project.packages.iter().any(|package| {
+                        let package_uri = file_uri::path_to_file_uri(&package.root);
+                        uri_is_within(uri, &package_uri)
+                    })
+                });
+                if uri_is_within(uri, &root.uri) || supplied_root {
+                    roots.insert(root.uri.clone());
+                }
+            }
         }
+        for root in roots {
+            self.schedule_project_refresh(&root, Duration::from_millis(150));
+        }
+    }
+
+    fn schedule_all_project_refreshes(&mut self, delay: Duration) {
+        let roots = self
+            .workspace_roots
+            .iter()
+            .map(|root| root.uri.clone())
+            .collect::<Vec<_>>();
+        for root in roots {
+            self.schedule_project_refresh(&root, delay);
+        }
+    }
+
+    fn schedule_project_refresh(&mut self, root_uri: &str, delay: Duration) {
+        let Some(root_path) = file_uri_to_path(root_uri) else {
+            return;
+        };
+        self.project_discovery.schedule(
+            DiscoveryRequest {
+                root_uri: root_uri.to_string(),
+                root_path,
+                baton_override: self.baton_override.clone(),
+            },
+            delay,
+        );
+    }
+
+    fn poll_project_discovery<W: Write>(&mut self, writer: &mut W) -> Result<bool, String> {
+        let updates = self.project_discovery.poll();
+        if updates.is_empty() {
+            return Ok(false);
+        }
+        let mut messages = Vec::new();
+        for update in updates {
+            match update.result {
+                Ok(project) => {
+                    self.replace_project_watchers(&update.root_uri, Some(&project), writer)?;
+                    self.projects.insert(update.root_uri.clone(), project);
+                    self.project_status_messages.remove(&update.root_uri);
+                }
+                Err(message) => {
+                    self.projects.remove(&update.root_uri);
+                    self.replace_project_watchers(&update.root_uri, None, writer)?;
+                    let bounded = message.chars().take(500).collect::<String>();
+                    let changed =
+                        self.project_status_messages.get(&update.root_uri) != Some(&bounded);
+                    if changed {
+                        self.project_status_messages
+                            .insert(update.root_uri.clone(), bounded.clone());
+                        messages.push(format!(
+                            "Doria project discovery unavailable for {}: {}. Open documents remain available in partial-project mode.",
+                            update.root_uri, bounded
+                        ));
+                    }
+                }
+            }
+        }
+        self.reanalyze_documents();
+        self.publish_all_diagnostics(writer)?;
+        for message in messages {
+            send_notification(
+                writer,
+                "window/logMessage",
+                json!({ "type": 3, "message": message }),
+            )?;
+        }
+        Ok(true)
+    }
+
+    fn replace_project_watchers<W: Write>(
+        &mut self,
+        root_uri: &str,
+        project: Option<&ProjectDocument>,
+        writer: &mut W,
+    ) -> Result<(), String> {
+        if !self.supports_dynamic_watching {
+            return Ok(());
+        }
+        if let Some(registration_id) = self.project_watcher_registrations.remove(root_uri) {
+            send_message(
+                writer,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": format!("unregister-{registration_id}"),
+                    "method": "client/unregisterCapability",
+                    "params": {
+                        "unregisterations": [{
+                            "id": registration_id,
+                            "method": "workspace/didChangeWatchedFiles"
+                        }]
+                    }
+                }),
+            )?;
+        }
+        let Some(project) = project else {
+            return Ok(());
+        };
+
+        let registration_id = format!("doria-project-{:016x}", stable_hash(root_uri));
+        let mut package_roots = project
+            .packages
+            .iter()
+            .map(|package| file_uri::path_to_file_uri(&package.root))
+            .collect::<Vec<_>>();
+        package_roots.sort();
+        package_roots.dedup();
+        let mut watchers = package_roots
+            .into_iter()
+            .map(|base_uri| {
+                json!({
+                    "globPattern": { "baseUri": base_uri, "pattern": "**/*.doria" },
+                    "kind": 7
+                })
+            })
+            .collect::<Vec<_>>();
+        let project_root = file_uri::path_to_file_uri(project.project_root());
+        for pattern in [".doria/build/**", "build/.baton/**"] {
+            watchers.push(json!({
+                "globPattern": { "baseUri": project_root.clone(), "pattern": pattern },
+                "kind": 7
+            }));
+        }
+        send_message(
+            writer,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": format!("register-{registration_id}"),
+                "method": "client/registerCapability",
+                "params": {
+                    "registrations": [{
+                        "id": registration_id.clone(),
+                        "method": "workspace/didChangeWatchedFiles",
+                        "registerOptions": { "watchers": watchers }
+                    }]
+                }
+            }),
+        )?;
+        self.project_watcher_registrations
+            .insert(root_uri.to_string(), registration_id);
         Ok(())
     }
 
@@ -1337,9 +1642,82 @@ impl Server {
     }
 
     fn reanalyze_documents(&mut self) {
+        self.project_documents.clear();
+        self.source_edit_policies.clear();
+        self.source_uris.clear();
+        self.incremental_facts.clear();
+        self.include_edges.clear();
+
+        let mut active_groups = HashSet::new();
+        let mut consumed = HashSet::new();
+        let projects = self
+            .workspace_roots
+            .iter()
+            .filter_map(|root| {
+                self.projects
+                    .get(&root.uri)
+                    .cloned()
+                    .map(|project| (root.uri.clone(), project))
+            })
+            .collect::<Vec<_>>();
+        for (root_uri, project) in projects {
+            let sources = self
+                .documents
+                .iter()
+                .filter(|(uri, _)| {
+                    project.packages.iter().any(|package| {
+                        uri_is_within(uri, &file_uri::path_to_file_uri(&package.root))
+                    })
+                })
+                .map(|(uri, document)| (uri.clone(), document.text.clone()))
+                .collect::<Vec<_>>();
+            let open_sources = sources
+                .iter()
+                .map(|(uri, text)| OpenSource {
+                    uri,
+                    relative_path: workspace_relative_source(uri, &root_uri),
+                    text,
+                })
+                .collect::<Vec<_>>();
+            for (member, plan) in project.analysis_plans() {
+                let group = format!("project:{root_uri}:{member}");
+                active_groups.insert(group.clone());
+                let session = self.workspace_sessions.entry(group.clone()).or_default();
+                let Ok(graph) = analyze_project_graph(&project, &plan, &open_sources, session)
+                else {
+                    continue;
+                };
+                self.source_uris.extend(graph.source_uris);
+                self.incremental_facts
+                    .insert(group.clone(), graph.incremental);
+                self.include_edges.insert(group, graph.include_edges);
+                for (uri, graph_document) in graph.documents {
+                    self.source_edit_policies
+                        .insert(uri.clone(), graph_document.edit_policy);
+                    if let Some(version) = self.documents.get(&uri).map(|document| document.version)
+                    {
+                        consumed.insert(uri.clone());
+                        self.documents
+                            .insert(uri, Document::from_graph(graph_document, version));
+                    } else {
+                        self.project_documents
+                            .insert(uri, Document::from_graph(graph_document, None));
+                    }
+                }
+            }
+        }
+
         let mut groups = HashMap::<String, (String, Vec<(String, String, String)>)>::new();
         for (uri, document) in &self.documents {
+            if consumed.contains(uri) {
+                continue;
+            }
             let (group, package, relative_path) = self.graph_location(uri);
+            let group = if self.projects.contains_key(&group) {
+                format!("partial:{group}")
+            } else {
+                group
+            };
             groups
                 .entry(group)
                 .or_insert_with(|| (package, Vec::new()))
@@ -1350,13 +1728,8 @@ impl Server {
             sources.sort_by(|left, right| left.0.cmp(&right.0));
         }
 
-        self.workspace_sessions
-            .retain(|group, _| groups.contains_key(group));
-        self.source_uris.clear();
-        self.incremental_facts.clear();
-        self.include_edges.clear();
-
         for (group, (package, sources)) in groups {
+            active_groups.insert(group.clone());
             let open_sources = sources
                 .iter()
                 .map(|(uri, relative_path, text)| OpenSource {
@@ -1380,6 +1753,8 @@ impl Server {
                         document.source_id = graph_document.source_id;
                         document.source_identity = graph_document.source_identity;
                         document.display_path = graph_document.display_path;
+                        self.source_edit_policies
+                            .insert(uri, SourceEditPolicy::Editable);
                     }
                 }
                 Err(failure) => {
@@ -1417,10 +1792,14 @@ impl Server {
                         document.source_identity = SourceIdentity(display_path.clone());
                         document.display_path = display_path.clone();
                         self.source_uris.insert(display_path, uri.clone());
+                        self.source_edit_policies
+                            .insert(uri.clone(), SourceEditPolicy::Editable);
                     }
                 }
             }
         }
+        self.workspace_sessions
+            .retain(|group, _| active_groups.contains(group));
         self.rebuild_document_index();
     }
 
@@ -1447,10 +1826,27 @@ impl Server {
 
     fn rebuild_document_index(&mut self) {
         self.document_index = OpenDocumentIndex::rebuild(
-            self.documents
-                .iter()
+            self.all_documents()
                 .map(|(uri, document)| (uri.as_str(), &document.analysis)),
         );
+    }
+
+    fn document(&self, uri: &str) -> Option<&Document> {
+        self.documents
+            .get(uri)
+            .or_else(|| self.project_documents.get(uri))
+    }
+
+    fn all_documents(&self) -> impl Iterator<Item = (&String, &Document)> {
+        self.documents.iter().chain(self.project_documents.iter())
+    }
+
+    fn source_is_editable(&self, uri: &str) -> bool {
+        self.source_edit_policies
+            .get(uri)
+            .copied()
+            .unwrap_or(SourceEditPolicy::Editable)
+            == SourceEditPolicy::Editable
     }
 }
 
@@ -1953,6 +2349,9 @@ fn initialize_result() -> Value {
                 "full": true
             },
             "codeActionProvider": true,
+            "executeCommandProvider": {
+                "commands": ["doria.refreshProject"]
+            },
             "workspace": {
                 "workspaceFolders": {
                     "supported": true,
@@ -3177,6 +3576,40 @@ fn send_notification<W: Write>(writer: &mut W, method: &str, params: Value) -> R
     )
 }
 
+fn register_project_watchers<W: Write>(writer: &mut W) -> Result<(), String> {
+    send_message(
+        writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": "doria-project-watchers",
+            "method": "client/registerCapability",
+            "params": {
+                "registrations": [{
+                    "id": "doria-project-files",
+                    "method": "workspace/didChangeWatchedFiles",
+                    "registerOptions": {
+                        "watchers": [
+                            { "globPattern": "**/Baton.toml", "kind": 7 },
+                            { "globPattern": "**/Baton.lock", "kind": 7 },
+                            { "globPattern": "**/*.doria", "kind": 7 },
+                            { "globPattern": "**/.doria/build/**", "kind": 7 },
+                            { "globPattern": "**/build/.baton/**", "kind": 7 }
+                        ]
+                    }
+                }]
+            }
+        }),
+    )
+}
+
+fn project_file_change_requires_refresh(uri: &str) -> bool {
+    uri.ends_with("/Baton.toml")
+        || uri.ends_with("/Baton.lock")
+        || uri.contains("/.doria/build/")
+        || uri.contains("/build/.baton/")
+        || uri.ends_with(".doria")
+}
+
 fn send_message<W: Write>(writer: &mut W, message: &Value) -> Result<(), String> {
     let body = serde_json::to_vec(message)
         .map_err(|error| format!("failed to encode LSP message: {error}"))?;
@@ -3189,6 +3622,8 @@ fn send_message<W: Write>(writer: &mut W, message: &Value) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
     use doriac::diagnostics::{FixEdit, LabelRole};
@@ -6841,5 +7276,215 @@ function main(): void {}
         assert!(String::from_utf8(clear_output)
             .unwrap()
             .contains("\"diagnostics\":[]"));
+    }
+
+    #[test]
+    fn stage33_project_graph_indexes_unopened_sources_and_overlays_open_buffers() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("doria-lsp-stage33-{nonce}"));
+        fs::create_dir_all(root.join("src")).unwrap();
+        let declaration_path = root.join("src/Person.doria");
+        let usage_path = root.join("src/main.doria");
+        let broken_path = root.join("src/Broken.doria");
+        fs::write(&declaration_path, "class Person {}\n").unwrap();
+        fs::write(&usage_path, "function accept(Missing $value): void {}\n").unwrap();
+        fs::write(&broken_path, "UnknownThing $value = 1;\n").unwrap();
+
+        let root_uri = file_uri::path_to_file_uri(&root);
+        let declaration_uri = file_uri::path_to_file_uri(&declaration_path.canonicalize().unwrap());
+        let usage_uri = file_uri::path_to_file_uri(&usage_path);
+        let broken_uri = file_uri::path_to_file_uri(&broken_path.canonicalize().unwrap());
+        let source = "function accept(Person $value): void {}\n";
+        let mut server = stage31_server(&[&root_uri]);
+        let project = project::test_project(
+            &root,
+            &["src/Person.doria", "src/main.doria", "src/Broken.doria"],
+            project::PackageSource::Path,
+            &[],
+        );
+        let mut session = CompilationSession::default();
+        analyze_project_graph(
+            &project,
+            &project.tooling_build_plan,
+            &[OpenSource {
+                uri: &usage_uri,
+                relative_path: "src/main.doria".to_string(),
+                text: source,
+            }],
+            &mut session,
+        )
+        .unwrap_or_else(|failure| panic!("project graph: {:?}", failure.diagnostics));
+        server.projects.insert(root_uri.clone(), project);
+        open_stage31_document(&mut server, &usage_uri, source);
+
+        assert_eq!(server.documents[&usage_uri].text, source);
+        assert!(
+            server.documents[&usage_uri]
+                .analysis
+                .diagnostics()
+                .is_empty(),
+            "{:?}",
+            server.documents[&usage_uri].analysis.diagnostics()
+        );
+        assert!(server.project_documents.contains_key(&declaration_uri));
+        assert!(server.project_documents[&broken_uri]
+            .analysis
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("unknown type")));
+        let mut diagnostic_output = Vec::new();
+        server
+            .publish_all_diagnostics(&mut diagnostic_output)
+            .unwrap();
+        let diagnostic_output = String::from_utf8(diagnostic_output).unwrap();
+        assert!(diagnostic_output.contains(&broken_uri));
+        assert!(diagnostic_output.contains("unknown type"));
+        let offset = source.find("Person").unwrap();
+        let definition = server.definition(Some(&params_at(&usage_uri, source, offset)));
+        assert_eq!(definition["uri"], declaration_uri);
+        let declaration_source = "class Person {}\n";
+        let hover = server
+            .hover(Some(&params_at(
+                &declaration_uri,
+                declaration_source,
+                declaration_source.find("Person").unwrap(),
+            )))
+            .expect("unopened supplied source should support hover");
+        assert!(hover["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("Person"));
+        assert!(server.semantic_tokens(Some(&json!({
+            "textDocument": { "uri": declaration_uri }
+        })))["data"]
+            .as_array()
+            .is_some_and(|tokens| !tokens.is_empty()));
+        let rename = server.rename(Some(&json!({
+            "textDocument": { "uri": usage_uri },
+            "position": params_at(&usage_uri, source, offset)["position"].clone(),
+            "newName": "Customer"
+        })));
+        let changes = rename["changes"].as_object().unwrap();
+        assert!(changes.contains_key(&declaration_uri));
+        assert!(changes.contains_key(&usage_uri));
+
+        server.projects.insert(
+            root_uri.clone(),
+            project::test_project(
+                &root,
+                &["src/Person.doria", "src/main.doria", "src/Broken.doria"],
+                project::PackageSource::Git,
+                &[],
+            ),
+        );
+        server.reanalyze_documents();
+        assert_eq!(
+            server.rename(Some(&json!({
+                "textDocument": { "uri": usage_uri },
+                "position": params_at(&usage_uri, source, offset)["position"].clone(),
+                "newName": "Customer"
+            }))),
+            Value::Null
+        );
+
+        server.projects.insert(
+            root_uri,
+            project::test_project(
+                &root,
+                &["src/Person.doria", "src/main.doria", "src/Broken.doria"],
+                project::PackageSource::Path,
+                &["src/Person.doria"],
+            ),
+        );
+        server.reanalyze_documents();
+        assert_eq!(
+            server.rename(Some(&json!({
+                "textDocument": { "uri": usage_uri },
+                "position": params_at(&usage_uri, source, offset)["position"].clone(),
+                "newName": "Customer"
+            }))),
+            Value::Null
+        );
+
+        server.projects.clear();
+        server.reanalyze_documents();
+        let mut cleared_output = Vec::new();
+        server.publish_all_diagnostics(&mut cleared_output).unwrap();
+        let cleared_output = String::from_utf8(cleared_output).unwrap();
+        assert!(cleared_output.contains(&broken_uri));
+        assert!(cleared_output.contains("\"diagnostics\":[]"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn initialized_registers_only_project_structure_watchers() {
+        let mut output = Vec::new();
+        register_project_watchers(&mut output).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("client/registerCapability"));
+        for path in [
+            "Baton.toml",
+            "Baton.lock",
+            "*.doria",
+            ".doria/build",
+            "build/.baton",
+        ] {
+            assert!(output.contains(path));
+        }
+    }
+
+    #[test]
+    fn modified_doria_sources_schedule_project_rediscovery() {
+        let root_uri = "file:///workspace".to_string();
+        let mut server = Server {
+            workspace_roots: vec![WorkspaceRoot {
+                uri: root_uri.clone(),
+                package: "workspace/project".to_string(),
+            }],
+            ..Server::default()
+        };
+
+        server.did_change_watched_files(Some(&json!({
+            "changes": [{
+                "uri": "file:///workspace/src/Changed.doria",
+                "type": 2
+            }]
+        })));
+
+        assert_eq!(
+            server.project_discovery.pending_generation(&root_uri),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn project_inventory_replaces_watchers_with_exact_package_roots() {
+        let root = std::env::temp_dir().join("doria-lsp-stage33-watchers");
+        let project =
+            project::test_project(&root, &["src/main.doria"], project::PackageSource::Git, &[]);
+        let root_uri = file_uri::path_to_file_uri(&root);
+        let mut server = Server {
+            supports_dynamic_watching: true,
+            ..Server::default()
+        };
+        let mut output = Vec::new();
+        server
+            .replace_project_watchers(&root_uri, Some(&project), &mut output)
+            .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("client/registerCapability"));
+        assert!(output.contains(&root_uri));
+        assert!(output.contains("**/*.doria"));
+
+        let mut replacement = Vec::new();
+        server
+            .replace_project_watchers(&root_uri, None, &mut replacement)
+            .unwrap();
+        assert!(String::from_utf8(replacement)
+            .unwrap()
+            .contains("client/unregisterCapability"));
     }
 }
