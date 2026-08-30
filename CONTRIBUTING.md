@@ -44,7 +44,7 @@ When changing the pinned `doriac` revision, run all Rust and editor checks and v
 
 ## Build artifact storage
 
-Cargo reuses `target/` between builds but does not garbage-collect obsolete hashed artifacts. This repository therefore uses line-table debug information and disables incremental compilation for the test profile while leaving ordinary development builds incremental.
+Cargo reuses `target/` between builds but does not garbage-collect obsolete hashed artifacts. This repository uses line-table workspace debug information, omits dependency debug payloads, and disables incremental compilation for the test profile while leaving ordinary development builds incremental. Local-compiler builds honor `CARGO_TARGET_DIR`, allowing the installed-tool refresh to reuse the compiler repository's measured cache.
 
 Run the non-destructive size guard before and after a full Rust validation:
 

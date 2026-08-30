@@ -487,8 +487,13 @@ function check_vscode_language_server_packaging(): void
         str_contains(
             $builder,
             "seed_local_runner_lock(\$root . '/Cargo.lock', \$runner . '/Cargo.lock')"
-        ) && str_contains($builder, 'function seed_local_runner_lock('),
-        'local compiler builds must reseed the disposable runner from the canonical Cargo lockfile'
+        )
+            && str_contains($builder, "'update',")
+            && str_contains($builder, "'--package',")
+            && str_contains($builder, "'doriac',")
+            && str_contains($builder, "getenv('CARGO_TARGET_DIR')")
+            && str_contains($builder, 'function seed_local_runner_lock('),
+        'local compiler builds must reseed the runner, resolve the local compiler subtree, and honor the managed Cargo target'
     );
     require_check(
         str_contains($extension, 'registerDebugConfigurationProvider')
