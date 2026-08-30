@@ -28,11 +28,18 @@ use doriac::semantics::{
 };
 use doriac::source::{SourceFile, SourceId, Span};
 use doriac::symbols::{BindingKind, BindingOwnership};
+use doriac::testing::{SourceSemanticContext, TestSemanticFacts};
 use doriac::types::{
     FunctionInvocationMode, ResolvedType, SharedHandleKind, TypeRef, TypeRegistry,
 };
 
 use crate::string_surface::{string_companion_method, string_property};
+
+const SEMANTIC_TOKEN_FUNCTION: u32 = 3;
+const SEMANTIC_TOKEN_STRING: u32 = 6;
+const SEMANTIC_TOKEN_DECLARATION: u32 = 1;
+
+pub(crate) type SemanticTokenSpan = (Span, u32, u32);
 
 #[derive(Debug, Clone)]
 pub(crate) struct SemanticHover {
@@ -282,10 +289,13 @@ impl SemanticHover {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AnalysisSnapshot {
     diagnostics: Vec<Diagnostic>,
+    source_id: SourceId,
     compilation_context: CompilationContext,
     global_symbols: GlobalSymbolFacts,
     directive_semantic_tokens: Vec<(Span, u32)>,
     attribute_semantic_tokens: Vec<(Span, u32)>,
+    test_semantics: TestSemanticFacts,
+    source_semantic_context: Option<SourceSemanticContext>,
     attribute_info: AttributeSemanticInfo,
     attribute_parameter_occurrences: Vec<AttributeParameterOccurrence>,
     symbols: Vec<Symbol>,
@@ -522,6 +532,16 @@ impl AnalysisSnapshot {
 
     pub(crate) fn global_symbols(&self) -> &GlobalSymbolFacts {
         &self.global_symbols
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_semantics(&self) -> &TestSemanticFacts {
+        &self.test_semantics
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_semantic_context(&self) -> Option<&SourceSemanticContext> {
+        self.source_semantic_context.as_ref()
     }
 
     pub(crate) fn member_occurrences(&self) -> &[MemberOccurrence] {
@@ -1074,7 +1094,14 @@ impl AnalysisSnapshot {
             .map(|occurrence| occurrence.span)
     }
 
-    pub(crate) fn semantic_token_spans(&self) -> Vec<(Span, u32)> {
+    pub(crate) fn semantic_token_spans(&self) -> Vec<SemanticTokenSpan> {
+        let test_semantic_tokens = self
+            .source_semantic_context
+            .as_ref()
+            .filter(|context| context.is_development())
+            .map_or_else(Vec::new, |_| {
+                test_semantic_tokens(&self.test_semantics, self.source_id)
+            });
         let mut spans = self
             .occurrences
             .iter()
@@ -1091,9 +1118,19 @@ impl AnalysisSnapshot {
         });
         spans.extend(self.directive_semantic_tokens.iter().copied());
         spans.extend(self.attribute_semantic_tokens.iter().copied());
-        spans.sort_by_key(|(span, _)| (span.start, span.end));
-        spans.dedup_by_key(|(span, _)| (span.start, span.end));
-        spans
+        spans.retain(|(span, _)| {
+            !test_semantic_tokens
+                .iter()
+                .any(|(test_span, _, _)| span == test_span)
+        });
+        let mut tokens = spans
+            .into_iter()
+            .map(|(span, token_type)| (span, token_type, 0))
+            .chain(test_semantic_tokens)
+            .collect::<Vec<_>>();
+        tokens.sort_by_key(|(span, _, _)| (span.start, span.end));
+        tokens.dedup_by_key(|(span, _, _)| (span.start, span.end));
+        tokens
     }
 
     pub(crate) fn rename_replacement_at_offset(
@@ -1274,6 +1311,38 @@ fn semantic_token_type(symbol: &Symbol) -> Option<u32> {
     None
 }
 
+fn test_semantic_tokens(facts: &TestSemanticFacts, source_id: SourceId) -> Vec<SemanticTokenSpan> {
+    let mut tokens = Vec::new();
+    for suite in facts
+        .suites
+        .iter()
+        .filter(|suite| suite.call_name_span.source == source_id)
+    {
+        tokens.push((
+            suite.call_name_span,
+            SEMANTIC_TOKEN_FUNCTION,
+            SEMANTIC_TOKEN_DECLARATION,
+        ));
+        tokens.push((suite.description_span, SEMANTIC_TOKEN_STRING, 0));
+    }
+    for test in facts.tests.iter().filter(|test| {
+        test.origin == doriac::testing::TestOrigin::Behavioral
+            && test.call_name_span.source == source_id
+    }) {
+        tokens.push((
+            test.call_name_span,
+            SEMANTIC_TOKEN_FUNCTION,
+            SEMANTIC_TOKEN_DECLARATION,
+        ));
+        tokens.push((test.description_span, SEMANTIC_TOKEN_STRING, 0));
+    }
+    tokens.sort_by_key(|(span, token_type, modifiers)| {
+        (span.start, span.end, *token_type, *modifiers)
+    });
+    tokens.dedup();
+    tokens
+}
+
 struct SnapshotBuilder<'a> {
     text: &'a str,
     tokens: &'a [Token],
@@ -1366,6 +1435,14 @@ impl<'a> SnapshotBuilder<'a> {
             .map_or_else(AttributeSemanticInfo::default, |info| {
                 info.attributes.clone()
             });
+        let test_semantics = self
+            .semantic_info
+            .map_or_else(TestSemanticFacts::default, |info| {
+                info.test_semantics.clone()
+            });
+        let source_semantic_context = self
+            .semantic_info
+            .and_then(|info| info.source_semantic_contexts.get(&self.source_id).cloned());
         let class_declarations = program
             .items
             .iter()
@@ -1379,10 +1456,13 @@ impl<'a> SnapshotBuilder<'a> {
             .collect();
         AnalysisSnapshot {
             diagnostics: self.diagnostics,
+            source_id: self.source_id,
             compilation_context: CompilationContext::default(),
             global_symbols: GlobalSymbolFacts::default(),
             directive_semantic_tokens: Vec::new(),
             attribute_semantic_tokens: self.attribute_semantic_tokens,
+            test_semantics,
+            source_semantic_context,
             attribute_info,
             attribute_parameter_occurrences: self.attribute_parameter_occurrences,
             symbols: self.symbols,
@@ -5089,7 +5169,7 @@ function main(): void
             .semantic_token_spans()
             .iter()
             .any(
-                |(span, token_type)| *span == Span::new(binding_offset, binding_offset + 6)
+                |(span, token_type, _)| *span == Span::new(binding_offset, binding_offset + 6)
                     && *token_type == 0
             ));
 
@@ -5155,7 +5235,7 @@ function main(): void
         assert!(snapshot
             .semantic_token_spans()
             .iter()
-            .any(|(span, token_type)| span.start == prepared && *token_type == 0));
+            .any(|(span, token_type, _)| span.start == prepared && *token_type == 0));
 
         let if_body = source.find("echo \"{$prepared}\"").unwrap();
         assert!(snapshot
@@ -5230,9 +5310,9 @@ function inspect(): void
             assert_eq!(occurrences.len(), 2);
             for span in occurrences {
                 assert!(
-                    tokens
-                        .iter()
-                        .any(|(token_span, token_type)| *token_span == span && *token_type == 3),
+                    tokens.iter().any(|(token_span, token_type, _)| {
+                        *token_span == span && *token_type == 3
+                    }),
                     "method `{name}` at {span:?} must use the function token type"
                 );
             }
@@ -5243,7 +5323,7 @@ function inspect(): void
             assert!(
                 tokens
                     .iter()
-                    .any(|(token_span, token_type)| *token_span == span && *token_type == 2),
+                    .any(|(token_span, token_type, _)| { *token_span == span && *token_type == 2 }),
                 "enum case at {span:?} must retain the enum-member token type"
             );
         }
@@ -5274,10 +5354,10 @@ function main(): void {}
 
         assert!(tokens
             .iter()
-            .any(|(span, token_type)| *span == type_span && *token_type == 1));
+            .any(|(span, token_type, _)| *span == type_span && *token_type == 1));
         assert!(tokens
             .iter()
-            .any(|(span, token_type)| *span == case_span && *token_type == 2));
+            .any(|(span, token_type, _)| *span == case_span && *token_type == 2));
     }
 
     #[test]
@@ -6733,7 +6813,7 @@ function inspect(take FirstError $failure): void throws Error
         assert!(snapshot
             .semantic_token_spans()
             .iter()
-            .any(|(span, token_type)| span.start == throws_offset && *token_type == 4));
+            .any(|(span, token_type, _)| span.start == throws_offset && *token_type == 4));
 
         let caught = source.find("$caught").expect("catch binding");
         let caught_hover = snapshot
@@ -6749,7 +6829,7 @@ function inspect(take FirstError $failure): void throws Error
         assert!(snapshot
             .semantic_token_spans()
             .iter()
-            .any(|(span, token_type)| span.start == caught && *token_type == 0));
+            .any(|(span, token_type, _)| span.start == caught && *token_type == 0));
 
         let call_expectations = [
             (

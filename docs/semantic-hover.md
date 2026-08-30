@@ -174,6 +174,15 @@ snapshot from `doriac` parser and semantic-analysis results, maps byte spans to 
 positions, caches the snapshot by document version, and renders protocol Markdown.
 It does not infer a parallel Doria type system.
 
+Native behavioral declarations use the same boundary. In development sources,
+the compiler provides typed suite/test facts and exact call, description, and
+body spans; Baton/compiler project data provides source scope. The server uses
+those facts for declaration and description semantic tokens without parsing
+`describe`, `it`, or `test` itself and without treating test-looking paths as
+semantic evidence. Slice 1 deliberately adds no final testing hover or
+navigation UX. Expectations are not yet available, and the final testing UX
+waits for Native Testing Foundation Slice 3.
+
 The server submits Baton-supplied project sources to one compiler-owned complete
 graph per project, with unsaved open text overlaid by canonical path. When Baton
 is unavailable, currently open documents use the retained partial graph per

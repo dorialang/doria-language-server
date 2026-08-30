@@ -22,8 +22,14 @@ compatibility backend with independent limitations. Stage 30 is complete. Stage
 tokens, and diagnostics consume compiler-owned schemas, canonical identities,
 bound constant values, and source spans. The server does not execute attribute
 constructors, provide runtime reflection, run `#[Test]`, or activate
-`#[PHPExport]`. Stage 33 and Phase F are complete; Stage 34 single class
-inheritance is next.
+`#[PHPExport]`. Stage 33 and Phase F are complete. Native Testing Foundation
+Slice 1 is complete and Slice 2 is next. For development sources, the server
+retains compiler-owned behavioral suite/test facts and Baton/compiler
+source-scope context, then projects exact declaration and description semantic
+tokens. It has no testing parser and performs no path-based test inference.
+Expectations are not yet available; final testing completion, hover, and
+navigation wait for Slice 3. Stage 34 single class inheritance remains blocked
+until the foundation is complete.
 
 The compiler classifies checked effects into source-required effects and ambient
 canonical I/O effects. Hovers keep source signatures focused on required
