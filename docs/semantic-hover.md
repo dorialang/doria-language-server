@@ -181,9 +181,11 @@ those facts for declaration and description semantic tokens without parsing
 `describe`, `it`, or `test` itself and without treating test-looking paths as
 semantic evidence. Slice 2 additionally projects compiler-owned expectation
 symbols, matcher members, diagnostics, and automatic `TestAssertion` effects;
-it does not reconstruct matcher types or effects. Slices 1 and 2 deliberately
-add no final testing hover or navigation catalogue. Collection/Error matchers
-and the final testing UX wait for Native Testing Foundation Slice 3.
+it does not reconstruct matcher types or effects. Slice 3 consumes the compiler's
+typed matcher candidates and matcher specifications to render concrete actual and
+operand types, collection families, stable complexity, invocation mode, and
+`TestAssertion` behavior. Testing navigation uses authored compiler ranges and
+hierarchy while hiding generated callables and refusing unsafe edits.
 
 The server submits Baton-supplied project sources to one compiler-owned complete
 graph per project, with unsaved open text overlaid by canonical path. When Baton

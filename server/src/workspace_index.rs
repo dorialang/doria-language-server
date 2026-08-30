@@ -58,6 +58,14 @@ pub(crate) struct IndexedImportCandidate {
     pub(crate) class_like: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IndexedTestSymbol {
+    pub(crate) name: String,
+    pub(crate) uri: String,
+    pub(crate) span: Span,
+    pub(crate) suite: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IndexedRole {
     Declaration,
@@ -116,6 +124,7 @@ pub(crate) struct OpenDocumentIndex {
     attribute_parameter_occurrences: Vec<IndexedAttributeParameterOccurrence>,
     member_occurrences: Vec<IndexedMemberOccurrence>,
     member_parents: HashMap<GlobalSymbolId, GlobalSymbolId>,
+    test_symbols: Vec<IndexedTestSymbol>,
     documents: HashMap<String, DocumentSummary>,
 }
 
@@ -155,6 +164,13 @@ impl OpenDocumentIndex {
                     right.occurrence.span.end,
                 ))
         });
+        index.test_symbols.sort_by(|left, right| {
+            (&left.name, &left.uri, left.span.start).cmp(&(
+                &right.name,
+                &right.uri,
+                right.span.start,
+            ))
+        });
         index
     }
 
@@ -168,6 +184,33 @@ impl OpenDocumentIndex {
             imports: Vec::new(),
             compiler_known: Vec::new(),
         };
+
+        for suite in snapshot
+            .test_semantics()
+            .suites
+            .iter()
+            .filter(|suite| suite.call_name_span.source == snapshot.source_id())
+        {
+            self.test_symbols.push(IndexedTestSymbol {
+                name: format!("{} :: {}", suite.package.display_name(), suite.display_name),
+                uri: uri.to_string(),
+                span: suite.call_name_span,
+                suite: true,
+            });
+        }
+        for test in snapshot
+            .test_semantics()
+            .tests
+            .iter()
+            .filter(|test| test.call_name_span.source == snapshot.source_id())
+        {
+            self.test_symbols.push(IndexedTestSymbol {
+                name: format!("{} :: {}", test.package.display_name(), test.display_name),
+                uri: uri.to_string(),
+                span: test.call_name_span,
+                suite: false,
+            });
+        }
 
         for declaration in &facts.declarations {
             *self
@@ -764,6 +807,15 @@ impl OpenDocumentIndex {
         let mut completions = completions.into_values().collect::<Vec<_>>();
         completions.sort_by(|left, right| left.label.cmp(&right.label));
         completions
+    }
+
+    pub(crate) fn test_symbols(&self, query: &str) -> Vec<IndexedTestSymbol> {
+        let query = query.to_ascii_lowercase();
+        self.test_symbols
+            .iter()
+            .filter(|symbol| query.is_empty() || symbol.name.to_ascii_lowercase().contains(&query))
+            .cloned()
+            .collect()
     }
 
     pub(crate) fn import_candidates(

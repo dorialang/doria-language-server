@@ -1,0 +1,21 @@
+use Doria\Std\Test\expect;
+
+function bytesMembership(Bytes $bytes): void
+{
+    expect($bytes)->toContain(0);
+}
+
+function ambiguousDictionaryMembership(Dictionary<string, int> $values): void
+{
+    expect($values)->toContain(42);
+}
+
+function keyOnList(List<int> $items): void
+{
+    expect($items)->toHaveKey(0);
+}
+
+function nonCallable(int $value): void
+{
+    expect($value)->toThrow();
+}

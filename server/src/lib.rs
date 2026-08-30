@@ -18,6 +18,7 @@ use doriac::names::{
     CompilationContext, Edition, GlobalSymbolKind, PackageIdentity, SourceIdentity,
 };
 use doriac::source::{SourceId, Span};
+use doriac::testing::SourceSemanticContext;
 
 mod analysis;
 mod baton_discovery;
@@ -140,8 +141,22 @@ impl Document {
         version: Option<i64>,
         context: CompilationContext,
     ) -> Self {
-        let source_identity = context.source.clone();
-        let analysis = AnalysisSnapshot::analyze_with_context(uri, &text, context);
+        Self::with_source_context(
+            uri,
+            text,
+            version,
+            SourceSemanticContext::standalone(context),
+        )
+    }
+
+    fn with_source_context(
+        uri: &str,
+        text: String,
+        version: Option<i64>,
+        source_context: SourceSemanticContext,
+    ) -> Self {
+        let source_identity = source_context.compilation.source.clone();
+        let analysis = AnalysisSnapshot::analyze_with_source_context(uri, &text, source_context);
         Self {
             text,
             version,
@@ -463,6 +478,16 @@ impl Server {
                     send_response(writer, id, self.references(message.get("params")))?;
                 }
             }
+            "textDocument/documentSymbol" => {
+                if let Some(id) = id {
+                    send_response(writer, id, self.document_symbols(message.get("params")))?;
+                }
+            }
+            "workspace/symbol" => {
+                if let Some(id) = id {
+                    send_response(writer, id, self.workspace_symbols(message.get("params")))?;
+                }
+            }
             "textDocument/definition" => {
                 if let Some(id) = id {
                     send_response(writer, id, self.definition(message.get("params")))?;
@@ -505,11 +530,8 @@ impl Server {
         };
         let version = text_document.get("version").and_then(Value::as_i64);
 
-        let context = self.compilation_context(uri);
-        self.documents.insert(
-            uri.to_string(),
-            Document::with_context(uri, text.to_string(), version, context),
-        );
+        let document = self.document_from_text(uri, text.to_string(), version);
+        self.documents.insert(uri.to_string(), document);
         self.reanalyze_documents();
         self.publish_all_diagnostics(writer)
     }
@@ -583,11 +605,8 @@ impl Server {
             return Ok(());
         };
 
-        let context = self.compilation_context(uri);
-        self.documents.insert(
-            uri.to_string(),
-            Document::with_context(uri, text.to_string(), version, context),
-        );
+        let document = self.document_from_text(uri, text.to_string(), version);
+        self.documents.insert(uri.to_string(), document);
         self.reanalyze_documents();
         self.publish_all_diagnostics(writer)
     }
@@ -608,11 +627,8 @@ impl Server {
                 .documents
                 .get(uri)
                 .and_then(|document| document.version);
-            let context = self.compilation_context(uri);
-            self.documents.insert(
-                uri.to_string(),
-                Document::with_context(uri, text.to_string(), version, context),
-            );
+            let document = self.document_from_text(uri, text.to_string(), version);
+            self.documents.insert(uri.to_string(), document);
         }
 
         self.reanalyze_documents();
@@ -947,6 +963,12 @@ impl Server {
         let Some((uri, document, offset)) = self.uri_document_and_offset(params) else {
             return completion_items();
         };
+        if let Some(completions) = document
+            .analysis
+            .compiler_test_import_completions_at_offset(&document.text, offset)
+        {
+            return semantic_completion_items(completions);
+        }
         if let Some(context) = attribute_completion_context(&document.text, offset) {
             let completions = match context {
                 AttributeCompletionContext::Name => self.document_index.attribute_completions(&uri),
@@ -973,14 +995,43 @@ impl Server {
         }
 
         // An accessor with no member name is incomplete source, so preserve the
-        // compiler as the semantic authority by analyzing a temporary property
-        // token at the cursor instead of guessing from nearby text.
+        // compiler as the semantic authority by analyzing temporary call and
+        // property tokens at the cursor instead of guessing from nearby text.
         if document.text[..offset].ends_with("->") {
             const PLACEHOLDER: &str = "__doria_completion";
-            let mut source = document.text.clone();
-            source.insert_str(offset, PLACEHOLDER);
-            let analysis = AnalysisSnapshot::analyze(&uri, &source);
-            if let Some(completions) = analysis.member_completions_at_offset(offset) {
+            let analyze = |source: &str| {
+                document
+                    .analysis
+                    .source_semantic_context()
+                    .cloned()
+                    .map_or_else(
+                        || {
+                            AnalysisSnapshot::analyze_with_context(
+                                &uri,
+                                source,
+                                document.analysis.compilation_context().clone(),
+                            )
+                        },
+                        |source_context| {
+                            AnalysisSnapshot::analyze_with_source_context(
+                                &uri,
+                                source,
+                                source_context,
+                            )
+                        },
+                    )
+            };
+            let mut call_source = document.text.clone();
+            call_source.insert_str(offset, &format!("{PLACEHOLDER}()"));
+            if let Some(completions) = analyze(&call_source).assertion_completions_at_offset(offset)
+            {
+                return semantic_completion_items(completions);
+            }
+            let mut property_source = document.text.clone();
+            property_source.insert_str(offset, PLACEHOLDER);
+            if let Some(completions) =
+                analyze(&property_source).member_completions_at_offset(offset)
+            {
                 return semantic_completion_items(completions);
             }
         }
@@ -1050,6 +1101,44 @@ impl Server {
                 .reference_spans_at_offset(offset, include_declaration)
                 .into_iter()
                 .map(|span| json!({ "uri": &uri, "range": span_to_range(&document.text, span) }))
+                .collect(),
+        )
+    }
+
+    fn document_symbols(&self, params: Option<&Value>) -> Value {
+        let Some(uri) = params
+            .and_then(|params| params.get("textDocument"))
+            .and_then(|document| document.get("uri"))
+            .and_then(Value::as_str)
+        else {
+            return json!([]);
+        };
+        let Some(document) = self.document(uri) else {
+            return json!([]);
+        };
+        test_document_symbols(&document.analysis, &document.text)
+    }
+
+    fn workspace_symbols(&self, params: Option<&Value>) -> Value {
+        let query = params
+            .and_then(|params| params.get("query"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        Value::Array(
+            self.document_index
+                .test_symbols(query)
+                .into_iter()
+                .filter_map(|symbol| {
+                    let document = self.document(&symbol.uri)?;
+                    Some(json!({
+                        "name": symbol.name,
+                        "kind": if symbol.suite { 3 } else { 12 },
+                        "location": {
+                            "uri": symbol.uri,
+                            "range": span_to_range(&document.text, symbol.span),
+                        },
+                    }))
+                })
                 .collect(),
         )
     }
@@ -1641,6 +1730,17 @@ impl Server {
         }
     }
 
+    fn document_from_text(&self, uri: &str, text: String, version: Option<i64>) -> Document {
+        if let Some(source_context) = self
+            .document(uri)
+            .and_then(|document| document.analysis.source_semantic_context())
+            .cloned()
+        {
+            return Document::with_source_context(uri, text, version, source_context);
+        }
+        Document::with_context(uri, text, version, self.compilation_context(uri))
+    }
+
     fn reanalyze_documents(&mut self) {
         self.project_documents.clear();
         self.source_edit_policies.clear();
@@ -1769,11 +1869,26 @@ impl Server {
                         let Some(document) = self.documents.get_mut(uri) else {
                             continue;
                         };
-                        let mut analysis = AnalysisSnapshot::analyze_with_context(
-                            &display_path,
-                            &document.text,
-                            context,
-                        );
+                        let mut analysis = document
+                            .analysis
+                            .source_semantic_context()
+                            .cloned()
+                            .map_or_else(
+                                || {
+                                    AnalysisSnapshot::analyze_with_context(
+                                        &display_path,
+                                        &document.text,
+                                        context,
+                                    )
+                                },
+                                |source_context| {
+                                    AnalysisSnapshot::analyze_with_source_context(
+                                        &display_path,
+                                        &document.text,
+                                        source_context,
+                                    )
+                                },
+                            );
                         analysis.extend_diagnostics(
                             failure
                                 .diagnostics
@@ -2340,6 +2455,8 @@ fn initialize_result() -> Value {
                 "firstTriggerCharacter": "\n"
             },
             "referencesProvider": true,
+            "documentSymbolProvider": true,
+            "workspaceSymbolProvider": true,
             "renameProvider": true,
             "semanticTokensProvider": {
                 "legend": {
@@ -3489,6 +3606,78 @@ fn span_to_range(text: &str, span: Span) -> Value {
             "line": end.line,
             "character": end.character,
         },
+    })
+}
+
+fn test_document_symbols(analysis: &AnalysisSnapshot, text: &str) -> Value {
+    let facts = analysis.test_semantics();
+    let source_id = analysis.source_id();
+    let mut symbols = Vec::<(usize, Value)>::new();
+    for suite in facts
+        .suites
+        .iter()
+        .filter(|suite| suite.call_name_span.source == source_id && suite.parent_suite.is_none())
+    {
+        symbols.push((
+            suite.authored_ordinal,
+            test_suite_document_symbol(suite, facts, source_id, text),
+        ));
+    }
+    for test in facts
+        .tests
+        .iter()
+        .filter(|test| test.call_name_span.source == source_id && test.suite.is_none())
+    {
+        symbols.push((test.authored_ordinal, test_case_document_symbol(test, text)));
+    }
+    symbols.sort_by_key(|(ordinal, _)| *ordinal);
+    Value::Array(symbols.into_iter().map(|(_, symbol)| symbol).collect())
+}
+
+fn test_suite_document_symbol(
+    suite: &doriac::testing::BehavioralTestSuite,
+    facts: &doriac::testing::TestSemanticFacts,
+    source_id: doriac::source::SourceId,
+    text: &str,
+) -> Value {
+    let mut children = Vec::<(usize, Value)>::new();
+    for nested in facts.suites.iter().filter(|candidate| {
+        candidate.call_name_span.source == source_id
+            && candidate.parent_suite.as_deref() == Some(suite.identity.as_str())
+    }) {
+        children.push((
+            nested.authored_ordinal,
+            test_suite_document_symbol(nested, facts, source_id, text),
+        ));
+    }
+    for test in facts.tests.iter().filter(|test| {
+        test.call_name_span.source == source_id
+            && test.suite.as_deref() == Some(suite.identity.as_str())
+    }) {
+        children.push((test.authored_ordinal, test_case_document_symbol(test, text)));
+    }
+    children.sort_by_key(|(ordinal, _)| *ordinal);
+    json!({
+        "name": suite.display_name,
+        "detail": "Behavioral Test Suite",
+        "kind": 3,
+        "range": span_to_range(text, suite.declaration_span),
+        "selectionRange": span_to_range(text, suite.call_name_span),
+        "children": children.into_iter().map(|(_, child)| child).collect::<Vec<_>>(),
+    })
+}
+
+fn test_case_document_symbol(test: &doriac::testing::TestSemanticInfo, text: &str) -> Value {
+    json!({
+        "name": test.display_name,
+        "detail": match test.origin {
+            doriac::testing::TestOrigin::Attribute => "Low-Level Test",
+            doriac::testing::TestOrigin::Behavioral => "Behavioral Test",
+        },
+        "kind": 12,
+        "range": span_to_range(text, test.declaration_span),
+        "selectionRange": span_to_range(text, test.call_name_span),
+        "children": [],
     })
 }
 
@@ -5721,6 +5910,44 @@ function relay(take Failure $failure): void throws Failure
         })
     }
 
+    fn development_source_context(uri: &str) -> SourceSemanticContext {
+        SourceSemanticContext {
+            compilation: CompilationContext::standalone(uri),
+            scope: doriac::build_plan::SourceScope::Development,
+            origin: doriac::build_plan::SourceOrigin::Explicit,
+            generated_for: None,
+        }
+    }
+
+    fn development_server(uri: &str, source: &str) -> Server {
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document::with_source_context(
+                uri,
+                source.to_string(),
+                Some(1),
+                development_source_context(uri),
+            ),
+        );
+        server.rebuild_document_index();
+        server
+    }
+
+    fn request_completion_labels(
+        server: &Server,
+        uri: &str,
+        source: &str,
+        offset: usize,
+    ) -> HashSet<String> {
+        server.completion(Some(&params_at(uri, source, offset)))["items"]
+            .as_array()
+            .expect("completion items")
+            .iter()
+            .filter_map(|item| item["label"].as_str().map(str::to_string))
+            .collect()
+    }
+
     fn semantic_token_records(value: &Value) -> Vec<(u32, u32, u32, u32, u32)> {
         let mut line = 0;
         let mut start = 0;
@@ -7800,10 +8027,6 @@ describe("🧪 User", function (): void {
                 "E0715",
             ),
             (
-                "use Doria\\Std\\Test\\expect;\nfunction helper(): void { expect([1])->toContain(1); }\n",
-                "E0718",
-            ),
-            (
                 "use Doria\\Std\\Test\\expect;\nfunction helper(): void { expect(1)->toBeNull(); }\n",
                 "E0720",
             ),
@@ -7821,7 +8044,7 @@ describe("🧪 User", function (): void {
             ),
             (
                 "use Doria\\Std\\Test\\expect;\nfunction helper(): void { expect(1)->toThrow(); }\n",
-                "E0718",
+                "E0720",
             ),
             (
                 "use Doria\\Std\\Test\\AssertionError;\nfunction helper(): void { let $error = new AssertionError(\"x\"); }\n",
@@ -8008,5 +8231,374 @@ describe("🧪 User", function (): void {
         assert!(String::from_utf8(replacement)
             .unwrap()
             .contains("client/unregisterCapability"));
+    }
+
+    #[test]
+    fn native_testing_matcher_completion_uses_compiler_typed_candidates() {
+        let uri = "file:///matcher-completion.doria";
+        let cases: &[(&str, &[&str], &[&str])] = &[
+            (
+                "int",
+                &["not", "toEqual", "toBeGreaterThan", "toBeLessThan"],
+                &["toContain", "toThrow"],
+            ),
+            (
+                "bool",
+                &["not", "toEqual", "toBeTrue", "toBeFalse"],
+                &["toContain"],
+            ),
+            ("?int", &["not", "toBeNull"], &["toContain", "toThrow"]),
+            (
+                "string",
+                &[
+                    "not",
+                    "toEqual",
+                    "toContain",
+                    "toStartWith",
+                    "toEndWith",
+                    "toBeEmpty",
+                ],
+                &["toHaveCount", "toThrow"],
+            ),
+            (
+                "int[]",
+                &["not", "toBeEmpty", "toHaveCount", "toContain"],
+                &["toHaveKey"],
+            ),
+            (
+                "Bytes",
+                &["not", "toEqual", "toBeEmpty", "toHaveCount"],
+                &["toContain"],
+            ),
+            (
+                "List<int>",
+                &["not", "toBeEmpty", "toHaveCount", "toContain"],
+                &["toHaveKey"],
+            ),
+            (
+                "List<Bytes>",
+                &["not", "toBeEmpty", "toHaveCount"],
+                &["toContain"],
+            ),
+            (
+                "Dictionary<string, int>",
+                &[
+                    "not",
+                    "toBeEmpty",
+                    "toHaveCount",
+                    "toHaveKey",
+                    "toHaveValue",
+                ],
+                &["toContain"],
+            ),
+            (
+                "Set<int>",
+                &["not", "toBeEmpty", "toHaveCount", "toContain"],
+                &["toHaveKey"],
+            ),
+            (
+                "PriorityQueue<int>",
+                &["not", "toBeEmpty", "toHaveCount", "toContain"],
+                &["toHaveKey"],
+            ),
+            (
+                "Deque<int>",
+                &["not", "toBeEmpty", "toHaveCount", "toContain"],
+                &["toHaveKey"],
+            ),
+            (
+                "function(): void",
+                &["not", "toThrow"],
+                &["toContain", "toHaveCount"],
+            ),
+        ];
+        for (ty, present, absent) in cases {
+            let source = format!(
+                "use Doria\\Std\\Test\\expect;\nfunction check({ty} $value): void {{ expect($value)->; }}\n"
+            );
+            let offset = source.find("->;").unwrap() + 2;
+            let server = development_server(uri, &source);
+            let labels = request_completion_labels(&server, uri, &source, offset);
+            for expected in *present {
+                assert!(
+                    labels.contains(*expected),
+                    "{ty} is missing {expected}: {labels:?}"
+                );
+            }
+            for excluded in *absent {
+                assert!(
+                    !labels.contains(*excluded),
+                    "{ty} unexpectedly offers {excluded}: {labels:?}"
+                );
+            }
+        }
+
+        let negated = "use Doria\\Std\\Test\\expect;\nfunction check(List<int> $value): void { expect($value)->not->; }\n";
+        let server = development_server(uri, negated);
+        let labels = request_completion_labels(
+            &server,
+            uri,
+            negated,
+            negated.find("not->;").unwrap() + "not->".len(),
+        );
+        assert!(!labels.contains("not"));
+        assert!(labels.contains("toContain"));
+
+        for source in [
+            "use Doria\\Std\\Test\\expect as verify;\nfunction check(int $value): void { verify($value)->; }\n",
+            "function check(int $value): void { Doria\\Std\\Test\\expect($value)->; }\n",
+        ] {
+            let server = development_server(uri, source);
+            let labels = request_completion_labels(
+                &server,
+                uri,
+                source,
+                source.find("->;").unwrap() + 2,
+            );
+            assert!(labels.contains("toEqual"), "{source}: {labels:?}");
+        }
+
+        let ordinary = "class Expectation { function custom(): void {} }\nfunction check(Expectation $value): void { $value->; }\n";
+        let server = development_server(uri, ordinary);
+        let labels =
+            request_completion_labels(&server, uri, ordinary, ordinary.find("->;").unwrap() + 2);
+        assert!(labels.contains("custom"));
+        assert!(!labels.contains("not"));
+        assert!(!labels.contains("toEqual"));
+    }
+
+    #[test]
+    fn native_testing_import_completion_respects_compiler_source_scope() {
+        let uri = "file:///test-import-completion.doria";
+        let source = "use Doria\\Std\\Test\\";
+        let development = development_server(uri, source);
+        let labels = request_completion_labels(&development, uri, source, source.len());
+        assert_eq!(
+            labels,
+            HashSet::from_iter([
+                "AssertionError".to_string(),
+                "describe".to_string(),
+                "expect".to_string(),
+                "fail".to_string(),
+                "it".to_string(),
+                "test".to_string(),
+            ])
+        );
+
+        let mut main = Server::default();
+        main.documents.insert(
+            uri.to_string(),
+            Document::new(uri, source.to_string(), Some(1)),
+        );
+        let labels = request_completion_labels(&main, uri, source, source.len());
+        for excluded in ["AssertionError", "describe", "expect", "fail", "it", "test"] {
+            assert!(!labels.contains(excluded));
+        }
+    }
+
+    #[test]
+    fn native_testing_hovers_explain_compiler_owned_testing_contracts() {
+        let uri = "file:///native-testing-hover.doria";
+        let source = r#"use Doria\Std\Test\{AssertionError, describe, expect, fail, it, test};
+
+internal class Failure implements Error
+{
+    function __construct(string $message) {}
+}
+
+function inspect(
+    List<int> $items,
+    Dictionary<string, int> $values,
+    function(): void throws Failure $operation,
+): void {
+    expect($items)->not->toBeEmpty();
+    expect($items)->toHaveCount(1);
+    expect($items)->toContain(1);
+    expect($values)->toHaveKey("id");
+    expect($values)->toHaveValue(1);
+    expect($operation)->toThrow(function (Failure $error): void {
+        echo $error->message;
+    });
+    Doria\Std\Test\expect(true)->toBeTrue();
+}
+"#;
+        let server = development_server(uri, source);
+        assert!(server.documents[uri].analysis.diagnostics().is_empty());
+        let hover = |needle: &str| {
+            let offset = source.find(needle).expect("hover needle");
+            server
+                .hover(Some(&params_at(uri, source, offset)))
+                .expect("compiler-owned hover")["contents"]["value"]
+                .as_str()
+                .expect("hover markdown")
+                .to_string()
+        };
+
+        let module = hover("Doria\\Std\\Test\\expect(true)");
+        assert!(module.contains("Compiler-owned development-source testing module"));
+        for (needle, expected) in [
+            ("describe", "behavioral test suite"),
+            ("it", "behavioral test"),
+            ("test};", "behavioral test"),
+            ("expect", "Compiler-Owned Ephemeral Expectation"),
+            ("fail", "AssertionError"),
+            ("AssertionError", "status 70"),
+        ] {
+            assert!(
+                hover(needle).contains(expected),
+                "missing {expected} for {needle}"
+            );
+        }
+
+        let empty = hover("toBeEmpty");
+        assert!(empty.contains("List<int>"));
+        assert!(empty.contains("O(1)"));
+        assert!(empty.contains("TestAssertion"));
+        let count = hover("toHaveCount");
+        assert!(count.contains("toHaveCount(int $expected): void"));
+        assert!(count.contains("no test-only coercion"));
+        assert!(hover("toContain").contains("List"));
+        assert!(hover("toHaveKey").contains("Dictionary"));
+        assert!(hover("toHaveValue").contains("Dictionary"));
+        assert!(hover("not->").contains("may appear once"));
+        let throwing = hover("toThrow");
+        assert!(throwing.contains("zero-parameter function subject once"));
+        assert!(throwing.contains("readonly"));
+        assert!(throwing.contains("Fatal panic is not a checked Error"));
+        assert!(throwing.contains("function(Failure): void"));
+        for private in ["TypeId", "MIR", "__assertion", "descriptor address"] {
+            assert!(!throwing.contains(private));
+        }
+
+        let ordinary = "class Matcher { function toHaveCount(int $value): void {} }\nfunction check(Matcher $matcher): void { $matcher->toHaveCount(1); }\n";
+        let ordinary_server = development_server(uri, ordinary);
+        let offset = ordinary.rfind("toHaveCount").unwrap();
+        let ordinary_hover = ordinary_server
+            .hover(Some(&params_at(uri, ordinary, offset)))
+            .expect("ordinary method hover");
+        let ordinary_hover = ordinary_hover["contents"]["value"].as_str().unwrap();
+        assert!(ordinary_hover.contains("toHaveCount"), "{ordinary_hover}");
+        assert!(!ordinary_hover.contains("TestAssertion"));
+    }
+
+    #[test]
+    fn native_testing_symbols_and_navigation_preserve_authored_identity() {
+        let first_uri = "file:///workspace/one/tests.doria";
+        let second_uri = "file:///workspace/two/tests.doria";
+        let source = r#"use Doria\Std\Test\{describe, expect, it};
+
+internal class Failure implements Error
+{
+    function __construct(string $message) {}
+}
+
+function helper(): void {}
+
+#[Test]
+function lowLevel(): void {}
+
+describe("🧪 suite", function (): void {
+    it("same case", function (): void {
+        helper();
+        expect(function (): void { throw new Failure("x"); })
+            ->toThrow(function (Failure $error): void {});
+    });
+});
+"#;
+        let context = |package: &str, source_name: &str| SourceSemanticContext {
+            compilation: CompilationContext {
+                edition: Edition::Doria2026,
+                package: PackageIdentity::Named(package.to_string()),
+                source: SourceIdentity(source_name.to_string()),
+            },
+            scope: doriac::build_plan::SourceScope::Development,
+            origin: doriac::build_plan::SourceOrigin::Explicit,
+            generated_for: None,
+        };
+        let mut server = Server::default();
+        server.documents.insert(
+            first_uri.to_string(),
+            Document::with_source_context(
+                first_uri,
+                source.to_string(),
+                Some(1),
+                context("acme/one", "acme/one:tests.doria"),
+            ),
+        );
+        server.documents.insert(
+            second_uri.to_string(),
+            Document::with_source_context(
+                second_uri,
+                source.to_string(),
+                Some(1),
+                context("acme/two", "acme/two:tests.doria"),
+            ),
+        );
+        server.rebuild_document_index();
+
+        let symbols = server.document_symbols(Some(&json!({
+            "textDocument": { "uri": first_uri }
+        })));
+        let roots = symbols.as_array().expect("document symbols");
+        let suite = roots
+            .iter()
+            .find(|symbol| symbol["detail"] == "Behavioral Test Suite")
+            .expect("suite symbol");
+        assert_eq!(suite["name"], "🧪 suite");
+        assert_eq!(suite["children"][0]["name"], "🧪 suite > same case");
+        assert!(roots
+            .iter()
+            .any(|symbol| symbol["detail"] == "Low-Level Test" && symbol["name"] == "lowLevel"));
+        assert!(!symbols.to_string().contains("__doria"));
+        let suite_offset = source.find("describe(").unwrap();
+        let expected_position = byte_offset_to_position(source, suite_offset);
+        assert_eq!(
+            suite["selectionRange"]["start"]["line"],
+            expected_position.line
+        );
+        assert_eq!(
+            suite["selectionRange"]["start"]["character"],
+            expected_position.character
+        );
+
+        let workspace = server.workspace_symbols(Some(&json!({ "query": "same case" })));
+        let names = workspace
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|symbol| symbol["name"].as_str())
+            .collect::<HashSet<_>>();
+        assert!(names.contains("acme/one :: 🧪 suite > same case"));
+        assert!(names.contains("acme/two :: 🧪 suite > same case"));
+
+        let compiler_member = source.find("describe").unwrap();
+        assert_eq!(
+            server.definition(Some(&params_at(first_uri, source, compiler_member))),
+            Value::Null
+        );
+        assert_eq!(
+            server.rename(Some(&json!({
+                "textDocument": { "uri": first_uri },
+                "position": params_at(first_uri, source, compiler_member)["position"].clone(),
+                "newName": "renamed",
+            }))),
+            Value::Null
+        );
+        let description = source.find("🧪 suite").unwrap();
+        assert_eq!(
+            server.rename(Some(&json!({
+                "textDocument": { "uri": first_uri },
+                "position": params_at(first_uri, source, description)["position"].clone(),
+                "newName": "renamed",
+            }))),
+            Value::Null
+        );
+
+        let error_use = source.rfind("Failure $error").unwrap();
+        let error_definition = server.definition(Some(&params_at(first_uri, source, error_use)));
+        assert_eq!(error_definition["uri"], first_uri);
+        let helper_call = source.rfind("helper()").unwrap();
+        let helper_definition = server.definition(Some(&params_at(first_uri, source, helper_call)));
+        assert_eq!(helper_definition["uri"], first_uri);
     }
 }

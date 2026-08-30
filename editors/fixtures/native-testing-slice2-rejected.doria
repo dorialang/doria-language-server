@@ -9,13 +9,3 @@ function wrongArity(): void
 {
     expect(1)->toEqual();
 }
-
-function collectionBoundary(): void
-{
-    expect([1])->toContain(1);
-}
-
-function futureMatcher(): void
-{
-    expect(1)->toThrow();
-}

@@ -92,7 +92,7 @@ Compiler-known markers have no invented source definition and cannot be renamed.
 Attributes remain metadata only: there is no runtime reflection, `#[Test]` does
 not execute tests, and `#[PHPExport]` does not activate a bridge.
 
-Native Testing Foundation Slices 1 and 2 follow the same ownership boundary.
+All three Native Testing Foundation slices follow the same ownership boundary.
 `doriac` recognizes compiler-known `Doria\Std\Test` declarations, validates
 their development-source scope, and supplies typed suite/test facts with exact
 source spans. The server retains those facts and the source semantic context
@@ -102,9 +102,10 @@ raw spelling, or infer source scope from paths. Compiler-owned expectation symbo
 are projected only when the compiler reports the exact canonical identity.
 Assertion roots, `not`, terminal matchers, diagnostics, and automatic
 `TestAssertion` effects likewise come from compiler facts rather than an LSP
-testing parser. User-defined same-name symbols remain ordinary. Collection/Error
-matchers and final testing completion, hover, and navigation wait for Native
-Testing Foundation Slice 3.
+testing parser. Slice 3 adds compiler-owned typed completion candidates,
+collection/Error matcher hovers, authored suite/test symbols, and safe navigation.
+User-defined same-name symbols remain ordinary, generated callables remain hidden,
+and compiler-known Test members receive no invented definitions.
 
 ### Editor clients
 

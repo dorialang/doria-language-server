@@ -1,0 +1,23 @@
+use Doria\Std\Test\expect;
+
+internal class Failure implements Error
+{
+    function __construct(string $message) {}
+}
+
+function collectionAndErrorExpectations(
+    List<int> $items,
+    Dictionary<string, int> $values,
+    Bytes $bytes,
+    function(): void throws Failure $operation,
+): void {
+    expect($items)->not->toBeEmpty();
+    expect($items)->toHaveCount(3);
+    expect($items)->toContain(42);
+    expect($values)->toHaveKey("answer");
+    expect($values)->toHaveValue(42);
+    expect($bytes)->toHaveCount(3);
+    expect($operation)->toThrow(function (Failure $error): void {
+        expect($error->message)->toContain("failure");
+    });
+}

@@ -297,6 +297,7 @@ pub(crate) struct AnalysisSnapshot {
     directive_semantic_tokens: Vec<(Span, u32)>,
     attribute_semantic_tokens: Vec<(Span, u32)>,
     assertion_semantic_tokens: Vec<SemanticTokenSpan>,
+    assertion_completions: Vec<(Span, doriac::semantics::AssertionCompletionInfo)>,
     test_semantics: TestSemanticFacts,
     source_semantic_context: Option<SourceSemanticContext>,
     attribute_info: AttributeSemanticInfo,
@@ -469,17 +470,27 @@ impl AnalysisSnapshot {
         text: &str,
         context: CompilationContext,
     ) -> Self {
+        Self::analyze_with_source_context(path, text, SourceSemanticContext::standalone(context))
+    }
+
+    pub(crate) fn analyze_with_source_context(
+        path: &str,
+        text: &str,
+        source_context: SourceSemanticContext,
+    ) -> Self {
+        let context = source_context.compilation.clone();
         let tokens = doriac::lex_source(path.to_string(), text.to_string()).unwrap_or_default();
-        let (program, analysis) = match doriac::analyze_source_for_ide_with_context(
+        let (program, analysis) = match doriac::analyze_source_for_ide_with_source_context(
             path.to_string(),
             text.to_string(),
-            context.clone(),
+            source_context.clone(),
         ) {
             Ok(analysis) => analysis,
             Err(diagnostics) => {
                 return Self {
                     diagnostics,
                     compilation_context: context,
+                    source_semantic_context: Some(source_context),
                     ..Self::default()
                 };
             }
@@ -533,16 +544,18 @@ impl AnalysisSnapshot {
         &self.compilation_context
     }
 
+    pub(crate) fn source_id(&self) -> SourceId {
+        self.source_id
+    }
+
     pub(crate) fn global_symbols(&self) -> &GlobalSymbolFacts {
         &self.global_symbols
     }
 
-    #[cfg(test)]
     pub(crate) fn test_semantics(&self) -> &TestSemanticFacts {
         &self.test_semantics
     }
 
-    #[cfg(test)]
     pub(crate) fn source_semantic_context(&self) -> Option<&SourceSemanticContext> {
         self.source_semantic_context.as_ref()
     }
@@ -901,6 +914,74 @@ impl AnalysisSnapshot {
             .filter(|context| context.span.start <= offset && offset <= context.span.end)
             .min_by_key(|context| context.span.end.saturating_sub(context.span.start))?;
         Some(self.member_completions(context))
+    }
+
+    pub(crate) fn assertion_completions_at_offset(
+        &self,
+        offset: usize,
+    ) -> Option<Vec<SemanticCompletion>> {
+        let (_, completion) = self
+            .assertion_completions
+            .iter()
+            .filter(|(span, _)| {
+                span.source == self.source_id
+                    && span.end <= offset
+                    && offset.saturating_sub(span.end) <= 2
+            })
+            .max_by_key(|(span, _)| span.end)?;
+        let mut items = completion
+            .matchers
+            .iter()
+            .copied()
+            .map(|matcher| assertion_matcher_completion(matcher, &completion.actual_type))
+            .collect::<Vec<_>>();
+        if !completion.negated {
+            items.push(SemanticCompletion {
+                label: "not".to_string(),
+                kind: 10,
+                detail: "Negated compiler-owned expectation".to_string(),
+                documentation: Some(
+                    "Property-shaped negation. It evaluates no value and may appear only once before a terminal matcher."
+                        .to_string(),
+                ),
+            });
+        }
+        items.sort_by(|left, right| left.label.cmp(&right.label));
+        items.dedup_by(|left, right| left.label == right.label);
+        Some(items)
+    }
+
+    pub(crate) fn compiler_test_import_completions_at_offset(
+        &self,
+        text: &str,
+        offset: usize,
+    ) -> Option<Vec<SemanticCompletion>> {
+        if !self
+            .source_semantic_context()
+            .is_some_and(SourceSemanticContext::is_development)
+            || !compiler_test_import_context(text, offset)
+        {
+            return None;
+        }
+        Some(
+            doriac::compiler_known_test::IMPLEMENTED_MEMBERS
+                .iter()
+                .filter_map(|canonical| {
+                    let label = canonical.rsplit('\\').next()?.to_string();
+                    let kind = if *canonical == doriac::compiler_known_test::ASSERTION_ERROR {
+                        7
+                    } else {
+                        3
+                    };
+                    Some(SemanticCompletion {
+                        label,
+                        kind,
+                        detail: format!("Compiler-owned `{canonical}`"),
+                        documentation: compiler_test_member_hover(canonical).map(str::to_string),
+                    })
+                })
+                .collect(),
+        )
     }
 
     fn member_completions(&self, context: &MemberReceiver) -> Vec<SemanticCompletion> {
@@ -1419,6 +1500,7 @@ struct SnapshotBuilder<'a> {
     semantic_hovers: Vec<SemanticHover>,
     attribute_semantic_tokens: Vec<(Span, u32)>,
     assertion_semantic_tokens: Vec<SemanticTokenSpan>,
+    assertion_completions: Vec<(Span, doriac::semantics::AssertionCompletionInfo)>,
     attribute_parameter_occurrences: Vec<AttributeParameterOccurrence>,
     missing_callables: Vec<MissingCallable>,
     member_occurrences: Vec<MemberOccurrence>,
@@ -1464,6 +1546,7 @@ impl<'a> SnapshotBuilder<'a> {
             semantic_hovers: Vec::new(),
             attribute_semantic_tokens: Vec::new(),
             assertion_semantic_tokens: Vec::new(),
+            assertion_completions: Vec::new(),
             attribute_parameter_occurrences: Vec::new(),
             missing_callables: Vec::new(),
             member_occurrences: Vec::new(),
@@ -1496,6 +1579,13 @@ impl<'a> SnapshotBuilder<'a> {
                     self.source_id,
                     self.tokens,
                 ));
+            self.assertion_completions.extend(
+                info.assertion_completions
+                    .iter()
+                    .filter(|(span, _)| span.source == self.source_id)
+                    .map(|(span, completion)| (*span, completion.clone())),
+            );
+            self.collect_compiler_test_hovers(info);
         }
         self.assertion_semantic_tokens
             .sort_by_key(|(span, token_type, modifiers)| {
@@ -1524,6 +1614,7 @@ impl<'a> SnapshotBuilder<'a> {
             directive_semantic_tokens: Vec::new(),
             attribute_semantic_tokens: self.attribute_semantic_tokens,
             assertion_semantic_tokens: self.assertion_semantic_tokens,
+            assertion_completions: self.assertion_completions,
             test_semantics,
             source_semantic_context,
             attribute_info,
@@ -3651,6 +3742,105 @@ impl<'a> SnapshotBuilder<'a> {
         }
     }
 
+    fn collect_compiler_test_hovers(&mut self, info: &SemanticInfo) {
+        for reference in info
+            .global_symbols
+            .references
+            .iter()
+            .filter(|reference| reference.source_span.source == self.source_id)
+        {
+            let GlobalSymbolOwner::CompilerKnown(CompilerSymbolIdentity::StandardTest(name)) =
+                &reference.symbol_id.owner
+            else {
+                continue;
+            };
+            let source_name = reference
+                .source_spelling
+                .rsplit('\\')
+                .next()
+                .unwrap_or(&reference.source_spelling);
+            let span = find_identifier_span(self.tokens, reference.source_span, source_name)
+                .unwrap_or(reference.source_span);
+            if let Some(markdown) = compiler_test_member_hover(name) {
+                self.semantic_hovers
+                    .push(SemanticHover::new(span, markdown.to_string()));
+            }
+            if reference
+                .source_spelling
+                .starts_with(doriac::compiler_known_test::NAMESPACE)
+                && reference.source_span.start + doriac::compiler_known_test::NAMESPACE.len()
+                    <= reference.source_span.end
+            {
+                self.semantic_hovers.push(SemanticHover::new(
+                    Span::in_source(
+                        self.source_id,
+                        reference.source_span.start,
+                        reference.source_span.start + doriac::compiler_known_test::NAMESPACE.len(),
+                    ),
+                    compiler_test_module_hover().to_string(),
+                ));
+            }
+        }
+
+        for assertion in info
+            .assertions
+            .values()
+            .filter(|assertion| assertion.member_span.source == self.source_id)
+        {
+            let Some(actual) = assertion.actual_type.as_ref() else {
+                continue;
+            };
+            self.semantic_hovers.push(SemanticHover::new(
+                assertion.member_span,
+                assertion_matcher_documentation(
+                    assertion.matcher,
+                    actual,
+                    assertion.expected_type.as_ref(),
+                ),
+            ));
+            if assertion.negated {
+                let negation_span = tokens_in_span(self.tokens, assertion.terminal_span)
+                    .find(|token| matches!(token.kind, TokenKind::Not))
+                    .map(|token| token.span);
+                if let Some(span) = negation_span {
+                    self.semantic_hovers.push(SemanticHover::new(
+                        span,
+                        "`not`\n\nProperty-shaped expectation negation. It evaluates no value, may appear once, and preserves the matcher’s exact type and ownership rules."
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+
+        let source_context = info.source_semantic_contexts.get(&self.source_id);
+        for suite in info
+            .test_semantics
+            .suites
+            .iter()
+            .filter(|suite| suite.call_name_span.source == self.source_id)
+        {
+            self.semantic_hovers.push(SemanticHover::new(
+                suite.call_name_span,
+                behavioral_test_hover("Suite", &suite.display_name, source_context),
+            ));
+        }
+        for test in info
+            .test_semantics
+            .tests
+            .iter()
+            .filter(|test| test.call_name_span.source == self.source_id)
+        {
+            let kind = match test.origin {
+                doriac::testing::TestOrigin::Attribute => "Low-Level Test",
+                doriac::testing::TestOrigin::Behavioral => "Behavioral Test",
+            };
+            self.semantic_hovers.push(SemanticHover::new(
+                test.call_name_span,
+                behavioral_test_hover(kind, &test.display_name, source_context),
+            ));
+        }
+    }
+
     fn visit_when_expression(
         &mut self,
         when: &WhenExpression,
@@ -4661,6 +4851,212 @@ fn display_resolved_type(ty: &ResolvedType) -> String {
     let mut types = TypeRegistry::new();
     let id = types.intern_resolved(ty);
     types.display(id)
+}
+
+fn assertion_matcher_completion(
+    matcher: doriac::assertions::AssertionMatcher,
+    actual: &ResolvedType,
+) -> SemanticCompletion {
+    let signature = assertion_matcher_signature(matcher, actual, None);
+    SemanticCompletion {
+        label: matcher.source_name().to_string(),
+        kind: 2,
+        detail: signature.clone(),
+        documentation: Some(assertion_matcher_documentation(matcher, actual, None)),
+    }
+}
+
+fn assertion_matcher_signature(
+    matcher: doriac::assertions::AssertionMatcher,
+    actual: &ResolvedType,
+    expected: Option<&ResolvedType>,
+) -> String {
+    use doriac::assertions::ExpectedOperandRule;
+    let parameter = match matcher.expected_operand() {
+        ExpectedOperandRule::None => String::new(),
+        ExpectedOperandRule::SameType | ExpectedOperandRule::OrderedSameType => {
+            format!("{} $expected", display_resolved_type(actual))
+        }
+        ExpectedOperandRule::String => "string $expected".to_string(),
+        ExpectedOperandRule::ExactInt => "int $expected".to_string(),
+        ExpectedOperandRule::CollectionElement => assertion_collection_element(actual)
+            .map(|ty| format!("{} $expected", display_resolved_type(ty)))
+            .unwrap_or_else(|| "$expected".to_string()),
+        ExpectedOperandRule::DictionaryKey => assertion_dictionary_parts(actual)
+            .map(|(key, _)| format!("{} $expected", display_resolved_type(key)))
+            .unwrap_or_else(|| "$expected".to_string()),
+        ExpectedOperandRule::DictionaryValue => assertion_dictionary_parts(actual)
+            .map(|(_, value)| format!("{} $expected", display_resolved_type(value)))
+            .unwrap_or_else(|| "$expected".to_string()),
+        ExpectedOperandRule::OptionalErrorInspector => expected.map_or_else(
+            || "[function(Error): void $inspector]".to_string(),
+            |ty| format!("[{} $inspector]", display_resolved_type(ty)),
+        ),
+        ExpectedOperandRule::FailureMessage => "string $message".to_string(),
+    };
+    format!("{}({parameter}): void", matcher.source_name())
+}
+
+fn assertion_matcher_documentation(
+    matcher: doriac::assertions::AssertionMatcher,
+    actual: &ResolvedType,
+    expected: Option<&ResolvedType>,
+) -> String {
+    let mut lines = vec![
+        format!(
+            "```doria\n{}\n```",
+            assertion_matcher_signature(matcher, actual, expected)
+        ),
+        format!("**Actual type:** `{}`", display_resolved_type(actual)),
+        format!("**Receiver family:** {}", assertion_receiver_family(actual)),
+        "**Negation:** Supported through the property-shaped `not` modifier.".to_string(),
+    ];
+    if let Some(complexity) = matcher.stable_complexity() {
+        lines.push(format!("**Complexity:** `{complexity}`"));
+    }
+    if matcher == doriac::assertions::AssertionMatcher::Throws {
+        if let ResolvedType::Function(function) = actual {
+            lines.push(format!(
+                "Invokes the zero-parameter function subject once using its ordinary **{}** invocation mode.",
+                invocation_mode_name(function.invocation_mode)
+            ));
+        }
+        lines.push(
+            "Fatal panic is not a checked Error and does not satisfy this matcher.".to_string(),
+        );
+    } else if !matches!(
+        matcher.expected_operand(),
+        doriac::assertions::ExpectedOperandRule::None
+    ) {
+        lines.push(
+            "Expected operands use exact Doria types with no test-only coercion.".to_string(),
+        );
+    }
+    lines.push(
+        "Raises `AssertionError` with the automatic `TestAssertion` effect on failure.".to_string(),
+    );
+    lines.join("\n\n")
+}
+
+fn assertion_collection_element(actual: &ResolvedType) -> Option<&ResolvedType> {
+    match actual {
+        ResolvedType::TypedArray(element)
+        | ResolvedType::List(element)
+        | ResolvedType::Set(element)
+        | ResolvedType::SortedSet(element)
+        | ResolvedType::PriorityQueue(element)
+        | ResolvedType::Deque(element) => Some(element),
+        _ => None,
+    }
+}
+
+fn assertion_dictionary_parts(actual: &ResolvedType) -> Option<(&ResolvedType, &ResolvedType)> {
+    match actual {
+        ResolvedType::Dictionary(key, value) | ResolvedType::SortedDictionary(key, value) => {
+            Some((key, value))
+        }
+        _ => None,
+    }
+}
+
+fn assertion_receiver_family(actual: &ResolvedType) -> &'static str {
+    match actual {
+        ResolvedType::TypedArray(_) => "Typed Array",
+        ResolvedType::Bytes => "Bytes",
+        ResolvedType::List(_) => "List",
+        ResolvedType::Dictionary(_, _) => "Dictionary",
+        ResolvedType::SortedDictionary(_, _) => "SortedDictionary",
+        ResolvedType::Set(_) => "Set",
+        ResolvedType::SortedSet(_) => "SortedSet",
+        ResolvedType::PriorityQueue(_) => "PriorityQueue",
+        ResolvedType::Deque(_) => "Deque",
+        ResolvedType::Function(_) => "Function Value",
+        ResolvedType::String => "String",
+        ResolvedType::Nullable(_) | ResolvedType::Null | ResolvedType::Mixed => "Nullable Or Mixed",
+        ResolvedType::Bool => "Bool",
+        ResolvedType::Integer(_) | ResolvedType::Float(_) => "Numeric",
+        _ => "Exact Doria Value",
+    }
+}
+
+fn compiler_test_module_hover() -> &'static str {
+    "`Doria\\Std\\Test`\n\nCompiler-owned development-source testing module. It provides behavioral declarations, expectations, explicit failure, and `AssertionError`; it is not part of the main-source prelude."
+}
+
+fn compiler_test_import_context(text: &str, offset: usize) -> bool {
+    let Some(prefix) = text.get(..offset) else {
+        return false;
+    };
+    const PLACEHOLDER: &str = "__doria_completion";
+    let Ok(tokens) = doriac::lex_source(
+        "test-import-completion.doria",
+        format!("{prefix}{PLACEHOLDER}"),
+    ) else {
+        return false;
+    };
+    let tokens = tokens
+        .into_iter()
+        .filter(|token| !matches!(token.kind, TokenKind::Eof))
+        .collect::<Vec<_>>();
+    let Some(use_index) = tokens
+        .iter()
+        .rposition(|token| matches!(token.kind, TokenKind::Use))
+    else {
+        return false;
+    };
+    let tail = &tokens[use_index + 1..];
+    let expected_segments = doriac::compiler_known_test::NAMESPACE
+        .split('\\')
+        .collect::<Vec<_>>();
+    if tail.len() != expected_segments.len() * 2 + 1
+        || !matches!(&tail.last().unwrap().kind, TokenKind::Identifier(name) if name == PLACEHOLDER)
+    {
+        return false;
+    }
+    expected_segments
+        .iter()
+        .enumerate()
+        .all(|(index, expected)| {
+            matches!(&tail[index * 2].kind, TokenKind::Identifier(actual) if actual == expected)
+                && matches!(tail[index * 2 + 1].kind, TokenKind::Backslash)
+        })
+}
+
+fn compiler_test_member_hover(name: &str) -> Option<&'static str> {
+    match name {
+        doriac::compiler_known_test::DESCRIBE => Some(
+            "```doria\ndescribe(string $description, function(): void $body): void\n```\n\nDeclares a nested behavioral test suite in development source. The description is const-evaluated and the compiler preserves authored hierarchy and source ranges.",
+        ),
+        doriac::compiler_known_test::IT => Some(
+            "```doria\nit(string $description, function(): void $body): void\n```\n\nDeclares a behavioral test in development source. The compiler generates direct test metadata and an isolated callable; no runtime suite registry is created.",
+        ),
+        doriac::compiler_known_test::TEST => Some(
+            "```doria\ntest(string $description, function(): void $body): void\n```\n\nDeclares a behavioral test in development source. The compiler generates direct test metadata and an isolated callable; no runtime suite registry is created.",
+        ),
+        doriac::compiler_known_test::EXPECT => Some(
+            "```doria\nexpect<T>(readonly T $actual)\n```\n\n**Compiler-Owned Ephemeral Expectation**\n\nDevelopment Source Only\n\nActual Evaluated Once\n\n`TestAssertion` On Failure",
+        ),
+        doriac::compiler_known_test::FAIL => Some(
+            "```doria\nfail(string $message): void\n```\n\nRaises compiler-owned `AssertionError` with the automatic `TestAssertion` effect. The message is evaluated exactly once.",
+        ),
+        doriac::compiler_known_test::ASSERTION_ERROR => Some(
+            "```doria\nclass AssertionError implements Error\n{\n    string $message;\n}\n```\n\nCompiler-owned catchable Error for failed expectations. `TestAssertion` propagates automatically, an unhandled assertion exits with status 70, and fatal panic remains a distinct runtime outcome. Private assertion payload fields are intentionally not exposed.",
+        ),
+        _ => None,
+    }
+}
+
+fn behavioral_test_hover(
+    kind: &str,
+    display_name: &str,
+    context: Option<&SourceSemanticContext>,
+) -> String {
+    let mut hover = format!("**{kind}:** `{display_name}`\n\nCompiler-owned test metadata preserves the authored source range and suite hierarchy.");
+    if context.is_some_and(|context| context.origin == doriac::build_plan::SourceOrigin::Generated)
+    {
+        hover.push_str("\n\n**Provenance:** Generated development source. Navigation is available, but editor writes and rename are disabled.");
+    }
+    hover
 }
 
 fn display_function_type_with_effects(ty: &ResolvedType, effects: &[ResolvedType]) -> String {
