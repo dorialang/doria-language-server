@@ -24,6 +24,19 @@ function native_testing_require(bool $condition, string $message): void
     }
 }
 
+function native_testing_without_unit_test_module(string $text, string $path): string
+{
+    $matched = preg_match(
+        '/^#\[cfg\(test\)\]\Rmod tests\s*\{/m',
+        $text,
+        $match,
+        PREG_OFFSET_CAPTURE,
+    );
+    native_testing_require($matched === 1, "{$path} must retain a top-level unit-test module.");
+
+    return substr($text, 0, $match[0][1]);
+}
+
 $manifest = native_testing_text($root . '/Cargo.toml');
 $lock = native_testing_text($root . '/Cargo.lock');
 $analysis = native_testing_text($root . '/server/src/analysis.rs');
@@ -64,8 +77,24 @@ foreach (['analyze_project_graph', 'tooling_build_plan', 'baton project', 'never
     );
 }
 
-$productionServer = explode('#[cfg(test)]', $server, 2)[0];
-$productionAnalysis = explode('#[cfg(test)]', $analysis, 2)[0];
+$scanFixture = <<<'RUST'
+fn before_test_helper() {}
+#[cfg(test)]
+fn test_helper() {}
+fn production_after_test_helper() { parse_behavioral(); }
+#[cfg(test)]
+mod tests {}
+RUST;
+native_testing_require(
+    str_contains(
+        native_testing_without_unit_test_module($scanFixture, 'guard scan fixture'),
+        'parse_behavioral',
+    ),
+    'item-level test configuration must not hide later production code from the tooling guard.',
+);
+
+$productionServer = native_testing_without_unit_test_module($server, 'server/src/lib.rs');
+$productionAnalysis = native_testing_without_unit_test_module($analysis, 'server/src/analysis.rs');
 $production = $productionServer . $productionAnalysis . $index;
 foreach (['parse_behavioral', 'parse_test_declaration', 'infer_test_from_path', 'contains("/tests/")', 'ends_with(".test.doria")'] as $forbidden) {
     native_testing_require(
