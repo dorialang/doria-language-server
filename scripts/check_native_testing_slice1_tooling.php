@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $root = dirname(__DIR__);
-$expectedCompiler = '71ca767a4fa5f813258d89c7aa46a0600e1212f9';
+$expectedCompiler = '0cb5cf0c58e100d53311bce3687ff6d116e06be0';
 
 function native_testing_text(string $path): string
 {
@@ -54,11 +54,11 @@ $docs = native_testing_text($root . '/README.md')
 preg_match('/doriac\s*=\s*\{[^\n]*\brev\s*=\s*"([0-9a-f]{40})"/', $manifest, $pin);
 native_testing_require(
     ($pin[1] ?? null) === $expectedCompiler,
-    'Cargo.toml must pin the final Slice-1 compiler authority commit.',
+    'Cargo.toml must pin the final Slice-2 compiler authority commit while preserving Slice 1.',
 );
 native_testing_require(
     substr_count($lock, 'rev=' . $expectedCompiler . '#' . $expectedCompiler) >= 3,
-    'Cargo.lock must resolve every compiler package to the final Slice-1 commit.',
+    'Cargo.lock must resolve every compiler package to the final Slice-2 commit.',
 );
 
 foreach (['TestSemanticFacts', 'SourceSemanticContext', 'test_semantics', 'source_semantic_context', 'is_development()', 'test_semantic_tokens'] as $fact) {
@@ -108,7 +108,7 @@ native_testing_require(
     'production tooling must consume compiler identities instead of recognizing raw test spellings.',
 );
 
-foreach (['Native Testing Foundation Slice 1', 'Slice 2 is next', 'Expectations are not yet available', 'final testing completion, hover, and navigation wait'] as $fact) {
+foreach (['Slices 1 and 2 are complete', 'Slice 3 is next', 'foundation remains in progress', 'final testing completion, hover, and navigation wait'] as $fact) {
     native_testing_require(str_contains($docs, $fact), "native testing tooling documentation is missing {$fact}.");
 }
 

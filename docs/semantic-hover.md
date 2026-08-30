@@ -179,9 +179,11 @@ the compiler provides typed suite/test facts and exact call, description, and
 body spans; Baton/compiler project data provides source scope. The server uses
 those facts for declaration and description semantic tokens without parsing
 `describe`, `it`, or `test` itself and without treating test-looking paths as
-semantic evidence. Slice 1 deliberately adds no final testing hover or
-navigation UX. Expectations are not yet available, and the final testing UX
-waits for Native Testing Foundation Slice 3.
+semantic evidence. Slice 2 additionally projects compiler-owned expectation
+symbols, matcher members, diagnostics, and automatic `TestAssertion` effects;
+it does not reconstruct matcher types or effects. Slices 1 and 2 deliberately
+add no final testing hover or navigation catalogue. Collection/Error matchers
+and the final testing UX wait for Native Testing Foundation Slice 3.
 
 The server submits Baton-supplied project sources to one compiler-owned complete
 graph per project, with unsaved open text overlaid by canonical path. When Baton

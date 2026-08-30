@@ -2,8 +2,26 @@ package dev.doria.intellij.highlighting
 
 import com.intellij.psi.tree.IElementType
 import junit.framework.TestCase
+import java.nio.file.Files
+import java.nio.file.Path
 
 class DoriaLexerTest : TestCase() {
+    fun testNativeTestingSlice2UsesOrdinaryCallMemberAndTypeTokens() {
+        val fixture = Files.readString(
+            Path.of("..", "..", "fixtures", "native-testing-slice2.doria"),
+        )
+        val tokens = lex(fixture)
+
+        assertEquals(DoriaTokenTypes.FUNCTION_CALL, tokens.last { it.text == "expect" }.type)
+        assertEquals(DoriaTokenTypes.FUNCTION_CALL, tokens.last { it.text == "fail" }.type)
+        for (token in tokens.filter { it.text == "toEqual" || it.text == "toBeGreaterThan" }) {
+            assertEquals(DoriaTokenTypes.METHOD_CALL, token.type)
+        }
+        assertEquals(DoriaTokenTypes.PROPERTY, tokens.first { it.text == "not" }.type)
+        assertEquals(DoriaTokenTypes.TYPE_NAME, tokens.last { it.text == "AssertionError" }.type)
+        assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
+    }
+
     fun testTopLevelInternalDeclarationsKeepModifierAndDeclarationHighlighting() {
         val tokens = lex(
             "internal class Helper {} " +

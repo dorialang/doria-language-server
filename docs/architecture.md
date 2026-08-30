@@ -92,15 +92,19 @@ Compiler-known markers have no invented source definition and cannot be renamed.
 Attributes remain metadata only: there is no runtime reflection, `#[Test]` does
 not execute tests, and `#[PHPExport]` does not activate a bridge.
 
-Native Testing Foundation Slice 1 follows the same ownership boundary.
+Native Testing Foundation Slices 1 and 2 follow the same ownership boundary.
 `doriac` recognizes compiler-known `Doria\Std\Test` declarations, validates
 their development-source scope, and supplies typed suite/test facts with exact
 source spans. The server retains those facts and the source semantic context
 from the Baton/compiler project graph, then projects declaration and description
 semantic tokens. It does not parse behavioral declarations, recognize them by
-raw spelling, or infer source scope from paths. Future expectation declarations
-remain unavailable in Slice 1 and are excluded from completion. Final testing
-completion, hover, and navigation wait for Native Testing Foundation Slice 3.
+raw spelling, or infer source scope from paths. Compiler-owned expectation symbols
+are projected only when the compiler reports the exact canonical identity.
+Assertion roots, `not`, terminal matchers, diagnostics, and automatic
+`TestAssertion` effects likewise come from compiler facts rather than an LSP
+testing parser. User-defined same-name symbols remain ordinary. Collection/Error
+matchers and final testing completion, hover, and navigation wait for Native
+Testing Foundation Slice 3.
 
 ### Editor clients
 
@@ -138,7 +142,7 @@ The TextMate grammar and IntelliJ lexer are deliberately local and fast. They cl
 
 ## Shared fixtures
 
-`editors/fixtures/latest-tokens.doria` exercises accepted and planned presentation vocabulary, including namespace, individual/aliased/grouped imports, and include syntax. `editors/fixtures/stage32-attributes.doria` and `stage32-attributes-rejected.doria` preserve the accepted attribute/comment boundary and malformed or semantically rejected examples. `editors/fixtures/rejected-syntax.doria` ensures rejected PHP-shaped, preprocessor, wildcard-import, malformed-group, computed-include, and nested-directive syntax does not accidentally look accepted.
+`editors/fixtures/latest-tokens.doria` exercises accepted and planned presentation vocabulary, including namespace, individual/aliased/grouped imports, and include syntax. `editors/fixtures/stage32-attributes.doria` and `stage32-attributes-rejected.doria` preserve the accepted attribute/comment boundary and malformed or semantically rejected examples. `editors/fixtures/native-testing-slice2.doria` and `native-testing-slice2-rejected.doria` preserve the compiler-owned expectation surface and its rejected boundaries without adding editor-side semantics. `editors/fixtures/rejected-syntax.doria` ensures rejected PHP-shaped, preprocessor, wildcard-import, malformed-group, computed-include, and nested-directive syntax does not accidentally look accepted.
 
 Both editor implementations must be checked against the same fixtures and token inventory.
 

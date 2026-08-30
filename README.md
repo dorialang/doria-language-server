@@ -49,14 +49,16 @@ completion, named-argument completion, evaluated metadata hover, semantic
 tokens, navigation, references, and conservative rename. `#[Test]` records
 metadata but does not run tests; `#[PHPExport]` records metadata but does not
 activate a bridge. Attributes remain compile-time metadata with no runtime
-reflection. Stage 33 and Phase F are complete. Native Testing Foundation Slice 1
-is complete, Slice 2 is next, and the foundation remains in progress. In
+reflection. Stage 33 and Phase F are complete. Native Testing Foundation Slices
+1 and 2 are complete, Slice 3 is next, and the foundation remains in progress. In
 development sources, behavioral `describe`, `it`, and `test` declarations are
 recognized by the compiler. The server consumes the compiler's typed test facts
 and Baton/compiler source-scope context to publish declaration and description
-semantic tokens; it does not parse testing syntax or infer test scope from file
-paths. Expectations are not yet available, and final testing completion, hover,
-and navigation wait for Native Testing Foundation Slice 3.
+semantic tokens. It also projects exact compiler-owned `expect`, `fail`,
+`AssertionError`, `not`, terminal matcher, diagnostic, and automatic assertion-
+effect facts. It does not parse testing syntax, recreate matcher semantics, or
+infer test scope from file paths. Collection/Error matchers and final testing
+completion, hover, and navigation wait for Native Testing Foundation Slice 3.
 Stage 34 single class inheritance remains blocked until the foundation is complete. Ordinary analysis
 remains target-neutral, and highlighting remains presentation only.
 
