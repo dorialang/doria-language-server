@@ -92,6 +92,16 @@ Compiler-known markers have no invented source definition and cannot be renamed.
 Attributes remain metadata only: there is no runtime reflection, `#[Test]` does
 not execute tests, and `#[PHPExport]` does not activate a bridge.
 
+Native Testing Foundation Slice 1 follows the same ownership boundary.
+`doriac` recognizes compiler-known `Doria\Std\Test` declarations, validates
+their development-source scope, and supplies typed suite/test facts with exact
+source spans. The server retains those facts and the source semantic context
+from the Baton/compiler project graph, then projects declaration and description
+semantic tokens. It does not parse behavioral declarations, recognize them by
+raw spelling, or infer source scope from paths. Future expectation declarations
+remain unavailable in Slice 1 and are excluded from completion. Final testing
+completion, hover, and navigation wait for Native Testing Foundation Slice 3.
+
 ### Editor clients
 
 Clients start and supervise `doria-lsp`, translate native editor APIs to LSP
@@ -101,6 +111,10 @@ presentation. The VS Code client also maps project launch profiles onto
 selection, builds, and toolchain selection. Direct `doriac run` is reserved for
 an explicit standalone-file profile. Client-specific fallback behavior must
 remain presentation-only.
+
+The official clients likewise do not implement testing semantics. They render
+the server's compiler-backed semantic tokens and diagnostics; local TextMate and
+IntelliJ tokenization remains presentation-only.
 
 Released editor packages bundle the `doria-lsp` built from the same repository
 revision. VS Code packages one native server per platform-specific VSIX; the

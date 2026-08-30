@@ -104,11 +104,17 @@ Valid closures are diagnostic-free in ordinary target-neutral editor analysis an
 execute through the compiler's debug and native targets and its supported PHP
 compatibility surface. Completion and concrete semantic hovers expose `map`,
 `filter`, and `reduce` on `List<T>` only; diagnostics remain compiler-owned.
-PHP remains secondary. Stages 30 through 33 and Phase F are complete; Stage 34
-single class inheritance is next. Attribute colors remain presentation-only, while
+PHP remains secondary. Stages 30 through 33 and Phase F are complete. Native
+Testing Foundation Slice 1 is complete and Slice 2 is next. `doria-lsp` consumes
+compiler-owned behavioral declaration facts and Baton/compiler source scope to
+publish declaration and description semantic tokens in development sources. The
+plugin does not parse tests or infer them from paths. Expectations are not yet
+available, and final testing completion, hover, and navigation wait for Slice 3.
+Stage 34 single class inheritance remains blocked until the foundation is
+complete. Attribute colors remain presentation-only, while
 `doria-lsp` supplies compiler-owned schema completion, typed metadata hover,
 semantic tokens, navigation, references, rename, and diagnostics. The plugin
-does not parse attribute semantics, provide runtime reflection, run tests, or
+does not parse attribute or testing semantics, provide runtime reflection, or
 activate PHP exports. Top-level
 `internal` declarations retain their type, function, enum, and constant
 presentation with `internal` as a modifier. The presentation lexer does not

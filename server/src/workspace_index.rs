@@ -732,7 +732,9 @@ impl OpenDocumentIndex {
             );
         }
         for (name, symbol, kind) in &document.compiler_known {
-            if *kind == GlobalSymbolKind::CompilerKnownAttribute {
+            if *kind == GlobalSymbolKind::CompilerKnownAttribute
+                || doriac::compiler_known_test::is_future_member(&symbol.qualified_name)
+            {
                 continue;
             }
             completions
@@ -947,6 +949,9 @@ fn import_kind_matches_reference_role(kind: GlobalSymbolKind, role: GlobalRefere
             kind,
             GlobalSymbolKind::Function | GlobalSymbolKind::CompilerKnownIntrinsic
         ),
+        GlobalReferenceRole::TestDeclaration => {
+            kind == GlobalSymbolKind::CompilerKnownTestDeclaration
+        }
         GlobalReferenceRole::Value => kind == GlobalSymbolKind::Constant,
         GlobalReferenceRole::AttributeClass => matches!(
             kind,
@@ -1002,6 +1007,7 @@ fn kind_name(kind: GlobalSymbolKind) -> &'static str {
         GlobalSymbolKind::CompilerKnownType => "Compiler-Known Type",
         GlobalSymbolKind::CompilerKnownIntrinsic => "Language Intrinsic",
         GlobalSymbolKind::CompilerKnownAttribute => "Compiler-Known Attribute",
+        GlobalSymbolKind::CompilerKnownTestDeclaration => "Compiler-Known Test Declaration",
     }
 }
 
@@ -1010,7 +1016,9 @@ fn completion_kind(kind: GlobalSymbolKind) -> u32 {
         GlobalSymbolKind::Class => 7,
         GlobalSymbolKind::Enum => 13,
         GlobalSymbolKind::Interface | GlobalSymbolKind::Trait => 8,
-        GlobalSymbolKind::Function | GlobalSymbolKind::CompilerKnownIntrinsic => 3,
+        GlobalSymbolKind::Function
+        | GlobalSymbolKind::CompilerKnownIntrinsic
+        | GlobalSymbolKind::CompilerKnownTestDeclaration => 3,
         GlobalSymbolKind::Constant => 21,
         GlobalSymbolKind::CompilerKnownType => 25,
         GlobalSymbolKind::CompilerKnownAttribute => 7,

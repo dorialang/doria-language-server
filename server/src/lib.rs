@@ -1146,7 +1146,7 @@ impl Server {
         let mut data = Vec::new();
         let mut previous_line = 0;
         let mut previous_start = 0;
-        for (span, token_type) in document.analysis.semantic_token_spans() {
+        for (span, token_type, token_modifiers) in document.analysis.semantic_token_spans() {
             let start = byte_offset_to_position(&document.text, span.start);
             let end = byte_offset_to_position(&document.text, span.end);
             if start.line != end.line {
@@ -1163,7 +1163,7 @@ impl Server {
                 delta_start,
                 end.character - start.character,
                 token_type,
-                0,
+                token_modifiers,
             ]);
             previous_line = start.line;
             previous_start = start.character;
@@ -2344,7 +2344,7 @@ fn initialize_result() -> Value {
             "semanticTokensProvider": {
                 "legend": {
                     "tokenTypes": ["variable", "type", "enumMember", "function", "keyword", "namespace", "string"],
-                    "tokenModifiers": []
+                    "tokenModifiers": ["declaration"]
                 },
                 "full": true
             },
@@ -5393,6 +5393,7 @@ function main(): void
                 "string"
             ])
         );
+        assert_eq!(provider["legend"]["tokenModifiers"], json!(["declaration"]));
     }
 
     #[test]
@@ -5720,6 +5721,33 @@ function relay(take Failure $failure): void throws Failure
         })
     }
 
+    fn semantic_token_records(value: &Value) -> Vec<(u32, u32, u32, u32, u32)> {
+        let mut line = 0;
+        let mut start = 0;
+        value["data"]
+            .as_array()
+            .expect("semantic token data")
+            .chunks_exact(5)
+            .map(|token| {
+                let delta_line = token[0].as_u64().expect("delta line") as u32;
+                let delta_start = token[1].as_u64().expect("delta start") as u32;
+                line += delta_line;
+                start = if delta_line == 0 {
+                    start + delta_start
+                } else {
+                    delta_start
+                };
+                (
+                    line,
+                    start,
+                    token[2].as_u64().expect("length") as u32,
+                    token[3].as_u64().expect("token type") as u32,
+                    token[4].as_u64().expect("token modifiers") as u32,
+                )
+            })
+            .collect()
+    }
+
     fn code_action_params_at(uri: &str, source: &str, offset: usize) -> Value {
         let position = params_at(uri, source, offset)["position"].clone();
         json!({
@@ -6024,6 +6052,7 @@ function run(WindowStyles $styles, Zebra $z): void
         let mut server = stage31_server(&["file:///workspace"]);
         open_stage31_document(&mut server, declaration_uri, declaration);
         open_stage31_document(&mut server, consumer_uri, consumer);
+
         let offset = consumer.find("WindowStyles").unwrap() + 3;
 
         let actions =
@@ -7416,6 +7445,224 @@ function main(): void {}
         let cleared_output = String::from_utf8(cleared_output).unwrap();
         assert!(cleared_output.contains(&broken_uri));
         assert!(cleared_output.contains("\"diagnostics\":[]"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_test_declarations_follow_compiler_facts_and_project_source_scope() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("doria-lsp-native-tests-{nonce}"));
+        fs::create_dir_all(root.join("tests")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let source_path = root.join("tests/behavior.doria");
+        let source = r#"use Doria\Std\Test\{
+    describe,
+    it,
+    test,
+};
+
+describe("🧪 User", function (): void {
+    describe("creation", function (): void {
+        it("can be created", function (): void {});
+    });
+    test("can be removed", function (): void {});
+});
+"#;
+        fs::write(&source_path, source).unwrap();
+        let root_uri = file_uri::path_to_file_uri(&root);
+        let source_uri = file_uri::path_to_file_uri(&source_path);
+        let mut project = project::test_project(
+            &root,
+            &["tests/behavior.doria"],
+            project::PackageSource::Path,
+            &[],
+        );
+        project.packages[0].sources[0].scope = doriac::build_plan::SourceScope::Development;
+        project.tooling_build_plan.packages[0].sources[0].scope =
+            doriac::build_plan::SourceScope::Development;
+        project.tooling_build_plan.selected_target.active_scopes = vec![
+            doriac::build_plan::SourceScope::Main,
+            doriac::build_plan::SourceScope::Development,
+        ];
+
+        let mut session = CompilationSession::default();
+        let graph = analyze_project_graph(
+            &project,
+            &project.tooling_build_plan,
+            &[OpenSource {
+                uri: &source_uri,
+                relative_path: "tests/behavior.doria".to_string(),
+                text: source,
+            }],
+            &mut session,
+        )
+        .unwrap_or_else(|failure| panic!("native test project graph: {:?}", failure.diagnostics));
+        assert!(graph.documents[&source_uri]
+            .analysis
+            .diagnostics()
+            .is_empty());
+
+        let mut server = stage31_server(&[&root_uri]);
+        server.projects.insert(root_uri.clone(), project);
+        open_stage31_document(&mut server, &source_uri, source);
+        let analysis = &server.documents[&source_uri].analysis;
+        assert!(
+            analysis.diagnostics().is_empty(),
+            "{:?}",
+            analysis.diagnostics()
+        );
+        assert!(analysis
+            .source_semantic_context()
+            .is_some_and(doriac::testing::SourceSemanticContext::is_development));
+        assert_eq!(analysis.test_semantics().suites.len(), 2);
+        assert_eq!(analysis.test_semantics().tests.len(), 2);
+        assert!(analysis
+            .test_semantics()
+            .suites
+            .iter()
+            .all(|suite| suite.source.0 == "acme/app:tests/behavior.doria"));
+        assert!(analysis
+            .test_semantics()
+            .tests
+            .iter()
+            .all(|test| test.source.0 == "acme/app:tests/behavior.doria"));
+
+        let test_imports = analysis
+            .global_symbols()
+            .references
+            .iter()
+            .filter(|reference| {
+                reference.role == doriac::names::GlobalReferenceRole::ImportTarget
+                    && doriac::compiler_known_test::is_declaration(
+                        &reference.symbol_id.qualified_name,
+                    )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            test_imports.len(),
+            3,
+            "{:?}",
+            analysis.global_symbols().references
+        );
+        assert!(test_imports
+            .iter()
+            .all(|reference| { reference.source_identity.0 == "acme/app:tests/behavior.doria" }));
+
+        let completion_labels = server
+            .document_index
+            .completions(&source_uri)
+            .into_iter()
+            .map(|completion| completion.label)
+            .collect::<std::collections::HashSet<_>>();
+        for implemented in ["describe", "it", "test"] {
+            assert!(completion_labels.contains(implemented));
+        }
+        for future in ["expect", "fail", "AssertionError"] {
+            assert!(!completion_labels.contains(future));
+        }
+
+        let tokens = semantic_token_records(&server.semantic_tokens(Some(&json!({
+            "textDocument": { "uri": source_uri }
+        }))));
+        for (name, offset) in source
+            .match_indices("describe(")
+            .map(|(offset, _)| ("describe", offset))
+            .chain(
+                source
+                    .match_indices("it(")
+                    .map(|(offset, _)| ("it", offset)),
+            )
+            .chain(
+                source
+                    .match_indices("test(")
+                    .map(|(offset, _)| ("test", offset)),
+            )
+        {
+            let position = byte_offset_to_position(source, offset);
+            assert!(tokens.contains(&(
+                position.line,
+                position.character,
+                name.encode_utf16().count() as u32,
+                3,
+                1,
+            )));
+        }
+        for description in [
+            "\"🧪 User\"",
+            "\"creation\"",
+            "\"can be created\"",
+            "\"can be removed\"",
+        ] {
+            let offset = source.find(description).unwrap();
+            let position = byte_offset_to_position(source, offset);
+            assert!(tokens.contains(&(
+                position.line,
+                position.character,
+                description.encode_utf16().count() as u32,
+                6,
+                0,
+            )));
+        }
+
+        let ordinary = "function describe(string $name): void {}\nfunction main(): void { describe(\"ordinary\"); }\n";
+        let ordinary_snapshot = AnalysisSnapshot::analyze("ordinary.doria", ordinary);
+        let ordinary_call = ordinary.rfind("describe(").unwrap();
+        assert!(ordinary_snapshot
+            .semantic_token_spans()
+            .iter()
+            .filter(|(span, _, _)| span.start == ordinary_call)
+            .all(|(_, _, modifiers)| *modifiers == 0));
+        assert!(ordinary_snapshot.test_semantics().suites.is_empty());
+        assert!(ordinary_snapshot.test_semantics().tests.is_empty());
+
+        let mut main_project = project::test_project(
+            &root,
+            &["tests/behavior.doria"],
+            project::PackageSource::Path,
+            &[],
+        );
+        main_project
+            .tooling_build_plan
+            .selected_target
+            .active_scopes = vec![doriac::build_plan::SourceScope::Main];
+        server.projects.insert(root_uri.clone(), main_project);
+        server.reanalyze_documents();
+        assert!(server.documents[&source_uri]
+            .analysis
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0701"));
+
+        let future = "use Doria\\Std\\Test\\{ expect };\nexpect(1);\n";
+        let mut future_project = project::test_project(
+            &root,
+            &["tests/behavior.doria"],
+            project::PackageSource::Path,
+            &[],
+        );
+        future_project.packages[0].sources[0].scope = doriac::build_plan::SourceScope::Development;
+        future_project.tooling_build_plan.packages[0].sources[0].scope =
+            doriac::build_plan::SourceScope::Development;
+        future_project
+            .tooling_build_plan
+            .selected_target
+            .active_scopes = vec![
+            doriac::build_plan::SourceScope::Main,
+            doriac::build_plan::SourceScope::Development,
+        ];
+        server.projects.insert(root_uri, future_project);
+        open_stage31_document(&mut server, &source_uri, future);
+        let diagnostics = server.documents[&source_uri].analysis.diagnostics();
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "E0710")
+                .count(),
+            1
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
