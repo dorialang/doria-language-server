@@ -5724,10 +5724,11 @@ function relay(take Failure $failure): void throws Failure
     fn semantic_token_records(value: &Value) -> Vec<(u32, u32, u32, u32, u32)> {
         let mut line = 0;
         let mut start = 0;
-        value["data"]
-            .as_array()
-            .expect("semantic token data")
-            .chunks_exact(5)
+        let data = value["data"].as_array().expect("semantic token data");
+        let (tokens, remainder) = data.as_slice().as_chunks::<5>();
+        assert!(remainder.is_empty(), "incomplete semantic token record");
+        tokens
+            .iter()
             .map(|token| {
                 let delta_line = token[0].as_u64().expect("delta line") as u32;
                 let delta_start = token[1].as_u64().expect("delta start") as u32;
