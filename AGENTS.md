@@ -34,7 +34,8 @@ This repository owns Doria's language server, syntax highlighting, shared editor
 - Cargo does not garbage-collect old project artifacts. Run `php scripts/check_cargo_target_size.php` before and after the full Rust validation suite.
 - The checker reports a problem when the repository's `target/` exceeds 15 GiB. It is diagnostic only and must never delete build artifacts.
 - Never run `cargo clean` or remove `target/` automatically. Report the measured size and ask Andrew for approval before cleaning.
-- Keep test debug information at line-table level and test incremental compilation disabled unless Andrew explicitly accepts the storage tradeoff.
+- Keep dev and test debug information at line-table level, dependency debug information disabled, and test incremental compilation disabled unless Andrew explicitly accepts the storage tradeoff.
+- Local-compiler server builds must honor `CARGO_TARGET_DIR`; the compiler repository's installed-tool refresh uses this to share one measured, reusable cache instead of creating another local-runner artifact tree.
 
 ## Required validation
 

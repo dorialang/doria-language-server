@@ -97,6 +97,12 @@ doria-language-server = { path = %s }
 [patch."https://github.com/dorialang/doria"]
 doriac = { path = %s }
 
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [workspace]
 TOML;
     write_generated_file(
@@ -113,14 +119,27 @@ RUST
         . "\n"
     );
     seed_local_runner_lock($root . '/Cargo.lock', $runner . '/Cargo.lock');
+    $update = [
+        'cargo',
+        'update',
+        '--manifest-path',
+        $runner . '/Cargo.toml',
+        '--package',
+        'doriac',
+    ];
+    if (getenv('CARGO_NET_OFFLINE') === 'true') {
+        $update[] = '--offline';
+    }
+    run_command($update, $root);
 
+    $targetDirectory = local_compiler_target_directory($root);
     $command = [
         'cargo',
         'build',
         '--manifest-path',
         $runner . '/Cargo.toml',
         '--target-dir',
-        $root . '/target/local-doria-lsp',
+        $targetDirectory,
         '--bin',
         'doria-lsp',
     ];
@@ -131,7 +150,7 @@ RUST
 
     $profile = $release ? 'release' : 'debug';
     $executable = PHP_OS_FAMILY === 'Windows' ? 'doria-lsp.exe' : 'doria-lsp';
-    $localArtifact = $root . "/target/local-doria-lsp/{$profile}/{$executable}";
+    $localArtifact = $targetDirectory . "/{$profile}/{$executable}";
     require_artifact($localArtifact, 'local-compiler language-server executable');
 
     $artifact = $root . "/target/{$profile}/{$executable}";
@@ -142,6 +161,18 @@ RUST
     fwrite(STDOUT, "local compiler crate: {$compiler}\n");
 
     return $artifact;
+}
+
+function local_compiler_target_directory(string $root): string
+{
+    $configured = getenv('CARGO_TARGET_DIR');
+    if ($configured === false || $configured === '') {
+        return $root . '/target/local-doria-lsp';
+    }
+
+    return is_absolute_path($configured)
+        ? rtrim($configured, '/\\')
+        : $root . '/' . rtrim($configured, '/\\');
 }
 
 function seed_local_runner_lock(string $source, string $destination): void
