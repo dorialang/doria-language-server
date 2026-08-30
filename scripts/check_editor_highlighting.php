@@ -492,8 +492,11 @@ function check_vscode_language_server_packaging(): void
             && str_contains($builder, "'--package',")
             && str_contains($builder, "'doriac',")
             && str_contains($builder, "getenv('CARGO_TARGET_DIR')")
+            && str_contains($builder, '[profile.dev]')
+            && str_contains($builder, '[profile.dev.package."*"]')
+            && str_contains($builder, 'debug = "line-tables-only"')
             && str_contains($builder, 'function seed_local_runner_lock('),
-        'local compiler builds must reseed the runner, resolve the local compiler subtree, and honor the managed Cargo target'
+        'local compiler builds must reseed the runner, resolve the local compiler subtree, use lean profiles, and honor the managed Cargo target'
     );
     require_check(
         str_contains($extension, 'registerDebugConfigurationProvider')

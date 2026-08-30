@@ -97,6 +97,12 @@ doria-language-server = { path = %s }
 [patch."https://github.com/dorialang/doria"]
 doriac = { path = %s }
 
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [workspace]
 TOML;
     write_generated_file(
