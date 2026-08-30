@@ -480,7 +480,11 @@ class DoriaLexer : LexerBase() {
 
             in TYPE_TEST_OPERATORS -> DoriaTokenTypes.TYPE_TEST_OPERATOR
 
-            in WORD_OPERATORS -> DoriaTokenTypes.LOGICAL_OPERATOR
+            in WORD_OPERATORS -> if (previousAccessor() == "->") {
+                if (isCallName()) DoriaTokenTypes.METHOD_CALL else DoriaTokenTypes.PROPERTY
+            } else {
+                DoriaTokenTypes.LOGICAL_OPERATOR
+            }
 
             in MODIFIERS -> DoriaTokenTypes.MODIFIER
 

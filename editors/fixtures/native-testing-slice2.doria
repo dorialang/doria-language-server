@@ -1,0 +1,35 @@
+use Doria\Std\Test\{
+    AssertionError,
+    describe,
+    expect,
+    fail,
+    it,
+};
+
+function add(int $left, int $right): int
+{
+    return $left + $right;
+}
+
+function assertPositive(int $value): void
+{
+    expect($value)->toBeGreaterThan(0);
+}
+
+describe("Math", function (): void {
+    it("adds values", function (): void {
+        expect(add(20, 22))->toEqual(42);
+        expect("Doria")->not->toEqual("PHP");
+        assertPositive(42);
+    });
+});
+
+function inspectAssertion(AssertionError $error): string
+{
+    return $error->message;
+}
+
+function explicitFailure(): void
+{
+    fail("explicit failure");
+}

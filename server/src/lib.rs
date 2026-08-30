@@ -7460,14 +7460,24 @@ function main(): void {}
         let root = root.canonicalize().unwrap();
         let source_path = root.join("tests/behavior.doria");
         let source = r#"use Doria\Std\Test\{
+    AssertionError,
     describe,
+    expect,
+    fail,
     it,
     test,
 };
 
+function assertionHelper(): void {
+    expect(42)->not->toEqual(0);
+}
+
+function consumeAssertion(AssertionError $error): void {}
+function assertionFailure(): void { fail("caught"); }
+
 describe("🧪 User", function (): void {
     describe("creation", function (): void {
-        it("can be created", function (): void {});
+        it("can be created", function (): void { assertionHelper(); });
     });
     test("can be removed", function (): void {});
 });
@@ -7558,11 +7568,8 @@ describe("🧪 User", function (): void {
             .into_iter()
             .map(|completion| completion.label)
             .collect::<std::collections::HashSet<_>>();
-        for implemented in ["describe", "it", "test"] {
+        for implemented in ["describe", "it", "test", "expect", "fail", "AssertionError"] {
             assert!(completion_labels.contains(implemented));
-        }
-        for future in ["expect", "fail", "AssertionError"] {
-            assert!(!completion_labels.contains(future));
         }
 
         let tokens = semantic_token_records(&server.semantic_tokens(Some(&json!({
@@ -7607,6 +7614,34 @@ describe("🧪 User", function (): void {
                 0,
             )));
         }
+        for (needle, name, token_type) in [
+            ("expect(42)", "expect", 3),
+            ("not->", "not", 2),
+            ("toEqual(0)", "toEqual", 3),
+            ("fail(\"caught\")", "fail", 3),
+            ("AssertionError $error", "AssertionError", 1),
+        ] {
+            let offset = source.find(needle).unwrap();
+            let position = byte_offset_to_position(source, offset);
+            assert!(
+                tokens.contains(&(
+                    position.line,
+                    position.character,
+                    name.encode_utf16().count() as u32,
+                    token_type,
+                    0,
+                )),
+                "missing semantic token for {needle}: {tokens:?}"
+            );
+        }
+        let helper_hover = analysis
+            .hover_at_offset(source.find("assertionHelper").unwrap())
+            .expect("assertion helper hover");
+        assert!(helper_hover.markdown.contains("**Test assertions:**"));
+        assert!(helper_hover
+            .markdown
+            .contains("Doria\\Std\\Test\\AssertionError"));
+        assert!(!helper_hover.markdown.contains("throws AssertionError"));
 
         let ordinary = "function describe(string $name): void {}\nfunction main(): void { describe(\"ordinary\"); }\n";
         let ordinary_snapshot = AnalysisSnapshot::analyze("ordinary.doria", ordinary);
@@ -7619,6 +7654,74 @@ describe("🧪 User", function (): void {
         assert!(ordinary_snapshot.test_semantics().suites.is_empty());
         assert!(ordinary_snapshot.test_semantics().tests.is_empty());
 
+        let ordinary_expect =
+            "function expect(int $value): void {}\nfunction main(): void { expect(42); }\n";
+        let ordinary_expect_snapshot =
+            AnalysisSnapshot::analyze("ordinary-expect.doria", ordinary_expect);
+        assert!(ordinary_expect_snapshot.diagnostics().is_empty());
+        assert!(ordinary_expect_snapshot
+            .global_symbols()
+            .references
+            .iter()
+            .filter(|reference| reference.source_spelling == "expect")
+            .all(|reference| !matches!(
+                reference.symbol_id.owner,
+                doriac::names::GlobalSymbolOwner::CompilerKnown(
+                    doriac::names::CompilerSymbolIdentity::StandardTest(_)
+                )
+            )));
+
+        for (variant, call_name) in [
+            (
+                "use Doria\\Std\\Test\\expect as verify;\nfunction helper(): void { verify(42)->toEqual(42); }\n",
+                "verify",
+            ),
+            (
+                "function helper(): void { Doria\\Std\\Test\\expect(42)->toEqual(42); }\n",
+                "expect",
+            ),
+        ] {
+            let mut variant_project = project::test_project(
+                &root,
+                &["tests/behavior.doria"],
+                project::PackageSource::Path,
+                &[],
+            );
+            variant_project.packages[0].sources[0].scope =
+                doriac::build_plan::SourceScope::Development;
+            variant_project.tooling_build_plan.packages[0].sources[0].scope =
+                doriac::build_plan::SourceScope::Development;
+            variant_project
+                .tooling_build_plan
+                .selected_target
+                .active_scopes = vec![
+                doriac::build_plan::SourceScope::Main,
+                doriac::build_plan::SourceScope::Development,
+            ];
+            server.projects.insert(root_uri.clone(), variant_project);
+            open_stage31_document(&mut server, &source_uri, variant);
+            assert!(
+                server.documents[&source_uri]
+                    .analysis
+                    .diagnostics()
+                    .is_empty(),
+                "{variant}: {:?}",
+                server.documents[&source_uri].analysis.diagnostics()
+            );
+            let tokens = semantic_token_records(&server.semantic_tokens(Some(&json!({
+                "textDocument": { "uri": source_uri }
+            }))));
+            let offset = variant.rfind(call_name).unwrap();
+            let position = byte_offset_to_position(variant, offset);
+            assert!(tokens.contains(&(
+                position.line,
+                position.character,
+                call_name.encode_utf16().count() as u32,
+                3,
+                0,
+            )));
+        }
+
         let mut main_project = project::test_project(
             &root,
             &["tests/behavior.doria"],
@@ -7630,40 +7733,211 @@ describe("🧪 User", function (): void {
             .selected_target
             .active_scopes = vec![doriac::build_plan::SourceScope::Main];
         server.projects.insert(root_uri.clone(), main_project);
-        server.reanalyze_documents();
+        open_stage31_document(&mut server, &source_uri, source);
         assert!(server.documents[&source_uri]
             .analysis
             .diagnostics()
             .iter()
             .any(|diagnostic| diagnostic.code == "E0701"));
 
-        let future = "use Doria\\Std\\Test\\{ expect };\nexpect(1);\n";
-        let mut future_project = project::test_project(
+        let malformed =
+            "use Doria\\Std\\Test\\{ expect };\nfunction helper(): void { expect(1); }\n";
+        let mut malformed_project = project::test_project(
             &root,
             &["tests/behavior.doria"],
             project::PackageSource::Path,
             &[],
         );
-        future_project.packages[0].sources[0].scope = doriac::build_plan::SourceScope::Development;
-        future_project.tooling_build_plan.packages[0].sources[0].scope =
+        malformed_project.packages[0].sources[0].scope =
             doriac::build_plan::SourceScope::Development;
-        future_project
+        malformed_project.tooling_build_plan.packages[0].sources[0].scope =
+            doriac::build_plan::SourceScope::Development;
+        malformed_project
             .tooling_build_plan
             .selected_target
             .active_scopes = vec![
             doriac::build_plan::SourceScope::Main,
             doriac::build_plan::SourceScope::Development,
         ];
-        server.projects.insert(root_uri, future_project);
-        open_stage31_document(&mut server, &source_uri, future);
+        server.projects.insert(root_uri.clone(), malformed_project);
+        open_stage31_document(&mut server, &source_uri, malformed);
         let diagnostics = server.documents[&source_uri].analysis.diagnostics();
         assert_eq!(
             diagnostics
                 .iter()
-                .filter(|diagnostic| diagnostic.code == "E0710")
+                .filter(|diagnostic| diagnostic.code == "E0714")
                 .count(),
             1
         );
+
+        for (invalid, code) in [
+            (
+                "use Doria\\Std\\Test\\expect;\nfunction helper(): void { expect(value: 1)->toEqual(1); }\n",
+                "E0713",
+            ),
+            (
+                "use Doria\\Std\\Test\\expect;\nfunction helper(): void { expect(1)->not->not->toEqual(2); }\n",
+                "E0716",
+            ),
+            (
+                "use Doria\\Std\\Test\\expect;\nfunction helper(): void { expect(1)->not(); }\n",
+                "E0716",
+            ),
+            (
+                "use Doria\\Std\\Test\\expect;\nfunction helper(): void { echo \"😀\"; expect(1)->toEqual(); }\n",
+                "E0717",
+            ),
+            (
+                "use Doria\\Std\\Test\\expect;\nfunction helper(): void { expect(1)->toEqual(value: 1); }\n",
+                "E0717",
+            ),
+            (
+                "use Doria\\Std\\Test\\expect;\nfunction helper(): void { expect(1)->unknownMatcher(); }\n",
+                "E0717",
+            ),
+            (
+                "use Doria\\Std\\Test\\expect;\nfunction helper(): void { let $escaped = expect(1)->toEqual(1); }\n",
+                "E0715",
+            ),
+            (
+                "use Doria\\Std\\Test\\expect;\nfunction helper(): void { expect([1])->toContain(1); }\n",
+                "E0718",
+            ),
+            (
+                "use Doria\\Std\\Test\\expect;\nfunction helper(): void { expect(1)->toBeNull(); }\n",
+                "E0720",
+            ),
+            (
+                "use Doria\\Std\\Test\\expect;\nfunction helper(): void { expect(1)->toBeTrue(); }\n",
+                "E0720",
+            ),
+            (
+                "use Doria\\Std\\Test\\expect;\nfunction helper(): void { expect(1)->toContain(\"x\"); }\n",
+                "E0720",
+            ),
+            (
+                "use Doria\\Std\\Test\\expect;\nfunction helper(): void { expect(1)->toEqual(\"1\"); }\n",
+                "E0420",
+            ),
+            (
+                "use Doria\\Std\\Test\\expect;\nfunction helper(): void { expect(1)->toThrow(); }\n",
+                "E0718",
+            ),
+            (
+                "use Doria\\Std\\Test\\AssertionError;\nfunction helper(): void { let $error = new AssertionError(\"x\"); }\n",
+                "E0719",
+            ),
+        ] {
+            open_stage31_document(&mut server, &source_uri, invalid);
+            let diagnostics = server.documents[&source_uri].analysis.diagnostics();
+            assert!(
+                diagnostics.iter().any(|diagnostic| diagnostic.code == code),
+                "{invalid}: {diagnostics:#?}"
+            );
+        }
+
+        let utf16 = "use Doria\\Std\\Test\\expect;\nfunction helper(): void { echo \"😀\"; expect(1)->toEqual(); }\n";
+        open_stage31_document(&mut server, &source_uri, utf16);
+        let diagnostic = server.documents[&source_uri]
+            .analysis
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.code == "E0717")
+            .expect("UTF-16 matcher diagnostic");
+        let lsp = diagnostic_to_lsp(&source_uri, utf16, diagnostic);
+        let primary = diagnostic
+            .labels
+            .iter()
+            .find(|label| label.role == LabelRole::Primary)
+            .map_or(diagnostic.span, |label| label.span);
+        let expected = byte_offset_to_position(utf16, primary.start);
+        assert_ne!(primary.start, expected.character as usize);
+        assert_eq!(lsp["range"]["start"]["line"], expected.line);
+        assert_eq!(lsp["range"]["start"]["character"], expected.character);
+
+        let repaired =
+            "use Doria\\Std\\Test\\expect;\nfunction helper(): void { expect(1)->toEqual(1); }\n";
+        open_stage31_document(&mut server, &source_uri, repaired);
+        assert!(
+            server.documents[&source_uri]
+                .analysis
+                .diagnostics()
+                .is_empty(),
+            "stale assertion diagnostics must clear after a valid overlay"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_assertion_effects_flow_through_cross_file_helpers() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("doria-lsp-assertion-graph-{nonce}"));
+        fs::create_dir_all(root.join("tests")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let helper_path = root.join("tests/assertions.doria");
+        let consumer_path = root.join("tests/consumer.doria");
+        let helper = "use Doria\\Std\\Test\\expect;\nfunction sharedAssertion(): void { expect(42)->toEqual(42); }\n";
+        let consumer = "function consumer(): void { sharedAssertion(); }\n";
+        fs::write(&helper_path, helper).unwrap();
+        fs::write(&consumer_path, consumer).unwrap();
+
+        let root_uri = file_uri::path_to_file_uri(&root);
+        let helper_uri = file_uri::path_to_file_uri(&helper_path);
+        let consumer_uri = file_uri::path_to_file_uri(&consumer_path);
+        let mut project = project::test_project(
+            &root,
+            &["tests/assertions.doria", "tests/consumer.doria"],
+            project::PackageSource::Path,
+            &[],
+        );
+        for source in &mut project.packages[0].sources {
+            source.scope = doriac::build_plan::SourceScope::Development;
+        }
+        for source in &mut project.tooling_build_plan.packages[0].sources {
+            source.scope = doriac::build_plan::SourceScope::Development;
+        }
+        project.tooling_build_plan.selected_target.active_scopes = vec![
+            doriac::build_plan::SourceScope::Main,
+            doriac::build_plan::SourceScope::Development,
+        ];
+
+        let mut server = stage31_server(&[&root_uri]);
+        server.projects.insert(root_uri, project);
+        open_stage31_document(&mut server, &helper_uri, helper);
+        open_stage31_document(&mut server, &consumer_uri, consumer);
+        assert!(
+            server.documents[&helper_uri]
+                .analysis
+                .diagnostics()
+                .is_empty(),
+            "{:?}",
+            server.documents[&helper_uri].analysis.diagnostics()
+        );
+        assert!(
+            server.documents[&consumer_uri]
+                .analysis
+                .diagnostics()
+                .is_empty(),
+            "{:?}",
+            server.documents[&consumer_uri].analysis.diagnostics()
+        );
+        let hover = server
+            .hover(Some(&params_at(
+                &consumer_uri,
+                consumer,
+                consumer.find("sharedAssertion").unwrap(),
+            )))
+            .expect("cross-file assertion helper hover");
+        let markdown = hover["contents"]["value"]
+            .as_str()
+            .expect("cross-file assertion helper markdown");
+        assert!(markdown.contains("**Test assertions:**"));
+        assert!(markdown.contains("Doria\\Std\\Test\\AssertionError"));
+        assert!(!markdown.contains("throws AssertionError"));
+
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -15,8 +15,8 @@ use doriac::diagnostics::{Diagnostic, DiagnosticSeverity, LabelRole};
 use doriac::enums::{EnumBackingType, EnumBackingValue};
 use doriac::lexer::{Token, TokenKind};
 use doriac::names::{
-    CompilationContext, GlobalReferenceRole, GlobalSymbolFacts, GlobalSymbolId, GlobalSymbolKind,
-    SourceIdentity,
+    CompilationContext, CompilerSymbolIdentity, GlobalReferenceRole, GlobalSymbolFacts,
+    GlobalSymbolId, GlobalSymbolKind, GlobalSymbolOwner, SourceIdentity,
 };
 use doriac::ownership::{
     CaptureAcquisitionKind, ClosureBorrowRoot, ClosureEscapeClassification, ClosureValueProvenance,
@@ -36,6 +36,8 @@ use doriac::types::{
 use crate::string_surface::{string_companion_method, string_property};
 
 const SEMANTIC_TOKEN_FUNCTION: u32 = 3;
+const SEMANTIC_TOKEN_TYPE: u32 = 1;
+const SEMANTIC_TOKEN_PROPERTY: u32 = 2;
 const SEMANTIC_TOKEN_STRING: u32 = 6;
 const SEMANTIC_TOKEN_DECLARATION: u32 = 1;
 
@@ -294,6 +296,7 @@ pub(crate) struct AnalysisSnapshot {
     global_symbols: GlobalSymbolFacts,
     directive_semantic_tokens: Vec<(Span, u32)>,
     attribute_semantic_tokens: Vec<(Span, u32)>,
+    assertion_semantic_tokens: Vec<SemanticTokenSpan>,
     test_semantics: TestSemanticFacts,
     source_semantic_context: Option<SourceSemanticContext>,
     attribute_info: AttributeSemanticInfo,
@@ -1122,11 +1125,16 @@ impl AnalysisSnapshot {
             !test_semantic_tokens
                 .iter()
                 .any(|(test_span, _, _)| span == test_span)
+                && !self
+                    .assertion_semantic_tokens
+                    .iter()
+                    .any(|(assertion_span, _, _)| span == assertion_span)
         });
         let mut tokens = spans
             .into_iter()
             .map(|(span, token_type)| (span, token_type, 0))
             .chain(test_semantic_tokens)
+            .chain(self.assertion_semantic_tokens.iter().copied())
             .collect::<Vec<_>>();
         tokens.sort_by_key(|(span, _, _)| (span.start, span.end));
         tokens.dedup_by_key(|(span, _, _)| (span.start, span.end));
@@ -1343,6 +1351,45 @@ fn test_semantic_tokens(facts: &TestSemanticFacts, source_id: SourceId) -> Vec<S
     tokens
 }
 
+fn compiler_assertion_symbol_tokens(
+    facts: &GlobalSymbolFacts,
+    source_id: SourceId,
+    tokens: &[Token],
+) -> Vec<SemanticTokenSpan> {
+    let mut tokens = facts
+        .references
+        .iter()
+        .filter(|reference| reference.source_span.source == source_id)
+        .filter_map(|reference| {
+            let GlobalSymbolOwner::CompilerKnown(CompilerSymbolIdentity::StandardTest(name)) =
+                &reference.symbol_id.owner
+            else {
+                return None;
+            };
+            let token_type = match name.as_str() {
+                doriac::compiler_known_test::EXPECT | doriac::compiler_known_test::FAIL => {
+                    SEMANTIC_TOKEN_FUNCTION
+                }
+                doriac::compiler_known_test::ASSERTION_ERROR => SEMANTIC_TOKEN_TYPE,
+                _ => return None,
+            };
+            let source_name = reference
+                .source_spelling
+                .rsplit('\\')
+                .next()
+                .unwrap_or(&reference.source_spelling);
+            let span = find_identifier_span(tokens, reference.source_span, source_name)
+                .unwrap_or(reference.source_span);
+            Some((span, token_type, 0))
+        })
+        .collect::<Vec<_>>();
+    tokens.sort_by_key(|(span, token_type, modifiers)| {
+        (span.start, span.end, *token_type, *modifiers)
+    });
+    tokens.dedup();
+    tokens
+}
+
 struct SnapshotBuilder<'a> {
     text: &'a str,
     tokens: &'a [Token],
@@ -1371,6 +1418,7 @@ struct SnapshotBuilder<'a> {
     call_signatures: Vec<CallSignatureContext>,
     semantic_hovers: Vec<SemanticHover>,
     attribute_semantic_tokens: Vec<(Span, u32)>,
+    assertion_semantic_tokens: Vec<SemanticTokenSpan>,
     attribute_parameter_occurrences: Vec<AttributeParameterOccurrence>,
     missing_callables: Vec<MissingCallable>,
     member_occurrences: Vec<MemberOccurrence>,
@@ -1415,6 +1463,7 @@ impl<'a> SnapshotBuilder<'a> {
             call_signatures: Vec::new(),
             semantic_hovers: Vec::new(),
             attribute_semantic_tokens: Vec::new(),
+            assertion_semantic_tokens: Vec::new(),
             attribute_parameter_occurrences: Vec::new(),
             missing_callables: Vec::new(),
             member_occurrences: Vec::new(),
@@ -1440,6 +1489,19 @@ impl<'a> SnapshotBuilder<'a> {
             .map_or_else(TestSemanticFacts::default, |info| {
                 info.test_semantics.clone()
             });
+        if let Some(info) = self.semantic_info {
+            self.assertion_semantic_tokens
+                .extend(compiler_assertion_symbol_tokens(
+                    &info.global_symbols,
+                    self.source_id,
+                    self.tokens,
+                ));
+        }
+        self.assertion_semantic_tokens
+            .sort_by_key(|(span, token_type, modifiers)| {
+                (span.start, span.end, *token_type, *modifiers)
+            });
+        self.assertion_semantic_tokens.dedup();
         let source_semantic_context = self
             .semantic_info
             .and_then(|info| info.source_semantic_contexts.get(&self.source_id).cloned());
@@ -1461,6 +1523,7 @@ impl<'a> SnapshotBuilder<'a> {
             global_symbols: GlobalSymbolFacts::default(),
             directive_semantic_tokens: Vec::new(),
             attribute_semantic_tokens: self.attribute_semantic_tokens,
+            assertion_semantic_tokens: self.assertion_semantic_tokens,
             test_semantics,
             source_semantic_context,
             attribute_info,
@@ -2282,10 +2345,11 @@ impl<'a> SnapshotBuilder<'a> {
         let profile = doriac::CheckedEffectProfile::classify(effects.iter().cloned());
         let required = required_effect_documentation(&profile.required);
         let ambient = ambient_effect_documentation(&profile.ambient);
-        if required.is_empty() && ambient.is_empty() {
+        let test_assertion = test_assertion_effect_documentation(&profile.test_assertion);
+        if required.is_empty() && ambient.is_empty() && test_assertion.is_empty() {
             return;
         }
-        let effects = [required, ambient]
+        let effects = [required, ambient, test_assertion]
             .into_iter()
             .filter(|section| !section.is_empty())
             .map(|section| section.trim().to_string())
@@ -3028,6 +3092,7 @@ impl<'a> SnapshotBuilder<'a> {
         current_class: Option<&str>,
         parent_class: Option<&str>,
     ) {
+        self.collect_assertion_expression_tokens(expression);
         match expression {
             Expr::Variable { name, span } => {
                 if let Some(symbol) = self.resolve_local(name) {
@@ -3553,6 +3618,36 @@ impl<'a> SnapshotBuilder<'a> {
             // expression forms remain diagnostic-safe until their symbol-bearing
             // children need explicit traversal here.
             _ => {}
+        }
+    }
+
+    fn collect_assertion_expression_tokens(&mut self, expression: &Expr) {
+        let Some(info) = self
+            .semantic_info
+            .and_then(|info| info.assertions.get(&expression.span()))
+            .filter(|info| info.terminal_span.source == self.source_id)
+        else {
+            return;
+        };
+
+        self.assertion_semantic_tokens
+            .push((info.member_span, SEMANTIC_TOKEN_FUNCTION, 0));
+        if !info.negated {
+            return;
+        }
+        let Expr::MethodCall { object, .. } = expression else {
+            return;
+        };
+        if let Expr::PropertyAccess {
+            property,
+            member_span,
+            ..
+        } = object.as_ref()
+        {
+            if property == "not" {
+                self.assertion_semantic_tokens
+                    .push((*member_span, SEMANTIC_TOKEN_PROPERTY, 0));
+            }
         }
     }
 
@@ -4607,6 +4702,20 @@ fn ambient_effect_documentation(effects: &[ResolvedType]) -> String {
         .join("\n");
     format!(
         "\n\n**Ambient I/O:**\n\n{effects}\n\nAmbient I/O uses checked runtime transport without requiring source `throws`."
+    )
+}
+
+fn test_assertion_effect_documentation(effects: &[ResolvedType]) -> String {
+    if effects.is_empty() {
+        return String::new();
+    }
+    let effects = effects
+        .iter()
+        .map(|effect| format!("- `{}`", display_resolved_type(effect)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "\n\n**Test assertions:**\n\n{effects}\n\nAssertion failures propagate automatically in development tests and helpers without requiring source `throws`."
     )
 }
 

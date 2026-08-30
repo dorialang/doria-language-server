@@ -6,13 +6,22 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Aligned the language server and official editor fixtures with Native Testing
+  Foundation Slice 2. The server now pins the final Slice 2 compiler authority,
+  projects exact compiler-owned `expect`, `fail`, `AssertionError`, `not`, and
+  terminal matcher semantic tokens, forwards assertion diagnostics unchanged,
+  and presents automatic `TestAssertion` effects without source `throws`.
+  User-defined same-name symbols remain ordinary. The server still has no test
+  parser, matcher type checker, or path-based scope inference; collection/Error
+  matchers and final completion, hover, navigation, and execution UX remain
+  Slice 3 work.
 - Aligned the language server and both official editor clients with Native
   Testing Foundation Slice 1. The server now retains compiler-owned behavioral
   suite/test facts and Baton/compiler source-scope context, publishes exact
   declaration and description semantic tokens for development sources, and
-  keeps future expectation declarations out of completion. No testing parser or
-  source-path inference was added; expectations remain Slice 2 work and final
-  testing completion, hover, and navigation remain deferred to Slice 3.
+  established the compiler-fact boundary later used by Slice 2. No testing
+  parser or source-path inference was added; final testing completion, hover,
+  and navigation remain deferred to Slice 3.
 - Completed Stage 33 project tooling and Phase F by consuming Baton's strict
   schema-1 project document asynchronously, loading complete compiler graphs with
   unsaved overlays, indexing unopened and generated sources, refusing edits to
