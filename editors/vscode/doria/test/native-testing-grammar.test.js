@@ -26,6 +26,10 @@ const rejected = fs.readFileSync(
   ),
   "utf8"
 );
+const slice3 = fs.readFileSync(
+  path.join(__dirname, "..", "..", "..", "fixtures", "native-testing-slice3.doria"),
+  "utf8"
+);
 
 test("presents Slice 2 assertions through ordinary call and member scopes", () => {
   const call = new RegExp(grammar.repository.calls.patterns[0].match);
@@ -40,9 +44,18 @@ test("presents Slice 2 assertions through ordinary call and member scopes", () =
   assert.ok(rejected.includes("expect(1)->not->not->toEqual(2)"));
 });
 
+test("presents Slice 3 collection and Error expectations through ordinary scopes", () => {
+  const method = new RegExp(grammar.repository.accessors.patterns[1].match);
+
+  for (const matcher of ["toHaveCount", "toContain", "toHaveKey", "toHaveValue", "toThrow"]) {
+    assert.match(`->${matcher}(`, method);
+    assert.ok(slice3.includes(`->${matcher}(`));
+  }
+});
+
 test("keeps matcher semantics out of the TextMate grammar", () => {
   const serialized = JSON.stringify(grammar);
-  for (const matcher of ["toEqual", "toBeNull", "toContain", "toThrow"]) {
+  for (const matcher of ["toEqual", "toBeNull", "toContain", "toHaveKey", "toThrow"]) {
     assert.equal(serialized.includes(matcher), false);
   }
 });

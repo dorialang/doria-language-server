@@ -6,22 +6,27 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Completed Native Testing Foundation Slice 3 and the foundation tooling closure.
+  The server now consumes compiler-owned typed matcher candidates for Test-module
+  imports and expectation completion, renders collection and checked-Error hover
+  contracts, exposes authored suite/test hierarchy through document and workspace
+  symbols, preserves normal user navigation, and refuses fake definitions or
+  unsafe renames. VS Code and IntelliJ continue to treat testing syntax as
+  ordinary language presentation rather than maintaining matcher tables.
 - Aligned the language server and official editor fixtures with Native Testing
   Foundation Slice 2. The server now pins the final Slice 2 compiler authority,
   projects exact compiler-owned `expect`, `fail`, `AssertionError`, `not`, and
   terminal matcher semantic tokens, forwards assertion diagnostics unchanged,
   and presents automatic `TestAssertion` effects without source `throws`.
   User-defined same-name symbols remain ordinary. The server still has no test
-  parser, matcher type checker, or path-based scope inference; collection/Error
-  matchers and final completion, hover, navigation, and execution UX remain
-  Slice 3 work.
+  parser, matcher type checker, or path-based scope inference. Slice 3 subsequently
+  completed collection/Error tooling, completion, hover, and navigation.
 - Aligned the language server and both official editor clients with Native
   Testing Foundation Slice 1. The server now retains compiler-owned behavioral
   suite/test facts and Baton/compiler source-scope context, publishes exact
   declaration and description semantic tokens for development sources, and
-  established the compiler-fact boundary later used by Slice 2. No testing
-  parser or source-path inference was added; final testing completion, hover,
-  and navigation remain deferred to Slice 3.
+  established the compiler-fact boundary later used by Slices 2 and 3. No
+  testing parser or source-path inference was added.
 - Completed Stage 33 project tooling and Phase F by consuming Baton's strict
   schema-1 project document asynchronously, loading complete compiler graphs with
   unsaved overlays, indexing unopened and generated sources, refusing edits to
@@ -29,8 +34,8 @@ This project follows the Doria toolchain CalVer.
   Aggregate workspaces are analyzed as isolated member dependency closures, so
   unrelated entrypoints cannot collide while declared dependencies remain navigable.
   Added debounced project watchers, manual refresh, and one Baton path override
-  to both official editor integrations. Native Testing Foundation Slice 1 now
-  follows that work, while Stage 34 remains blocked until the foundation is complete.
+  to both official editor integrations. The Native Testing Foundation followed
+  that work and is now complete; Stage 34 is next.
 
 - Added compiler-resolved go-to-definition and conservative rename for local
   bindings and cross-file methods, properties, class constants, and enum cases,

@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $root = dirname(__DIR__);
-$expectedCompiler = '0cb5cf0c58e100d53311bce3687ff6d116e06be0';
+$expectedCompiler = 'e4f28d5d2f820f3dae3303c298afcaf314257de0';
 
 function slice2_text(string $path): string
 {
@@ -53,7 +53,7 @@ $docs = slice2_text($root . '/README.md')
     . slice2_text($root . '/editors/intellij/doria/README.md');
 
 preg_match('/doriac\s*=\s*\{[^\n]*\brev\s*=\s*"([0-9a-f]{40})"/', $manifest, $pin);
-slice2_require(($pin[1] ?? null) === $expectedCompiler, 'Cargo.toml must pin final Slice-2 Doria.');
+slice2_require(($pin[1] ?? null) === $expectedCompiler, 'Cargo.toml must pin final foundation Doria.');
 slice2_require(
     substr_count($lock, 'rev=' . $expectedCompiler . '#' . $expectedCompiler) >= 3,
     'Cargo.lock must resolve every Doria package to final Slice-2 Doria.',
@@ -99,7 +99,7 @@ foreach ([
 ] as $fixture) {
     slice2_require(str_contains($accepted, $fixture), "accepted Slice-2 fixture is missing {$fixture}.");
 }
-foreach (['not->not', 'toEqual()', 'expect([1])->toContain(1)', 'toThrow()'] as $fixture) {
+foreach (['not->not', 'toEqual()'] as $fixture) {
     slice2_require(str_contains($rejected, $fixture), "rejected Slice-2 fixture is missing {$fixture}.");
 }
 
@@ -115,7 +115,6 @@ foreach ([
     'E0714',
     'E0716',
     'E0717',
-    'E0718',
     'E0719',
     'E0720',
     'E0420',
@@ -138,12 +137,11 @@ slice2_require(
 );
 
 foreach ([
-    'Slices 1 and 2 are complete',
-    'Slice 3 is next',
-    'foundation remains in progress',
-    'Collection/Error matchers',
-    'final testing completion, hover, and navigation',
-    'Stage 34 single class inheritance remains blocked',
+    'All three Native Testing Foundation',
+    'Native Testing Foundation are complete',
+    'collection/Error',
+    'type-directed Test import and matcher completion',
+    'Stage 34 single class inheritance is next',
 ] as $fact) {
     slice2_require(str_contains($docs, $fact), "Slice-2 tooling documentation is missing {$fact}.");
 }

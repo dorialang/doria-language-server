@@ -49,18 +49,18 @@ completion, named-argument completion, evaluated metadata hover, semantic
 tokens, navigation, references, and conservative rename. `#[Test]` records
 metadata but does not run tests; `#[PHPExport]` records metadata but does not
 activate a bridge. Attributes remain compile-time metadata with no runtime
-reflection. Stage 33 and Phase F are complete. Native Testing Foundation Slices
-1 and 2 are complete, Slice 3 is next, and the foundation remains in progress. In
-development sources, behavioral `describe`, `it`, and `test` declarations are
+reflection. Stage 33 and Phase F are complete. All three Native Testing Foundation
+slices are complete. In development sources, behavioral `describe`, `it`, and `test` declarations are
 recognized by the compiler. The server consumes the compiler's typed test facts
 and Baton/compiler source-scope context to publish declaration and description
-semantic tokens. It also projects exact compiler-owned `expect`, `fail`,
-`AssertionError`, `not`, terminal matcher, diagnostic, and automatic assertion-
-effect facts. It does not parse testing syntax, recreate matcher semantics, or
-infer test scope from file paths. Collection/Error matchers and final testing
-completion, hover, and navigation wait for Native Testing Foundation Slice 3.
-Stage 34 single class inheritance remains blocked until the foundation is complete. Ordinary analysis
-remains target-neutral, and highlighting remains presentation only.
+semantic tokens, type-directed Test import and matcher completion, detailed
+testing hovers, nested document symbols, package-qualified workspace symbols,
+and authored navigation. It also projects exact compiler-owned `expect`, `fail`,
+`AssertionError`, `not`, collection/Error matcher, diagnostic, and automatic
+assertion-effect facts. It does not parse testing syntax, recreate matcher
+semantics, infer test scope from file paths, invent Test definitions, or expose
+generated callables. Stage 34 single class inheritance is next. Ordinary
+analysis remains target-neutral, and highlighting remains presentation only.
 
 Project-aware tooling asks Baton asynchronously for its strict schema-1 project
 document and gives each package-rooted dependency closure from the supplied

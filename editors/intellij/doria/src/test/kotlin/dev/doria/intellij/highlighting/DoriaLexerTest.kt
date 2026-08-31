@@ -22,6 +22,21 @@ class DoriaLexerTest : TestCase() {
         assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
     }
 
+    fun testNativeTestingSlice3KeepsMatcherSemanticsInTheLanguageServer() {
+        val fixture = Files.readString(
+            Path.of("..", "..", "fixtures", "native-testing-slice3.doria"),
+        )
+        val tokens = lex(fixture)
+
+        for (name in listOf("toHaveCount", "toContain", "toHaveKey", "toHaveValue", "toThrow")) {
+            for (token in tokens.filter { it.text == name }) {
+                assertEquals(DoriaTokenTypes.METHOD_CALL, token.type)
+            }
+        }
+        assertEquals(DoriaTokenTypes.TYPE_NAME, tokens.last { it.text == "Failure" }.type)
+        assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
+    }
+
     fun testTopLevelInternalDeclarationsKeepModifierAndDeclarationHighlighting() {
         val tokens = lex(
             "internal class Helper {} " +
