@@ -959,15 +959,18 @@ impl AnalysisSnapshot {
         if !self
             .source_semantic_context()
             .is_some_and(SourceSemanticContext::is_development)
-            || !compiler_test_import_context(text, offset)
         {
             return None;
         }
+        let prefix = doriac::compiler_known_test::import_completion_prefix(text, offset)?;
         Some(
             doriac::compiler_known_test::IMPLEMENTED_MEMBERS
                 .iter()
                 .filter_map(|canonical| {
                     let label = canonical.rsplit('\\').next()?.to_string();
+                    if !label.starts_with(&prefix) {
+                        return None;
+                    }
                     let kind = if *canonical == doriac::compiler_known_test::ASSERTION_ERROR {
                         7
                     } else {
@@ -4981,45 +4984,6 @@ fn assertion_receiver_family(actual: &ResolvedType) -> &'static str {
 
 fn compiler_test_module_hover() -> &'static str {
     "`Doria\\Std\\Test`\n\nCompiler-owned development-source testing module. It provides behavioral declarations, expectations, explicit failure, and `AssertionError`; it is not part of the main-source prelude."
-}
-
-fn compiler_test_import_context(text: &str, offset: usize) -> bool {
-    let Some(prefix) = text.get(..offset) else {
-        return false;
-    };
-    const PLACEHOLDER: &str = "__doria_completion";
-    let Ok(tokens) = doriac::lex_source(
-        "test-import-completion.doria",
-        format!("{prefix}{PLACEHOLDER}"),
-    ) else {
-        return false;
-    };
-    let tokens = tokens
-        .into_iter()
-        .filter(|token| !matches!(token.kind, TokenKind::Eof))
-        .collect::<Vec<_>>();
-    let Some(use_index) = tokens
-        .iter()
-        .rposition(|token| matches!(token.kind, TokenKind::Use))
-    else {
-        return false;
-    };
-    let tail = &tokens[use_index + 1..];
-    let expected_segments = doriac::compiler_known_test::NAMESPACE
-        .split('\\')
-        .collect::<Vec<_>>();
-    if tail.len() != expected_segments.len() * 2 + 1
-        || !matches!(&tail.last().unwrap().kind, TokenKind::Identifier(name) if name == PLACEHOLDER)
-    {
-        return false;
-    }
-    expected_segments
-        .iter()
-        .enumerate()
-        .all(|(index, expected)| {
-            matches!(&tail[index * 2].kind, TokenKind::Identifier(actual) if actual == expected)
-                && matches!(tail[index * 2 + 1].kind, TokenKind::Backslash)
-        })
 }
 
 fn compiler_test_member_hover(name: &str) -> Option<&'static str> {

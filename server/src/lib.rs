@@ -1000,26 +1000,29 @@ impl Server {
         if document.text[..offset].ends_with("->") {
             const PLACEHOLDER: &str = "__doria_completion";
             let analyze = |source: &str| {
-                document
-                    .analysis
-                    .source_semantic_context()
-                    .cloned()
-                    .map_or_else(
-                        || {
-                            AnalysisSnapshot::analyze_with_context(
-                                &uri,
-                                source,
-                                document.analysis.compilation_context().clone(),
+                self.analyze_temporary_project_overlay(&uri, source)
+                    .unwrap_or_else(|| {
+                        document
+                            .analysis
+                            .source_semantic_context()
+                            .cloned()
+                            .map_or_else(
+                                || {
+                                    AnalysisSnapshot::analyze_with_context(
+                                        &uri,
+                                        source,
+                                        document.analysis.compilation_context().clone(),
+                                    )
+                                },
+                                |source_context| {
+                                    AnalysisSnapshot::analyze_with_source_context(
+                                        &uri,
+                                        source,
+                                        source_context,
+                                    )
+                                },
                             )
-                        },
-                        |source_context| {
-                            AnalysisSnapshot::analyze_with_source_context(
-                                &uri,
-                                source,
-                                source_context,
-                            )
-                        },
-                    )
+                    })
             };
             let mut call_source = document.text.clone();
             call_source.insert_str(offset, &format!("{PLACEHOLDER}()"));
@@ -1739,6 +1742,63 @@ impl Server {
             return Document::with_source_context(uri, text, version, source_context);
         }
         Document::with_context(uri, text, version, self.compilation_context(uri))
+    }
+
+    fn analyze_temporary_project_overlay(
+        &self,
+        target_uri: &str,
+        target_text: &str,
+    ) -> Option<AnalysisSnapshot> {
+        for root in &self.workspace_roots {
+            let Some(project) = self.projects.get(&root.uri) else {
+                continue;
+            };
+            if !project.packages.iter().any(|package| {
+                uri_is_within(target_uri, &file_uri::path_to_file_uri(&package.root))
+            }) {
+                continue;
+            }
+            let sources = self
+                .documents
+                .iter()
+                .filter(|(uri, _)| {
+                    project.packages.iter().any(|package| {
+                        uri_is_within(uri, &file_uri::path_to_file_uri(&package.root))
+                    })
+                })
+                .map(|(uri, document)| {
+                    (
+                        uri.as_str(),
+                        workspace_relative_source(uri, &root.uri),
+                        if uri == target_uri {
+                            target_text
+                        } else {
+                            document.text.as_str()
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            let open_sources = sources
+                .iter()
+                .map(|(uri, relative_path, text)| OpenSource {
+                    uri,
+                    relative_path: relative_path.clone(),
+                    text,
+                })
+                .collect::<Vec<_>>();
+            for (_, plan) in project.analysis_plans() {
+                let mut session = CompilationSession::default();
+                let Ok(mut graph) =
+                    analyze_project_graph(project, &plan, &open_sources, &mut session)
+                else {
+                    continue;
+                };
+                if let Some(document) = graph.documents.remove(target_uri) {
+                    return Some(document.analysis);
+                }
+            }
+        }
+        None
     }
 
     fn reanalyze_documents(&mut self) {
@@ -8165,6 +8225,57 @@ describe("🧪 User", function (): void {
     }
 
     #[test]
+    fn native_assertion_completion_preserves_cross_file_callable_types() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("doria-lsp-assertion-completion-{nonce}"));
+        fs::create_dir_all(root.join("tests")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let helper_path = root.join("tests/items.doria");
+        let consumer_path = root.join("tests/consumer.doria");
+        let helper = "function makeItems(): List<int> { return [1, 2]; }\n";
+        let consumer =
+            "use Doria\\Std\\Test\\expect;\nfunction check(): void { expect(makeItems())->; }\n";
+        fs::write(&helper_path, helper).unwrap();
+        fs::write(&consumer_path, consumer).unwrap();
+
+        let root_uri = file_uri::path_to_file_uri(&root);
+        let helper_uri = file_uri::path_to_file_uri(&helper_path);
+        let consumer_uri = file_uri::path_to_file_uri(&consumer_path);
+        let mut project = project::test_project(
+            &root,
+            &["tests/items.doria", "tests/consumer.doria"],
+            project::PackageSource::Path,
+            &[],
+        );
+        for source in &mut project.packages[0].sources {
+            source.scope = doriac::build_plan::SourceScope::Development;
+        }
+        for source in &mut project.tooling_build_plan.packages[0].sources {
+            source.scope = doriac::build_plan::SourceScope::Development;
+        }
+        project.tooling_build_plan.selected_target.active_scopes = vec![
+            doriac::build_plan::SourceScope::Main,
+            doriac::build_plan::SourceScope::Development,
+        ];
+
+        let mut server = stage31_server(&[&root_uri]);
+        server.projects.insert(root_uri, project);
+        open_stage31_document(&mut server, &helper_uri, helper);
+        open_stage31_document(&mut server, &consumer_uri, consumer);
+        let offset = consumer.find("->;").unwrap() + 2;
+        let labels = request_completion_labels(&server, &consumer_uri, consumer, offset);
+        for expected in ["toBeEmpty", "toHaveCount", "toContain"] {
+            assert!(labels.contains(expected), "missing {expected}: {labels:?}");
+        }
+        assert!(!labels.contains("toThrow"), "{labels:?}");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn initialized_registers_only_project_structure_watchers() {
         let mut output = Vec::new();
         register_project_watchers(&mut output).unwrap();
@@ -8384,6 +8495,24 @@ describe("🧪 User", function (): void {
                 "test".to_string(),
             ])
         );
+
+        for (source, expected) in [
+            ("use Doria\\Std\\Test\\exp", &["expect"][..]),
+            (
+                "use Doria\\Std\\Test\\{",
+                &["AssertionError", "describe", "expect", "fail", "it", "test"][..],
+            ),
+            ("use Doria\\Std\\Test\\{describe, exp", &["expect"][..]),
+            ("use Doria\\Std\\Test\\{describe, t", &["test"][..]),
+        ] {
+            let development = development_server(uri, source);
+            let labels = request_completion_labels(&development, uri, source, source.len());
+            assert_eq!(
+                labels,
+                expected.iter().map(|label| (*label).to_string()).collect(),
+                "{source}"
+            );
+        }
 
         let mut main = Server::default();
         main.documents.insert(
