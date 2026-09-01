@@ -112,7 +112,10 @@ plugin also receives exact compiler-owned expectation symbols, typed matcher
 completion, collection/Error hovers, authored symbols, diagnostics, and automatic
 assertion effects through the server. It does not parse tests, recreate matcher
 semantics, infer them from paths, or expose generated callables. Stage 34 single
-class inheritance is next. Attribute colors remain presentation-only, while
+class inheritance is complete. The lexer presents `open`, `override`, `extends`,
+and `parent`; compiler-backed semantic tokens and `doria-lsp` own their meaning,
+hierarchy completion, navigation, and conservative rename. Interfaces and traits
+remain deferred to Stage 35, which is next. Attribute colors remain presentation-only, while
 `doria-lsp` supplies compiler-owned schema completion, typed metadata hover,
 semantic tokens, navigation, references, rename, and diagnostics. The plugin
 does not parse attribute or testing semantics, provide runtime reflection, or

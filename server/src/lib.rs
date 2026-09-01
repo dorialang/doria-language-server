@@ -963,6 +963,7 @@ impl Server {
         let Some((uri, document, offset)) = self.uri_document_and_offset(params) else {
             return completion_items();
         };
+        let graph = self.graph_location(&uri).0;
         if let Some(completions) = document
             .analysis
             .compiler_test_import_completions_at_offset(&document.text, offset)
@@ -986,6 +987,67 @@ impl Server {
                 ),
             };
             return indexed_completion_items(completions);
+        }
+        let mut hierarchy_context = document.analysis.hierarchy_context_at_offset(offset);
+        if extends_completion_context(&document.text, offset) {
+            let mut recovered = document.text.clone();
+            recovered.insert_str(offset, "__DoriaCompletionParent {}");
+            let recovered = Some(
+                self.analyze_temporary_project_overlay(&uri, &recovered)
+                    .unwrap_or_else(|| {
+                        AnalysisSnapshot::analyze_with_context(
+                            &uri,
+                            &recovered,
+                            document.analysis.compilation_context().clone(),
+                        )
+                    }),
+            );
+            let recovered_namespace = recovered
+                .as_ref()
+                .and_then(|analysis| analysis.global_symbols().namespace.clone());
+            let recovered_imports = recovered
+                .as_ref()
+                .map(|analysis| {
+                    analysis
+                        .global_symbols()
+                        .imports
+                        .iter()
+                        .map(|import| (import.target.clone(), import.alias.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            return indexed_completion_items(self.document_index.open_class_completions(
+                &uri,
+                hierarchy_context.as_ref(),
+                current_class_name_before_extends(&document.text, offset).as_deref(),
+                recovered_namespace.as_deref(),
+                &recovered_imports,
+            ));
+        }
+        if parent_completion_context(&document.text, offset) {
+            if hierarchy_context.is_none() {
+                let mut recovered = document.text.clone();
+                recovered.insert_str(offset, "__doria_completion();");
+                hierarchy_context = self
+                    .analyze_temporary_project_overlay(&uri, &recovered)
+                    .and_then(|analysis| analysis.hierarchy_context_at_offset(offset));
+            }
+            return indexed_completion_items(
+                hierarchy_context.as_ref().map_or_else(Vec::new, |context| {
+                    self.document_index.parent_completions(&graph, context)
+                }),
+            );
+        }
+        if override_completion_context(&document.text, offset) {
+            if let Some(context) = hierarchy_context
+                .as_ref()
+                .filter(|context| context.method.is_none())
+            {
+                let completions = self.document_index.override_completions(&graph, context);
+                if !completions.is_empty() {
+                    return indexed_completion_items(completions);
+                }
+            }
         }
         if let Some(completions) = document.analysis.member_completions_at_offset(offset) {
             return semantic_completion_items(completions);
@@ -1067,6 +1129,8 @@ impl Server {
                         "kind": candidate.kind,
                         "detail": candidate.detail,
                         "documentation": candidate.documentation,
+                        "insertText": candidate.insert_text,
+                        "insertTextFormat": if candidate.snippet { 2 } else { 1 },
                     }));
                 }
             }
@@ -2000,10 +2064,11 @@ impl Server {
     }
 
     fn rebuild_document_index(&mut self) {
-        self.document_index = OpenDocumentIndex::rebuild(
-            self.all_documents()
-                .map(|(uri, document)| (uri.as_str(), &document.analysis)),
-        );
+        let index =
+            OpenDocumentIndex::rebuild(self.all_documents().map(|(uri, document)| {
+                (self.graph_location(uri).0, uri.as_str(), &document.analysis)
+            }));
+        self.document_index = index;
     }
 
     fn document(&self, uri: &str) -> Option<&Document> {
@@ -2848,6 +2913,8 @@ fn indexed_completion_items(completions: Vec<workspace_index::IndexedCompletion>
                 "kind": completion.kind,
                 "detail": completion.detail,
                 "documentation": completion.documentation,
+                "insertText": completion.insert_text,
+                "insertTextFormat": if completion.snippet { 2 } else { 1 },
             })
         })
         .collect::<Vec<_>>();
@@ -2855,6 +2922,54 @@ fn indexed_completion_items(completions: Vec<workspace_index::IndexedCompletion>
         "isIncomplete": false,
         "items": items,
     })
+}
+
+fn extends_completion_context(text: &str, offset: usize) -> bool {
+    let prefix = text.get(..offset).unwrap_or_default();
+    let line = prefix.rsplit_once('\n').map_or(prefix, |(_, line)| line);
+    let Some((before, after)) = line.rsplit_once("extends") else {
+        return false;
+    };
+    let boundary = before
+        .chars()
+        .last()
+        .is_none_or(|character| !is_identifier_character(character));
+    boundary
+        && !after.contains('{')
+        && after.chars().all(|character| {
+            is_identifier_character(character)
+                || matches!(character, '\\' | '<' | '>' | ',' | ' ' | '\t')
+        })
+}
+
+fn current_class_name_before_extends(text: &str, offset: usize) -> Option<String> {
+    let prefix = text.get(..offset)?;
+    let tokens = doriac::lex_source("<completion>".to_string(), prefix.to_string()).ok()?;
+    tokens
+        .windows(2)
+        .rev()
+        .find_map(|window| match (&window[0].kind, &window[1].kind) {
+            (TokenKind::Class, TokenKind::Identifier(name)) => Some(name.clone()),
+            _ => None,
+        })
+}
+
+fn parent_completion_context(text: &str, offset: usize) -> bool {
+    text.get(..offset)
+        .is_some_and(|prefix| prefix.trim_end().ends_with("parent::"))
+}
+
+fn override_completion_context(text: &str, offset: usize) -> bool {
+    let prefix = text.get(..offset).unwrap_or_default();
+    let line = prefix
+        .rsplit_once('\n')
+        .map_or(prefix, |(_, line)| line)
+        .trim();
+    line.is_empty() || "override".starts_with(line)
+}
+
+fn is_identifier_character(character: char) -> bool {
+    character == '_' || character.is_ascii_alphanumeric()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3381,6 +3496,15 @@ fn integer_conversion_description(companion: &str) -> Option<&'static str> {
 fn hover_description(kind: &TokenKind) -> Option<&'static str> {
     match kind {
         TokenKind::Class => Some("Declares a Doria class."),
+        TokenKind::Open => Some(
+            "Permits subclassing on a class or creates a virtual method slot on a method.",
+        ),
+        TokenKind::Override => Some(
+            "Marks a method as the checked implementation of an inherited open virtual slot.",
+        ),
+        TokenKind::Extends => Some(
+            "Declares the single direct parent of a class. The parent must be visible and open.",
+        ),
         TokenKind::Interface => Some(
             "Declares an interface. The compiler currently provides the compiler-known `Displayable` and `Error` contracts.",
         ),
@@ -3447,7 +3571,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "Reserved declaring-class qualifier and type: `self::member` or a `self` return type.",
         ),
         TokenKind::Parent => Some(
-            "Reserved parent-implementation qualifier. Its semantics land with inheritance in Stage 34.",
+            "Direct parent-implementation qualifier. Calls through `parent::` bypass virtual dispatch.",
         ),
         TokenKind::Trait => Some(
             "Declares accepted trait syntax. Trait composition semantics land in Stage 35.",
@@ -5702,7 +5826,7 @@ class Service
 {
     function __construct(int $id) throws Failure {}
     function load(int $id, string $path): string throws Failure { return $path; }
-    static function open(string $path): string throws Failure { return $path; }
+    static function fetch(string $path): string throws Failure { return $path; }
 }
 
 function lookup(int $id, string $path): string throws Failure
@@ -5721,7 +5845,7 @@ function main(): void
         let $service = new Service(1);
         lookup(2, "free");
         $service->load(3, "method");
-        Service::open("static");
+        Service::fetch("static");
         fail(new Failure("failure"));
     } catch (/* 😀 */ Failure $caught) {
         echo $caught->message;
@@ -5826,9 +5950,9 @@ function relay(take Failure $failure): void throws Failure
                 1,
             ),
             (
-                "Service::open(\"static\")",
+                "Service::fetch(\"static\")",
                 "\"static\"",
-                "static function Service::open(string $path): string throws Failure",
+                "static function Service::fetch(string $path): string throws Failure",
                 0,
             ),
         ];
@@ -8729,5 +8853,552 @@ describe("🧪 suite", function (): void {
         let helper_call = source.rfind("helper()").unwrap();
         let helper_definition = server.definition(Some(&params_at(first_uri, source, helper_call)));
         assert_eq!(helper_definition["uri"], first_uri);
+    }
+
+    #[test]
+    fn stage34_completion_uses_compiler_owned_open_class_facts() {
+        let base_uri = "file:///workspace/base.doria";
+        let child_uri = "file:///workspace/child.doria";
+        let base = "namespace Domain; open class Base<T> {} class Closed {}";
+        let child = "namespace App; use Domain\\Base; class Child extends ";
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, base_uri, base);
+        open_stage31_document(&mut server, child_uri, child);
+
+        let completion = server.completion(Some(&params_at(child_uri, child, child.len())));
+        let items = completion["items"].as_array().expect("extends completions");
+        let base = items
+            .iter()
+            .find(|item| item["label"] == "Base")
+            .unwrap_or_else(|| panic!("open imported parent: {items:#?}"));
+        assert_eq!(base["insertTextFormat"], 2);
+        assert!(base["insertText"].as_str().unwrap().contains("<${1:T}>"));
+        assert!(!items.iter().any(|item| item["label"] == "Closed"));
+        assert!(!items.iter().any(|item| item["label"] == "Child"));
+    }
+
+    #[test]
+    fn stage34_override_completion_preserves_contract_and_omits_defaults() {
+        let uri = "file:///workspace/override.doria";
+        let source = r#"class StorageError implements Error { string $message = "storage"; }
+open class Model
+{
+    open writable function save<T implements Displayable>(take T $value, int $retries = 3): string throws StorageError { return "ok"; }
+}
+class Post extends Model
+{
+
+}
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+        let offset = source.find("\n\n}").unwrap() + 1;
+        let completion = server.completion(Some(&params_at(uri, source, offset)));
+        let save = completion["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["label"] == "save")
+            .expect("override candidate");
+        let inserted = save["insertText"].as_str().expect("override snippet");
+        assert!(inserted.contains("override writable function save<T implements Displayable>"));
+        assert!(inserted.contains("take T $value, int $retries"));
+        assert!(inserted.contains(": string throws StorageError"));
+        assert!(!inserted.contains("= 3"));
+        assert!(!inserted.contains("open override"));
+    }
+
+    #[test]
+    fn stage34_override_completion_is_not_offered_inside_a_method_body() {
+        let uri = "file:///workspace/override-method.doria";
+        let source = r#"open class Model
+{
+    open function save(): void {}
+}
+class Post extends Model
+{
+    function work(): void
+    {
+
+    }
+}
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+        let offset = source.find("\n\n    }").unwrap() + 1;
+        let completion = server.completion(Some(&params_at(uri, source, offset)));
+        assert!(completion["items"]
+            .as_array()
+            .is_none_or(|items| !items.iter().any(|item| item["label"] == "save")));
+    }
+
+    #[test]
+    fn stage34_parent_completion_respects_instance_static_and_lifecycle_contexts() {
+        let uri = "file:///workspace/parent-completion.doria";
+        let source = r#"open class Grand
+{
+    function rootValue(): int { return 1; }
+    static function rootCount(): int { return 1; }
+}
+open class Base extends Grand
+{
+    const int LIMIT = 1;
+    static int $total = 0;
+    function __construct() {}
+    function __destruct() {}
+    function value(): int { return 1; }
+    static function count(): int { return 1; }
+}
+class Child extends Base
+{
+    function __construct() { parent::__construct(); }
+    function value(): int { return parent::value(); }
+    static function count(): int { return parent::count(); }
+}
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+
+        let constructor = source.find("parent::__construct").unwrap() + "parent::".len();
+        let constructor_labels = request_completion_labels(&server, uri, source, constructor);
+        assert!(constructor_labels.contains("__construct"));
+        assert!(!constructor_labels.contains("__destruct"));
+
+        let instance = source.find("parent::value").unwrap() + "parent::".len();
+        let instance_labels = request_completion_labels(&server, uri, source, instance);
+        assert!(instance_labels.contains("value"));
+        assert!(instance_labels.contains("count"));
+        assert!(instance_labels.contains("LIMIT"));
+        assert!(instance_labels.contains("rootValue"));
+        assert!(instance_labels.contains("rootCount"));
+
+        let static_call = source.find("parent::count").unwrap() + "parent::".len();
+        let static_labels = request_completion_labels(&server, uri, source, static_call);
+        assert!(!static_labels.contains("value"));
+        assert!(static_labels.contains("count"));
+        assert!(static_labels.contains("LIMIT"));
+        assert!(!static_labels.contains("rootValue"));
+        assert!(static_labels.contains("rootCount"));
+    }
+
+    #[test]
+    fn stage34_hover_explains_hierarchy_and_direct_parent_dispatch() {
+        let uri = "file:///workspace/hover.doria";
+        let source = r#"open class Base { open function value(): int { return 1; } }
+class Child extends Base { override function value(): int { return parent::value(); } }
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+
+        let base = server
+            .hover(Some(&params_at(uri, source, source.find("Base").unwrap())))
+            .unwrap();
+        assert!(base["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("Subclassing:** Permitted"));
+        let child = server
+            .hover(Some(&params_at(uri, source, source.find("Child").unwrap())))
+            .unwrap();
+        assert!(child["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("Direct Parent:** `Base`"));
+        let parent_call = source.find("parent::value").unwrap() + "parent::".len();
+        let hover = server
+            .hover(Some(&params_at(uri, source, parent_call)))
+            .unwrap();
+        let markdown = hover["contents"]["value"].as_str().unwrap();
+        assert!(markdown.contains("Base::value"));
+        assert!(markdown.contains("bypasses virtual dispatch"));
+        assert!(!markdown.contains("vtable"));
+    }
+
+    #[test]
+    fn stage34_definition_keeps_exact_and_inherited_targets_distinct() {
+        let uri = "file:///workspace/definition.doria";
+        let source = r#"open class Base
+{
+    const int LIMIT = 2;
+    static int $total = 3;
+    int $id = 1;
+    open function value(): int { return $this->id; }
+}
+class Child extends Base
+{
+    override function value(): int { return parent::value() + $this->id; }
+    static function count(): int { return self::total + self::LIMIT; }
+}
+function main(): void { let $child = new Child(); echo $child->value(); }
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+        let override_name =
+            source.find("override function value").unwrap() + "override function ".len();
+        let own = server.definition(Some(&params_at(uri, source, override_name)));
+        assert_eq!(
+            own["range"]["start"],
+            params_at(uri, source, override_name)["position"]
+        );
+        let parent_call = source.find("parent::value").unwrap() + "parent::".len();
+        let parent = server.definition(Some(&params_at(uri, source, parent_call)));
+        let root_name = source.find("open function value").unwrap() + "open function ".len();
+        assert_eq!(
+            parent["range"]["start"],
+            params_at(uri, source, root_name)["position"]
+        );
+        let inherited_property = source.rfind("$this->id").unwrap() + "$this->".len();
+        let property = server.definition(Some(&params_at(uri, source, inherited_property)));
+        let property_name = source.find("$id").unwrap();
+        assert_eq!(
+            property["range"]["start"],
+            params_at(uri, source, property_name)["position"]
+        );
+        let inherited_static = source.rfind("self::total").unwrap() + "self::".len();
+        let static_property = server.definition(Some(&params_at(uri, source, inherited_static)));
+        let static_property_name = source.find("$total").unwrap();
+        assert_eq!(
+            static_property["range"]["start"],
+            params_at(uri, source, static_property_name)["position"]
+        );
+        let inherited_constant = source.rfind("self::LIMIT").unwrap() + "self::".len();
+        let constant = server.definition(Some(&params_at(uri, source, inherited_constant)));
+        let constant_name = source.find("LIMIT").unwrap();
+        assert_eq!(
+            constant["range"]["start"],
+            params_at(uri, source, constant_name)["position"]
+        );
+    }
+
+    #[test]
+    fn stage34_virtual_references_and_rename_cover_the_complete_slot_family() {
+        let uri = "file:///workspace/rename.doria";
+        let source = r#"open class Base { open function value(): int { return 1; } }
+class Child extends Base { override function value(): int { return parent::value(); } }
+function main(): void { Base $base = new Child(); echo $base->value(); }
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+        let root = source.find("open function value").unwrap() + "open function ".len();
+        let references = server.references(Some(&params_at(uri, source, root)));
+        assert_eq!(references.as_array().map(Vec::len), Some(4));
+        let rename = server.rename(Some(&json!({
+            "textDocument": { "uri": uri },
+            "position": params_at(uri, source, root)["position"].clone(),
+            "newName": "measure",
+        })));
+        assert_eq!(rename["changes"][uri].as_array().map(Vec::len), Some(4));
+        assert!(rename["changes"][uri]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|edit| edit["newText"] == "measure"));
+    }
+
+    #[test]
+    fn stage34_virtual_families_are_scoped_to_their_compilation_graph() {
+        let first_uri = "file:///first/source.doria";
+        let second_uri = "file:///second/source.doria";
+        let source = r#"open class Base { open function value(): int { return 1; } }
+class Child extends Base { override function value(): int { return parent::value(); } }
+function main(): void { Base $base = new Child(); echo $base->value(); }
+"#;
+        let mut server = stage31_server(&["file:///first", "file:///second"]);
+        open_stage31_document(&mut server, first_uri, source);
+        open_stage31_document(&mut server, second_uri, source);
+        let root = source.find("open function value").unwrap() + "open function ".len();
+
+        let references = server.references(Some(&params_at(first_uri, source, root)));
+        let references = references.as_array().expect("virtual references");
+        assert_eq!(references.len(), 4);
+        assert!(references
+            .iter()
+            .all(|reference| reference["uri"] == first_uri));
+
+        let rename = server.rename(Some(&json!({
+            "textDocument": { "uri": first_uri },
+            "position": params_at(first_uri, source, root)["position"].clone(),
+            "newName": "measure",
+        })));
+        assert_eq!(
+            rename["changes"][first_uri].as_array().map(Vec::len),
+            Some(4)
+        );
+        assert!(rename["changes"].get(second_uri).is_none());
+    }
+
+    #[test]
+    fn stage34_virtual_rename_preserves_graph_and_source_edit_safety() {
+        let uri = "file:///workspace/safety.doria";
+        let source = r#"open class Base { open function value(): int { return 1; } }
+class Child extends Base { override function value(): int { return parent::value(); } }
+class Broken extends Vendor\Missing {}
+"#;
+        let root = source.find("open function value").unwrap() + "open function ".len();
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+        let rename = |server: &Server| {
+            server.rename(Some(&json!({
+                "textDocument": { "uri": uri },
+                "position": params_at(uri, source, root)["position"].clone(),
+                "newName": "measure",
+            })))
+        };
+        assert_eq!(
+            rename(&server),
+            Value::Null,
+            "incomplete graph must refuse rename"
+        );
+
+        let complete = source.replace("class Broken extends Vendor\\Missing {}", "");
+        open_stage31_document(&mut server, uri, &complete);
+        server
+            .source_edit_policies
+            .insert(uri.to_string(), SourceEditPolicy::Generated);
+        assert_eq!(
+            rename(&server),
+            Value::Null,
+            "generated source must refuse rename"
+        );
+        server
+            .source_edit_policies
+            .insert(uri.to_string(), SourceEditPolicy::DependencyCache);
+        assert_eq!(
+            rename(&server),
+            Value::Null,
+            "dependency source must refuse rename"
+        );
+    }
+
+    #[test]
+    fn stage34_cross_file_hierarchy_uses_one_compiler_graph() {
+        let base_uri = "file:///workspace/base-cross-file.doria";
+        let child_uri = "file:///workspace/child-cross-file.doria";
+        let base = "open class Base { open function value(): int { return 1; } }";
+        let child = "class Child extends Base { override function value(): int { return parent::value(); } }";
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, base_uri, base);
+        open_stage31_document(&mut server, child_uri, child);
+
+        let parent_type = child.find("Base").unwrap();
+        assert_eq!(
+            server.definition(Some(&params_at(child_uri, child, parent_type)))["uri"],
+            base_uri
+        );
+        let parent_call = child.find("parent::value").unwrap() + "parent::".len();
+        assert_eq!(
+            server.definition(Some(&params_at(child_uri, child, parent_call)))["uri"],
+            base_uri
+        );
+        let root = base.find("value").unwrap();
+        let references = server.references(Some(&params_at(base_uri, base, root)));
+        assert_eq!(references.as_array().map(Vec::len), Some(3));
+
+        let base_class = base.find("Base").unwrap();
+        let rename = server.rename(Some(&json!({
+            "textDocument": { "uri": base_uri },
+            "position": params_at(base_uri, base, base_class)["position"].clone(),
+            "newName": "ParentBase",
+        })));
+        assert_eq!(
+            rename["changes"][base_uri].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            rename["changes"][child_uri].as_array().map(Vec::len),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn stage34_cross_package_hierarchy_preserves_navigation_and_edit_safety() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("doria-lsp-stage34-{nonce}"));
+        let app_root = root.join("app");
+        let base_root = root.join("base");
+        fs::create_dir_all(app_root.join("src")).unwrap();
+        fs::create_dir_all(base_root.join("src")).unwrap();
+        let child_path = app_root.join("src/Child.doria");
+        let base_path = base_root.join("src/Base.doria");
+        let child_source = r#"namespace App;
+use Lib\Base;
+class Child extends Base
+{
+    override function value(): int { return parent::value(); }
+}
+"#;
+        let base_source = r#"namespace Lib;
+open class Base
+{
+    open function value(): int { return 1; }
+}
+"#;
+        fs::write(&child_path, child_source).unwrap();
+        fs::write(&base_path, base_source).unwrap();
+
+        let app_root = app_root.canonicalize().unwrap();
+        let base_root = base_root.canonicalize().unwrap();
+        let child_path = child_path.canonicalize().unwrap();
+        let base_path = base_path.canonicalize().unwrap();
+        let child_uri = file_uri::path_to_file_uri(&child_path);
+        let base_uri = file_uri::path_to_file_uri(&base_path);
+        let root_uri = file_uri::path_to_file_uri(&app_root);
+        let mut project = project::test_project(
+            &app_root,
+            &["src/Child.doria"],
+            project::PackageSource::Path,
+            &[],
+        );
+
+        let mut dependency_package = project.packages[0].clone();
+        dependency_package.package = "acme/base".to_string();
+        dependency_package.compiler_package = "acme/base".to_string();
+        dependency_package.root = base_root.clone();
+        dependency_package.manifest = base_root.join("Baton.toml");
+        dependency_package.source = project::PackageSource::Git;
+        dependency_package.dependencies.clear();
+        dependency_package.sources[0].identity = "acme/base:src/Base.doria".to_string();
+        dependency_package.sources[0].path = base_path.clone();
+        project.packages[0]
+            .dependencies
+            .push(project::ProjectDependency {
+                package: "acme/base".to_string(),
+                kind: doriac::build_plan::DependencyKind::Normal,
+            });
+        project.packages.push(dependency_package);
+
+        let mut dependency_plan = project.tooling_build_plan.packages[0].clone();
+        dependency_plan.identity = "acme/base".to_string();
+        dependency_plan.root = base_root.display().to_string();
+        dependency_plan.dependencies.clear();
+        dependency_plan.sources[0].identity = "acme/base:src/Base.doria".to_string();
+        dependency_plan.sources[0].path = "src/Base.doria".to_string();
+        project.tooling_build_plan.packages[0]
+            .dependencies
+            .push(doriac::build_plan::Dependency {
+                package: "acme/base".to_string(),
+                kind: doriac::build_plan::DependencyKind::Normal,
+            });
+        project.tooling_build_plan.packages.push(dependency_plan);
+
+        let mut session = CompilationSession::default();
+        analyze_project_graph(
+            &project,
+            &project.tooling_build_plan,
+            &[OpenSource {
+                uri: &child_uri,
+                relative_path: "src/Child.doria".to_string(),
+                text: child_source,
+            }],
+            &mut session,
+        )
+        .unwrap_or_else(|failure| panic!("cross-package hierarchy: {:?}", failure.diagnostics));
+
+        let mut server = stage31_server(&[&root_uri]);
+        server.projects.insert(root_uri, project);
+        open_stage31_document(&mut server, &child_uri, child_source);
+        assert!(server.documents[&child_uri]
+            .analysis
+            .diagnostics()
+            .is_empty());
+
+        let parent_type = child_source.rfind("Base").unwrap();
+        assert_eq!(
+            server.definition(Some(&params_at(&child_uri, child_source, parent_type)))["uri"],
+            base_uri
+        );
+        let parent_call = child_source.find("parent::value").unwrap() + "parent::".len();
+        let hover = server
+            .hover(Some(&params_at(&child_uri, child_source, parent_call)))
+            .expect("cross-package parent call hover");
+        assert!(hover["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("Lib\\Base::value"));
+
+        let base_method = base_source.find("open function value").unwrap() + "open function ".len();
+        assert_eq!(
+            server.rename(Some(&json!({
+                "textDocument": { "uri": base_uri },
+                "position": params_at(&base_uri, base_source, base_method)["position"].clone(),
+                "newName": "measure",
+            }))),
+            Value::Null,
+            "a virtual family in a Git dependency must remain readonly"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stage34_semantic_tokens_and_utf16_diagnostics_remain_compiler_owned() {
+        let uri = "file:///workspace/semantic.doria";
+        let source = "open class Base { open function save(): void {} }\nclass Child extends Base { override function save(): void { parent::save(); } }";
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+        let tokens = semantic_token_records(&server.semantic_tokens(Some(&json!({
+            "textDocument": { "uri": uri }
+        }))));
+        for needle in ["open", "extends", "override", "parent"] {
+            let offset = source.find(needle).unwrap();
+            let position = byte_offset_to_position(source, offset);
+            assert!(
+                tokens.iter().any(|token| token.0 == position.line
+                    && token.1 == position.character
+                    && token.3 == 4),
+                "missing {needle}: {tokens:?}"
+            );
+        }
+
+        let invalid = "// 📦\nopen class Base { open function save(int $value): int { return $value; } } class Child extends Base { override function save(string $value): int { return 1; } }";
+        let compiler = AnalysisSnapshot::analyze(uri, invalid);
+        let compiler_mismatch = compiler
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.code == "E0729")
+            .expect("compiler override mismatch");
+        let diagnostics = diagnostics_for_document(uri, invalid);
+        let mismatch = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic["code"] == "E0729")
+            .expect("override mismatch");
+        let expected = byte_offset_to_position(invalid, compiler_mismatch.span.start);
+        assert_eq!(mismatch["range"]["start"]["line"], expected.line);
+        assert_eq!(mismatch["range"]["start"]["character"], expected.character);
+        assert!(mismatch["relatedInformation"]
+            .as_array()
+            .is_some_and(|locations| !locations.is_empty()));
+    }
+
+    #[test]
+    fn stage34_compiler_diagnostics_and_incremental_refresh_do_not_go_stale() {
+        for (source, code) in [
+            ("class Base {} class Child extends Base {}", "E0722"),
+            ("open class Base { open function f(): void {} } class Child extends Base { function f(): void {} }", "E0726"),
+            ("open class Base { open function f(int $v): int { return $v; } } class Child extends Base { override function f(string $v): int { return 1; } }", "E0729"),
+            ("open class Base { function __construct(int $v) {} } class Child extends Base {}", "E0732"),
+        ] {
+            let diagnostics = diagnostics_for_document("file:///workspace/error.doria", source);
+            assert!(diagnostics.iter().any(|diagnostic| diagnostic["code"] == code), "missing {code}: {diagnostics:#?}");
+        }
+
+        let uri = "file:///workspace/incremental.doria";
+        let broken = "class Base {} class Child extends Base {}";
+        let fixed = "open class Base {} class Child extends Base {}";
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, broken);
+        assert!(server.documents[uri]
+            .analysis
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0722"));
+        open_stage31_document(&mut server, uri, fixed);
+        assert!(server.documents[uri].analysis.diagnostics().is_empty());
+        let parent_name = fixed.rfind("Base").unwrap();
+        let definition = server.definition(Some(&params_at(uri, fixed, parent_name)));
+        assert_eq!(definition["uri"], uri);
     }
 }

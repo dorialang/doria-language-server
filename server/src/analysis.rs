@@ -27,7 +27,7 @@ use doriac::semantics::{
     SemanticInfo,
 };
 use doriac::source::{SourceFile, SourceId, Span};
-use doriac::symbols::{BindingKind, BindingOwnership};
+use doriac::symbols::{BindingKind, BindingOwnership, ReceiverMode};
 use doriac::testing::{SourceSemanticContext, TestSemanticFacts};
 use doriac::types::{
     FunctionInvocationMode, ResolvedType, SharedHandleKind, TypeRef, TypeRegistry,
@@ -40,8 +40,25 @@ const SEMANTIC_TOKEN_TYPE: u32 = 1;
 const SEMANTIC_TOKEN_PROPERTY: u32 = 2;
 const SEMANTIC_TOKEN_STRING: u32 = 6;
 const SEMANTIC_TOKEN_DECLARATION: u32 = 1;
+const SEMANTIC_TOKEN_KEYWORD: u32 = 4;
 
 pub(crate) type SemanticTokenSpan = (Span, u32, u32);
+
+trait AstTypeName {
+    fn ast_type_name(&self) -> &str;
+}
+
+impl AstTypeName for String {
+    fn ast_type_name(&self) -> &str {
+        self
+    }
+}
+
+impl AstTypeName for TypeRef {
+    fn ast_type_name(&self) -> &str {
+        &self.name
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct SemanticHover {
@@ -297,6 +314,7 @@ pub(crate) struct AnalysisSnapshot {
     directive_semantic_tokens: Vec<(Span, u32)>,
     attribute_semantic_tokens: Vec<(Span, u32)>,
     assertion_semantic_tokens: Vec<SemanticTokenSpan>,
+    hierarchy_semantic_tokens: Vec<SemanticTokenSpan>,
     assertion_completions: Vec<(Span, doriac::semantics::AssertionCompletionInfo)>,
     test_semantics: TestSemanticFacts,
     source_semantic_context: Option<SourceSemanticContext>,
@@ -317,6 +335,8 @@ pub(crate) struct AnalysisSnapshot {
     class_declarations: Vec<ClassDeclaration>,
     member_occurrences: Vec<MemberOccurrence>,
     member_parents: Vec<MemberParent>,
+    hierarchy_classes: Vec<HierarchyClass>,
+    hierarchy_members: Vec<HierarchyMember>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -354,6 +374,9 @@ pub(crate) struct MemberOccurrence {
     pub(crate) identity: MemberIdentity,
     pub(crate) span: Span,
     pub(crate) declaration: bool,
+    pub(crate) exact_declaration: Option<Span>,
+    pub(crate) virtual_root: Option<Span>,
+    pub(crate) direct_parent: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -374,6 +397,49 @@ pub(crate) struct SemanticCompletion {
     pub(crate) kind: u32,
     pub(crate) detail: String,
     pub(crate) documentation: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HierarchyClass {
+    pub(crate) identity: GlobalSymbolId,
+    pub(crate) source_name: String,
+    pub(crate) qualified_name: String,
+    pub(crate) type_parameters: Vec<String>,
+    pub(crate) is_open: bool,
+    pub(crate) access: MemberAccess,
+    pub(crate) ancestors: Vec<String>,
+    pub(crate) body_span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HierarchyMember {
+    pub(crate) owner: GlobalSymbolId,
+    pub(crate) name: String,
+    pub(crate) kind: MemberKind,
+    pub(crate) declaration: Span,
+    pub(crate) detail: String,
+    pub(crate) documentation: Option<String>,
+    pub(crate) access: MemberAccess,
+    pub(crate) is_static: bool,
+    pub(crate) writable_receiver: bool,
+    pub(crate) is_open: bool,
+    pub(crate) is_override: bool,
+    pub(crate) virtual_root: Option<Span>,
+    pub(crate) overridden_declaration: Option<Span>,
+    pub(crate) override_stub: Option<String>,
+    pub(crate) body_span: Option<Span>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HierarchyContext {
+    pub(crate) class: GlobalSymbolId,
+    pub(crate) method: Option<HierarchyMethodContext>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HierarchyMethodContext {
+    pub(crate) is_static: bool,
+    pub(crate) constructor: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -566,6 +632,40 @@ impl AnalysisSnapshot {
 
     pub(crate) fn member_parents(&self) -> &[MemberParent] {
         &self.member_parents
+    }
+
+    pub(crate) fn hierarchy_classes(&self) -> &[HierarchyClass] {
+        &self.hierarchy_classes
+    }
+
+    pub(crate) fn hierarchy_members(&self) -> &[HierarchyMember] {
+        &self.hierarchy_members
+    }
+
+    pub(crate) fn hierarchy_context_at_offset(&self, offset: usize) -> Option<HierarchyContext> {
+        let class = self
+            .hierarchy_classes
+            .iter()
+            .filter(|class| span_contains(class.body_span, offset))
+            .min_by_key(|class| class.body_span.end.saturating_sub(class.body_span.start))?;
+        let method = self
+            .hierarchy_members
+            .iter()
+            .filter(|member| member.owner == class.identity)
+            .filter_map(|member| {
+                member
+                    .body_span
+                    .filter(|span| span_contains(*span, offset))
+                    .map(|_| HierarchyMethodContext {
+                        is_static: member.is_static,
+                        constructor: member.name == "__construct",
+                    })
+            })
+            .next();
+        Some(HierarchyContext {
+            class: class.identity.clone(),
+            method,
+        })
     }
 
     pub(crate) fn missing_callable_at_offset(&self, offset: usize) -> Option<&MissingCallable> {
@@ -1219,6 +1319,7 @@ impl AnalysisSnapshot {
             .map(|(span, token_type)| (span, token_type, 0))
             .chain(test_semantic_tokens)
             .chain(self.assertion_semantic_tokens.iter().copied())
+            .chain(self.hierarchy_semantic_tokens.iter().copied())
             .collect::<Vec<_>>();
         tokens.sort_by_key(|(span, _, _)| (span.start, span.end));
         tokens.dedup_by_key(|(span, _, _)| (span.start, span.end));
@@ -1489,6 +1590,7 @@ struct SnapshotBuilder<'a> {
     class_parents: HashMap<String, String>,
     class_members: HashMap<String, Vec<ClassMemberCompletion>>,
     class_property_symbols: HashMap<(String, String), usize>,
+    class_static_property_symbols: HashMap<(String, String), usize>,
     class_constant_symbols: HashMap<(String, String), usize>,
     enum_case_completions: HashMap<String, Vec<SemanticCompletion>>,
     enum_member_completions: HashMap<String, Vec<SemanticCompletion>>,
@@ -1503,11 +1605,14 @@ struct SnapshotBuilder<'a> {
     semantic_hovers: Vec<SemanticHover>,
     attribute_semantic_tokens: Vec<(Span, u32)>,
     assertion_semantic_tokens: Vec<SemanticTokenSpan>,
+    hierarchy_semantic_tokens: Vec<SemanticTokenSpan>,
     assertion_completions: Vec<(Span, doriac::semantics::AssertionCompletionInfo)>,
     attribute_parameter_occurrences: Vec<AttributeParameterOccurrence>,
     missing_callables: Vec<MissingCallable>,
     member_occurrences: Vec<MemberOccurrence>,
     member_parents: Vec<MemberParent>,
+    hierarchy_classes: Vec<HierarchyClass>,
+    hierarchy_members: Vec<HierarchyMember>,
     statement_expression_span: Option<Span>,
     when_depth: usize,
 }
@@ -1535,6 +1640,7 @@ impl<'a> SnapshotBuilder<'a> {
             class_parents: HashMap::new(),
             class_members: HashMap::new(),
             class_property_symbols: HashMap::new(),
+            class_static_property_symbols: HashMap::new(),
             class_constant_symbols: HashMap::new(),
             enum_case_completions: HashMap::new(),
             enum_member_completions: HashMap::new(),
@@ -1549,11 +1655,14 @@ impl<'a> SnapshotBuilder<'a> {
             semantic_hovers: Vec::new(),
             attribute_semantic_tokens: Vec::new(),
             assertion_semantic_tokens: Vec::new(),
+            hierarchy_semantic_tokens: Vec::new(),
             assertion_completions: Vec::new(),
             attribute_parameter_occurrences: Vec::new(),
             missing_callables: Vec::new(),
             member_occurrences: Vec::new(),
             member_parents: Vec::new(),
+            hierarchy_classes: Vec::new(),
+            hierarchy_members: Vec::new(),
             statement_expression_span: None,
             when_depth: 0,
         }
@@ -1617,6 +1726,7 @@ impl<'a> SnapshotBuilder<'a> {
             directive_semantic_tokens: Vec::new(),
             attribute_semantic_tokens: self.attribute_semantic_tokens,
             assertion_semantic_tokens: self.assertion_semantic_tokens,
+            hierarchy_semantic_tokens: self.hierarchy_semantic_tokens,
             assertion_completions: self.assertion_completions,
             test_semantics,
             source_semantic_context,
@@ -1637,6 +1747,8 @@ impl<'a> SnapshotBuilder<'a> {
             class_declarations,
             member_occurrences: self.member_occurrences,
             member_parents: self.member_parents,
+            hierarchy_classes: self.hierarchy_classes,
+            hierarchy_members: self.hierarchy_members,
         }
     }
 
@@ -2289,11 +2401,32 @@ impl<'a> SnapshotBuilder<'a> {
 
     fn collect_class(&mut self, class: &ClassDecl) {
         let selection_span = self.declaration_name_span(class.span, &class.name, TokenKind::Class);
+        if let Some(span) = class.open_span {
+            self.hierarchy_semantic_tokens
+                .push((span, SEMANTIC_TOKEN_KEYWORD, 0));
+        }
+        if let Some(span) = class.extends_span {
+            self.hierarchy_semantic_tokens
+                .push((span, SEMANTIC_TOKEN_KEYWORD, 0));
+        }
+        if let Some(span) = class.parent_span {
+            self.hierarchy_semantic_tokens
+                .push((span, SEMANTIC_TOKEN_TYPE, 0));
+        }
         let conforms_to_error = class
             .implements
             .iter()
             .any(|interface| interface == "Error");
         let mut documentation = phpdoc_before(self.text, class.span.start);
+        if let Some(hierarchy) = self
+            .semantic_info
+            .and_then(|info| info.class_hierarchy.get(&class.span))
+        {
+            append_documentation(
+                &mut documentation,
+                &class_hierarchy_documentation(hierarchy),
+            );
+        }
         if conforms_to_error {
             append_documentation(
                 &mut documentation,
@@ -2308,14 +2441,34 @@ impl<'a> SnapshotBuilder<'a> {
             SymbolKind::Plain,
         );
         self.classes.insert(class.name.clone(), symbol);
+        if let (Some(identity), Some(hierarchy)) = (
+            self.member_owner(&class.name, class.name_span, true),
+            self.semantic_info
+                .and_then(|info| info.class_hierarchy.get(&class.span)),
+        ) {
+            self.hierarchy_classes.push(HierarchyClass {
+                identity,
+                source_name: class.name.clone(),
+                qualified_name: hierarchy.name.clone(),
+                type_parameters: class
+                    .type_params
+                    .iter()
+                    .map(|parameter| parameter.name.clone())
+                    .collect(),
+                is_open: hierarchy.is_open,
+                access: class.access,
+                ancestors: hierarchy.ancestors.clone(),
+                body_span: class.span,
+            });
+        }
         if let Some(parent) = &class.parent {
             self.class_parents
-                .insert(class.name.clone(), parent.clone());
+                .insert(class.name.clone(), parent.ast_type_name().to_string());
             if let (Some(child), Some(parent)) = (
                 self.member_owner(&class.name, class.name_span, true),
                 class
                     .parent_span
-                    .and_then(|span| self.member_owner(parent, span, false)),
+                    .and_then(|span| self.member_owner(parent.ast_type_name(), span, false)),
             ) {
                 self.member_parents.push(MemberParent { child, parent });
             }
@@ -2357,6 +2510,10 @@ impl<'a> SnapshotBuilder<'a> {
                     );
                     self.class_property_symbols
                         .insert((class.name.clone(), property.name.clone()), property_symbol);
+                    if property.is_static {
+                        self.class_static_property_symbols
+                            .insert((class.name.clone(), property.name.clone()), property_symbol);
+                    }
                     self.record_member_occurrence(
                         &class.name,
                         &property.name,
@@ -2380,6 +2537,25 @@ impl<'a> SnapshotBuilder<'a> {
                             internal: matches!(property.access, MemberAccess::Internal),
                             is_static: property.is_static,
                         });
+                    if let Some(owner) = self.member_owner(&class.name, class.name_span, true) {
+                        self.hierarchy_members.push(HierarchyMember {
+                            owner,
+                            name: property.name.clone(),
+                            kind: MemberKind::Property,
+                            declaration: property.span,
+                            detail: format!("{} ${}", property.ty, property.name),
+                            documentation: phpdoc_before(self.text, property.span.start),
+                            access: property.access,
+                            is_static: property.is_static,
+                            writable_receiver: false,
+                            is_open: false,
+                            is_override: false,
+                            virtual_root: None,
+                            overridden_declaration: None,
+                            override_stub: None,
+                            body_span: None,
+                        });
+                    }
                 }
                 ClassMember::Constant(constant) => {
                     let constant_symbol = self.add_declaration_symbol(
@@ -2397,6 +2573,25 @@ impl<'a> SnapshotBuilder<'a> {
                         constant.name_span,
                         true,
                     );
+                    if let Some(owner) = self.member_owner(&class.name, class.name_span, true) {
+                        self.hierarchy_members.push(HierarchyMember {
+                            owner,
+                            name: constant.name.clone(),
+                            kind: MemberKind::Constant,
+                            declaration: constant.span,
+                            detail: format!("{}::{}", class.name, constant.name),
+                            documentation: phpdoc_before(self.text, constant.span.start),
+                            access: constant.access,
+                            is_static: true,
+                            writable_receiver: false,
+                            is_open: false,
+                            is_override: false,
+                            virtual_root: None,
+                            overridden_declaration: None,
+                            override_stub: None,
+                            body_span: None,
+                        });
+                    }
                 }
             }
         }
@@ -2405,8 +2600,26 @@ impl<'a> SnapshotBuilder<'a> {
     fn collect_method(&mut self, class_name: &str, method: &FunctionDecl) {
         let selection_span =
             self.declaration_name_span(method.span, &method.name, TokenKind::Function);
+        if let Some(span) = method.open_span {
+            self.hierarchy_semantic_tokens
+                .push((span, SEMANTIC_TOKEN_KEYWORD, 0));
+        }
+        if let Some(span) = method.override_span {
+            self.hierarchy_semantic_tokens
+                .push((span, SEMANTIC_TOKEN_KEYWORD, 0));
+        }
         let mut documentation = phpdoc_before(self.text, method.span.start);
         self.append_callable_effect_documentation(&mut documentation, method.span);
+        if let Some(hierarchy) = self
+            .semantic_info
+            .and_then(|info| info.method_hierarchy.get(&method.span))
+        {
+            append_documentation(
+                &mut documentation,
+                &method_hierarchy_documentation(hierarchy),
+            );
+        }
+        let hierarchy_documentation = documentation.clone();
         let symbol = self.add_declaration_symbol(
             selection_span,
             function_signature(method, Some(class_name)),
@@ -2416,13 +2629,33 @@ impl<'a> SnapshotBuilder<'a> {
         self.record_callable_parameters(symbol, method);
         self.methods
             .insert((class_name.to_string(), method.name.clone()), symbol);
-        self.record_member_occurrence(
-            class_name,
-            &method.name,
-            MemberKind::Method,
-            selection_span,
-            true,
-        );
+        self.record_method_declaration_occurrence(class_name, method, selection_span);
+        if let (Some(owner), Some(hierarchy)) = (
+            self.member_owner(class_name, method.span, true),
+            self.semantic_info
+                .and_then(|info| info.method_hierarchy.get(&method.span)),
+        ) {
+            self.hierarchy_members.push(HierarchyMember {
+                owner,
+                name: method.name.clone(),
+                kind: MemberKind::Method,
+                declaration: method.span,
+                detail: function_signature(method, Some(class_name)),
+                documentation: hierarchy_documentation,
+                access: hierarchy.access,
+                is_static: hierarchy.is_static,
+                writable_receiver: hierarchy.receiver_mode == Some(ReceiverMode::Writable),
+                is_open: hierarchy.is_open,
+                is_override: hierarchy.is_override,
+                virtual_root: hierarchy.virtual_root,
+                overridden_declaration: hierarchy.overridden_declaration,
+                override_stub: hierarchy
+                    .virtual_root
+                    .is_some()
+                    .then(|| override_stub(method)),
+                body_span: Some(method.body.span),
+            });
+        }
     }
 
     fn append_callable_effect_documentation(
@@ -2562,7 +2795,78 @@ impl<'a> SnapshotBuilder<'a> {
             },
             span,
             declaration,
+            exact_declaration: None,
+            virtual_root: None,
+            direct_parent: false,
         });
+    }
+
+    fn record_method_declaration_occurrence(
+        &mut self,
+        owner_name: &str,
+        method: &FunctionDecl,
+        name_span: Span,
+    ) {
+        self.record_member_occurrence(
+            owner_name,
+            &method.name,
+            MemberKind::Method,
+            name_span,
+            true,
+        );
+        let hierarchy = self
+            .semantic_info
+            .and_then(|info| info.method_hierarchy.get(&method.span));
+        if let Some(occurrence) = self
+            .member_occurrences
+            .last_mut()
+            .filter(|occurrence| occurrence.span == name_span)
+        {
+            occurrence.exact_declaration = Some(method.span);
+            occurrence.virtual_root = hierarchy.and_then(|method| method.virtual_root);
+        }
+    }
+
+    fn record_method_call_occurrence(
+        &mut self,
+        owner_name: &str,
+        method_name: &str,
+        call_span: Span,
+        name_span: Span,
+    ) {
+        self.record_member_occurrence(
+            owner_name,
+            method_name,
+            MemberKind::Method,
+            name_span,
+            false,
+        );
+        let target = self
+            .semantic_info
+            .and_then(|info| info.method_call_targets.get(&call_span));
+        if let Some(occurrence) = self
+            .member_occurrences
+            .last_mut()
+            .filter(|occurrence| occurrence.span == name_span)
+        {
+            occurrence.exact_declaration = target.map(|target| target.declaration);
+            occurrence.virtual_root = target.and_then(|target| target.virtual_root);
+            occurrence.direct_parent = target.is_some_and(|target| target.direct_parent);
+        }
+        if let Some(target) = target.filter(|target| target.direct_parent) {
+            let declaration = self.semantic_info.and_then(|info| {
+                info.method_hierarchy
+                    .get(&target.declaration)
+                    .map(|method| format!("{}::{}", method.declaring_class, method.name))
+            });
+            self.semantic_hovers.push(SemanticHover::new(
+                name_span,
+                format!(
+                    "Direct parent call to `{}`.\n\nThis call bypasses virtual dispatch and invokes the selected parent implementation.",
+                    declaration.unwrap_or_else(|| method_name.to_string())
+                ),
+            ));
+        }
     }
 
     fn member_owner(
@@ -2684,7 +2988,7 @@ impl<'a> SnapshotBuilder<'a> {
                             self.visit_function_body(
                                 method,
                                 Some(&class.name),
-                                class.parent.as_deref(),
+                                class.parent.as_ref().map(AstTypeName::ast_type_name),
                             );
                         }
                         if let ClassMember::Property(property) = member {
@@ -2692,7 +2996,7 @@ impl<'a> SnapshotBuilder<'a> {
                                 self.visit_expr(
                                     initializer,
                                     Some(&class.name),
-                                    class.parent.as_deref(),
+                                    class.parent.as_ref().map(AstTypeName::ast_type_name),
                                 );
                             }
                         }
@@ -2700,7 +3004,7 @@ impl<'a> SnapshotBuilder<'a> {
                             self.visit_expr(
                                 &constant.initializer,
                                 Some(&class.name),
-                                class.parent.as_deref(),
+                                class.parent.as_ref().map(AstTypeName::ast_type_name),
                             );
                         }
                     }
@@ -3235,6 +3539,7 @@ impl<'a> SnapshotBuilder<'a> {
                     Some(CallableTarget::Method {
                         class_type,
                         method_name,
+                        ..
                     }) if method_name == method => Some(class_type.name.clone()),
                     _ if matches!(object.as_ref(), Expr::This { .. }) => {
                         current_class.map(ToOwned::to_owned)
@@ -3261,13 +3566,7 @@ impl<'a> SnapshotBuilder<'a> {
                 if let (Some(class_name), Some(method_span)) =
                     (resolved_class.as_deref(), method_span)
                 {
-                    self.record_member_occurrence(
-                        class_name,
-                        method,
-                        MemberKind::Method,
-                        method_span,
-                        false,
-                    );
+                    self.record_method_call_occurrence(class_name, method, *span, method_span);
                 }
                 if let Some(class_name) = resolved_class.as_deref() {
                     if let Some(symbol) = self.resolve_method(class_name, method) {
@@ -3316,6 +3615,13 @@ impl<'a> SnapshotBuilder<'a> {
                 span,
                 ..
             } => {
+                if matches!(qualifier, StaticQualifier::Parent) {
+                    self.hierarchy_semantic_tokens.push((
+                        *qualifier_span,
+                        SEMANTIC_TOKEN_KEYWORD,
+                        0,
+                    ));
+                }
                 for argument in args {
                     self.visit_expr(&argument.value, current_class, parent_class);
                 }
@@ -3346,6 +3652,7 @@ impl<'a> SnapshotBuilder<'a> {
                     Some(CallableTarget::Method {
                         class_type,
                         method_name,
+                        ..
                     }) if method_name == method => Some(class_type.name.clone()),
                     _ if matches!(qualifier, StaticQualifier::SelfType) => {
                         current_class.map(ToOwned::to_owned)
@@ -3382,13 +3689,7 @@ impl<'a> SnapshotBuilder<'a> {
                     self.member_name_span(Span::new(qualifier_span.end, span.end), method);
                 if let (Some(class_name), Some(method_span)) = (class_name.as_deref(), method_span)
                 {
-                    self.record_member_occurrence(
-                        class_name,
-                        method,
-                        MemberKind::Method,
-                        method_span,
-                        false,
-                    );
+                    self.record_method_call_occurrence(class_name, method, *span, method_span);
                 }
                 if let Some(class_name) = class_name.as_deref() {
                     if let Some(symbol) = self.resolve_method(class_name, method) {
@@ -3550,6 +3851,13 @@ impl<'a> SnapshotBuilder<'a> {
                 member_span,
                 ..
             } => {
+                if matches!(qualifier, StaticQualifier::Parent) {
+                    self.hierarchy_semantic_tokens.push((
+                        *qualifier_span,
+                        SEMANTIC_TOKEN_KEYWORD,
+                        0,
+                    ));
+                }
                 if !self.record_enum_static_reference(
                     qualifier,
                     *qualifier_span,
@@ -3563,14 +3871,16 @@ impl<'a> SnapshotBuilder<'a> {
                         StaticQualifier::InvalidStatic => None,
                     };
                     if let Some(owner) = owner {
-                        self.record_member_occurrence(
-                            owner,
-                            member,
-                            MemberKind::Constant,
-                            *member_span,
-                            false,
-                        );
-                        if let Some(symbol) = self.resolve_constant(owner, member) {
+                        let static_property = self.resolve_static_property(owner, member);
+                        let kind = if static_property.is_some() {
+                            MemberKind::Property
+                        } else {
+                            MemberKind::Constant
+                        };
+                        self.record_member_occurrence(owner, member, kind, *member_span, false);
+                        if let Some(symbol) =
+                            static_property.or_else(|| self.resolve_constant(owner, member))
+                        {
                             self.record_reference(*member_span, symbol);
                         }
                     }
@@ -3969,6 +4279,24 @@ impl<'a> SnapshotBuilder<'a> {
             }
             if let Some(symbol) = self
                 .class_property_symbols
+                .get(&(class_name.to_string(), property.to_string()))
+            {
+                return Some(*symbol);
+            }
+            current = self.class_parents.get(class_name).map(String::as_str);
+        }
+        None
+    }
+
+    fn resolve_static_property(&self, class_name: &str, property: &str) -> Option<usize> {
+        let mut current = Some(class_name);
+        let mut visited = HashSet::new();
+        while let Some(class_name) = current {
+            if !visited.insert(class_name) {
+                break;
+            }
+            if let Some(symbol) = self
+                .class_static_property_symbols
                 .get(&(class_name.to_string(), property.to_string()))
             {
                 return Some(*symbol);
@@ -5181,6 +5509,12 @@ fn function_signature(function: &FunctionDecl, container: Option<&str>) -> Strin
     if matches!(function.access, MemberAccess::Internal) {
         modifiers.push("internal");
     }
+    if function.is_open {
+        modifiers.push("open");
+    }
+    if function.is_override {
+        modifiers.push("override");
+    }
     if function.writable_this {
         modifiers.push("writable");
     }
@@ -5227,6 +5561,48 @@ fn function_signature(function: &FunctionDecl, container: Option<&str>) -> Strin
     format!("{prefix}function {name}{type_parameters}({parameters}){return_type}{throws}")
 }
 
+fn override_stub(function: &FunctionDecl) -> String {
+    let mut modifiers = vec!["override"];
+    if function.writable_this {
+        modifiers.push("writable");
+    }
+    if function.is_static {
+        modifiers.push("static");
+    }
+    let parameters = function
+        .params
+        .iter()
+        .map(parameter_signature_without_default)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let return_type = function
+        .return_type
+        .as_ref()
+        .map(|return_type| format!(": {return_type}"))
+        .unwrap_or_default();
+    let throws = function
+        .throws
+        .as_ref()
+        .map(|clause| {
+            format!(
+                " throws {}",
+                clause
+                    .entries
+                    .iter()
+                    .map(|entry| entry.ty.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "{} function {}{}({parameters}){return_type}{throws}\n{{\n    ${{0}}\n}}",
+        modifiers.join(" "),
+        function.name,
+        type_parameter_override_signature(&function.type_params),
+    )
+}
+
 fn parameter_signature(parameter: &Param) -> String {
     let mut parts = Vec::new();
     if matches!(parameter.promoted_access, Some(MemberAccess::Internal)) {
@@ -5245,6 +5621,19 @@ fn parameter_signature(parameter: &Param) -> String {
         rendered.push_str(" = ...");
     }
     rendered
+}
+
+fn parameter_signature_without_default(parameter: &Param) -> String {
+    let mut parts = Vec::new();
+    if parameter.take {
+        parts.push("take".to_string());
+    }
+    if parameter.writable {
+        parts.push("writable".to_string());
+    }
+    parts.push(parameter.ty.to_string());
+    parts.push(format!("${}", parameter.name));
+    parts.join(" ")
 }
 
 fn type_parameter_signature(parameters: &[doriac::ast::TypeParamDecl]) -> String {
@@ -5276,9 +5665,36 @@ fn type_parameter_signature(parameters: &[doriac::ast::TypeParamDecl]) -> String
     format!("<{parameters}>")
 }
 
+fn type_parameter_override_signature(parameters: &[doriac::ast::TypeParamDecl]) -> String {
+    if parameters.is_empty() {
+        return String::new();
+    }
+    let parameters = parameters
+        .iter()
+        .map(|parameter| {
+            let mut rendered = parameter.name.clone();
+            if !parameter.constraints.is_empty() {
+                rendered.push_str(" implements ");
+                rendered.push_str(
+                    &parameter
+                        .constraints
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+            }
+            rendered
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("<{parameters}>")
+}
+
 fn class_signature(class: &ClassDecl) -> String {
     let mut signature = format!(
-        "class {}{}",
+        "{}class {}{}",
+        if class.is_open { "open " } else { "" },
         class.name,
         type_parameter_signature(&class.type_params)
     );
@@ -5289,6 +5705,51 @@ fn class_signature(class: &ClassDecl) -> String {
         signature.push_str(&format!(" implements {}", class.implements.join(", ")));
     }
     signature
+}
+
+fn class_hierarchy_documentation(
+    hierarchy: &doriac::semantics::ClassHierarchySemanticInfo,
+) -> String {
+    let parent = hierarchy
+        .parent
+        .as_ref()
+        .map_or("none", |parent| parent.name.as_str());
+    let role = if hierarchy.parent.is_none() {
+        "Root"
+    } else {
+        "Derived"
+    };
+    format!(
+        "**Direct Parent:** `{parent}`\n\n**Known Hierarchy Role:** {role}\n\n**Hierarchy Depth:** {}\n\n**Subclassing:** {}\n\n**Runtime Representation:** {}",
+        hierarchy.ancestors.len(),
+        if hierarchy.is_open { "Permitted" } else { "Closed" },
+        if hierarchy.is_open { "Open Class" } else { "Closed Class" },
+    )
+}
+
+fn method_hierarchy_documentation(
+    hierarchy: &doriac::semantics::MethodHierarchySemanticInfo,
+) -> String {
+    let role = if hierarchy.is_override {
+        "Override"
+    } else if hierarchy.is_open {
+        "Open Virtual Root"
+    } else {
+        "Nonvirtual"
+    };
+    let receiver = match hierarchy.receiver_mode {
+        Some(ReceiverMode::Writable) => "Writable",
+        Some(ReceiverMode::Readonly) | None => "Readonly",
+        Some(ReceiverMode::UnsupportedConsuming) => "Consuming (Unsupported)",
+    };
+    let dispatch = if hierarchy.virtual_root.is_some() {
+        "Virtual at ordinary call sites"
+    } else {
+        "Direct"
+    };
+    format!(
+        "**Hierarchy Method Role:** {role}\n\n**Effective Receiver:** {receiver}\n\n**Dispatch:** {dispatch}"
+    )
 }
 
 fn phpdoc_before(text: &str, declaration_start: usize) -> Option<String> {
@@ -7181,7 +7642,7 @@ class Worker
         return $path;
     }
 
-    static function open(string $path): string throws SecondError
+    static function fetch(string $path): string throws SecondError
     {
         return $path;
     }
@@ -7203,7 +7664,7 @@ function inspect(take FirstError $failure): void throws Error
     find(1, "record");
     find(path: "named", id: 4);
     $worker->load(2, "method");
-    Worker::open("static");
+    Worker::fetch("static");
 
     try {
         fail($failure);
@@ -7332,9 +7793,9 @@ function inspect(take FirstError $failure): void throws Error
                 1,
             ),
             (
-                "Worker::open(\"static\")",
+                "Worker::fetch(\"static\")",
                 "\"static\"",
-                "static function Worker::open(string $path): string throws SecondError",
+                "static function Worker::fetch(string $path): string throws SecondError",
                 0,
             ),
         ];

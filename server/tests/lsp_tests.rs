@@ -1874,8 +1874,8 @@ fn two_clock_static_qualifiers_publish_semantic_not_parser_diagnostics() {
         "class Child { function save(): void { parent::save(); } }",
     );
     assert_eq!(parent.len(), 1);
-    assert_eq!(parent[0]["code"], "E0496");
-    assert!(parent[0]["message"]
+    assert_eq!(parent[0]["code"], "E0731");
+    assert!(!parent[0]["message"]
         .as_str()
         .expect("message")
         .contains("Stage 34"));

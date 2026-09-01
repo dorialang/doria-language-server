@@ -2073,12 +2073,14 @@ function check_stage30f_callable_alignment(): void
             str_contains($readmeText, 'Stage 31 is complete') &&
             str_contains($readmeText, 'Stage 32 is complete') &&
             str_contains($readmeText, 'Stage 33 and Phase F are complete') &&
-            str_contains($readmeText, 'Stage 34 single class inheritance') &&
+            str_contains($readmeText, 'Stage 34 single class inheritance is complete') &&
+            str_contains($readmeText, 'Stage 35') &&
+            str_contains($readmeText, 'interfaces and traits are next') &&
             str_contains($readmeText, '`map`, `filter`, and `reduce` only for resolved `List<T>` receivers') &&
             !str_contains($readmeText, 'Stage 30 remains incomplete') &&
             !str_contains($readmeText, 'Stage 30h is next') &&
             !str_contains($readmeText, 'lowering remains the Stage 30f boundary'),
-        'README must state Stage 30 through Stage 33 completion plus the Stage 34 boundary',
+        'README must state Stage 30 through Stage 34 completion plus the Stage 35 boundary',
     );
 }
 

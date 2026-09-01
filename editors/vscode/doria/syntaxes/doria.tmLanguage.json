@@ -927,6 +927,10 @@
           "match": "\\b(?:internal)\\b"
         },
         {
+          "name": "storage.modifier.inheritance.doria",
+          "match": "\\b(?:open|override)\\b"
+        },
+        {
           "name": "keyword.declaration.variable.doria",
           "match": "\\b(?:let)\\b"
         },
@@ -944,7 +948,7 @@
         },
         {
           "name": "keyword.other.reserved.doria",
-          "match": "\\b(?:async|await|spawn|scope|unsafe|extern|open|override|get|set|insteadof)\\b"
+          "match": "\\b(?:async|await|spawn|scope|unsafe|extern|get|set|insteadof)\\b"
         }
       ]
     },

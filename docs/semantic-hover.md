@@ -68,9 +68,18 @@ contract, and owned result.
 The server consumes `ListAlgorithmCallInfo`; it does not infer callback effects
 or reconstruct an algorithm type checker. Other collection families do not
 receive these algorithms. PHP remains a secondary compatibility backend with
-independent limitations. Stage 31 is complete. Stage 32 is complete. Stage 33 project
-integration is next. Semantically invalid closures
+independent limitations. Stages 31 through 34 are complete. Stage 35 interfaces
+and traits are next. Semantically invalid closures
 receive no execution capability block.
+
+Stage 34 class and method hover consumes compiler-owned hierarchy metadata.
+Class hover shows the canonical declaration, direct parent, hierarchy depth,
+open/closed role, and runtime representation without exposing descriptors or
+layout details. Method hover preserves its complete source contract and adds the
+virtual root, nearest override, inherited defaults, and direct-versus-virtual
+dispatch facts. A `parent::` call names its exact direct parent declaration and
+states that virtual dispatch is bypassed. The server does not reconstruct a
+hierarchy or override checker from source text.
 
 Attribute application hover uses compiler-owned Stage 32 metadata. It shows the
 canonical attribute class, declaration target, constructor parameter types,

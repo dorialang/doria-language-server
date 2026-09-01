@@ -31,7 +31,12 @@ It also projects compiler-owned expectation roots, `fail`, `AssertionError`,
 `not`, collection/Error matchers, diagnostics, and automatic `TestAssertion`
 effect facts. It has no testing parser, matcher type checker, path-based test
 inference, fake Test definitions, or generated-callable symbols. Stage 34 single
-class inheritance is next.
+class inheritance is complete. The server consumes compiler-owned class
+hierarchy, inherited-member, virtual-family, direct-parent, and callable-contract
+facts for completion, hover, navigation, references, rename, and semantic tokens.
+It does not parse or check inheritance independently, and it preserves incomplete,
+generated, and dependency-source edit safety. Stage 35 interfaces and traits are
+next.
 
 The compiler classifies checked effects into source-required effects and ambient
 canonical I/O effects. Hovers keep source signatures focused on required

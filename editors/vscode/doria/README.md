@@ -41,7 +41,10 @@ server also projects exact compiler-owned expectation symbols, typed matcher
 completion, collection/Error hovers, authored symbols, diagnostics, and automatic
 assertion effects. The extension does not parse tests, recreate matcher semantics,
 infer tests from paths, or expose generated callables. Stage 34 single class
-inheritance is next. Attribute colors remain theme-dependent presentation,
+inheritance is complete. The grammar presents `open`, `override`, `extends`, and
+`parent`; compiler-backed semantic tokens and `doria-lsp` own their meaning,
+hierarchy completion, navigation, and conservative rename. Interfaces and traits
+remain deferred to Stage 35, which is next. Attribute colors remain theme-dependent presentation,
 while `doria-lsp` supplies compiler-owned schema completion, typed metadata
 hover, semantic tokens, navigation, references, rename, and diagnostics. The
 extension does not implement attribute semantics, runtime reflection, testing

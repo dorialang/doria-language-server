@@ -38,6 +38,24 @@ internal function packageHelper(): void
 {
 }
 
+// Stage 34: single inheritance uses explicit open virtual slots, mandatory
+// overrides, and direct parent dispatch.
+open class EditorModel
+{
+    open function render(): string
+    {
+        return "model";
+    }
+}
+
+class EditorDocument extends EditorModel
+{
+    override function render(): string
+    {
+        return parent::render();
+    }
+}
+
 class ParserLimits
 {
     internal const MAX_DEPTH = DEFAULT_LIMIT * 4;

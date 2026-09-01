@@ -6,8 +6,8 @@ use doriac::names::{GlobalReferenceRole, GlobalSymbolId, GlobalSymbolKind, Packa
 use doriac::source::Span;
 
 use crate::analysis::{
-    AnalysisSnapshot, AttributeParameterIdentity, AttributeParameterSpelling, MemberIdentity,
-    MemberOccurrence,
+    AnalysisSnapshot, AttributeParameterIdentity, AttributeParameterSpelling, HierarchyClass,
+    HierarchyContext, HierarchyMember, MemberIdentity, MemberKind, MemberOccurrence,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -22,7 +22,15 @@ pub(crate) enum SymbolTarget {
     Canonical(GlobalSymbolId),
     Alias(AliasIdentity),
     AttributeParameter(AttributeParameterIdentity),
-    Member(MemberIdentity),
+    Member(MemberTarget),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MemberTarget {
+    graph: String,
+    identity: MemberIdentity,
+    exact_declaration: Option<Span>,
+    virtual_root: Option<Span>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +58,8 @@ pub(crate) struct IndexedCompletion {
     pub(crate) kind: u32,
     pub(crate) detail: String,
     pub(crate) documentation: Option<String>,
+    pub(crate) insert_text: Option<String>,
+    pub(crate) snippet: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,12 +108,26 @@ struct IndexedAttributeParameterOccurrence {
 
 #[derive(Debug, Clone)]
 struct IndexedMemberOccurrence {
+    graph: String,
     uri: String,
     occurrence: MemberOccurrence,
 }
 
 #[derive(Debug, Clone)]
+struct IndexedHierarchyClass {
+    uri: String,
+    class: HierarchyClass,
+}
+
+#[derive(Debug, Clone)]
+struct IndexedHierarchyMember {
+    graph: String,
+    member: HierarchyMember,
+}
+
+#[derive(Debug, Clone)]
 struct DocumentSummary {
+    graph: String,
     package: PackageIdentity,
     namespace: Option<String>,
     declarations: Vec<(GlobalSymbolId, String, GlobalSymbolKind)>,
@@ -123,18 +147,20 @@ pub(crate) struct OpenDocumentIndex {
     attribute_schemas: HashMap<AttributeClassIdentity, AttributeClassSchema>,
     attribute_parameter_occurrences: Vec<IndexedAttributeParameterOccurrence>,
     member_occurrences: Vec<IndexedMemberOccurrence>,
-    member_parents: HashMap<GlobalSymbolId, GlobalSymbolId>,
+    member_parents: HashMap<String, HashMap<GlobalSymbolId, GlobalSymbolId>>,
+    hierarchy_classes: HashMap<String, HashMap<GlobalSymbolId, IndexedHierarchyClass>>,
+    hierarchy_members: Vec<IndexedHierarchyMember>,
     test_symbols: Vec<IndexedTestSymbol>,
     documents: HashMap<String, DocumentSummary>,
 }
 
 impl OpenDocumentIndex {
     pub(crate) fn rebuild<'a>(
-        documents: impl Iterator<Item = (&'a str, &'a AnalysisSnapshot)>,
+        documents: impl Iterator<Item = (String, &'a str, &'a AnalysisSnapshot)>,
     ) -> Self {
         let mut index = Self::default();
-        for (uri, snapshot) in documents {
-            index.add_document(uri, snapshot);
+        for (graph, uri, snapshot) in documents {
+            index.add_document(&graph, uri, snapshot);
         }
         index.occurrences.sort_by(|left, right| {
             (&left.uri, left.span.start, left.span.end).cmp(&(
@@ -174,10 +200,11 @@ impl OpenDocumentIndex {
         index
     }
 
-    fn add_document(&mut self, uri: &str, snapshot: &AnalysisSnapshot) {
+    fn add_document(&mut self, graph: &str, uri: &str, snapshot: &AnalysisSnapshot) {
         let facts = snapshot.global_symbols();
         let package = snapshot.compilation_context().package.clone();
         let mut summary = DocumentSummary {
+            graph: graph.to_string(),
             package: package.clone(),
             namespace: facts.namespace.clone(),
             declarations: Vec::new(),
@@ -348,15 +375,35 @@ impl OpenDocumentIndex {
                     .iter()
                     .cloned()
                     .map(|occurrence| IndexedMemberOccurrence {
+                        graph: graph.to_string(),
                         uri: uri.to_string(),
                         occurrence,
                     }),
             );
         for parent in snapshot.member_parents() {
             self.member_parents
+                .entry(graph.to_string())
+                .or_default()
                 .entry(parent.child.clone())
                 .or_insert_with(|| parent.parent.clone());
         }
+        for class in snapshot.hierarchy_classes() {
+            self.hierarchy_classes
+                .entry(graph.to_string())
+                .or_default()
+                .entry(class.identity.clone())
+                .or_insert_with(|| IndexedHierarchyClass {
+                    uri: uri.to_string(),
+                    class: class.clone(),
+                });
+        }
+        self.hierarchy_members
+            .extend(snapshot.hierarchy_members().iter().cloned().map(|member| {
+                IndexedHierarchyMember {
+                    graph: graph.to_string(),
+                    member,
+                }
+            }));
 
         if !facts.unresolved.is_empty() {
             self.incomplete_packages.insert(package);
@@ -379,9 +426,13 @@ impl OpenDocumentIndex {
             ));
         }
         if let Some(occurrence) = self.member_occurrence_at(uri, offset) {
-            return Some(SymbolTarget::Member(
-                self.resolved_member_identity(&occurrence.occurrence.identity),
-            ));
+            return Some(SymbolTarget::Member(MemberTarget {
+                graph: occurrence.graph.clone(),
+                identity: self
+                    .resolved_member_identity(&occurrence.graph, &occurrence.occurrence.identity),
+                exact_declaration: occurrence.occurrence.exact_declaration,
+                virtual_root: occurrence.occurrence.virtual_root,
+            }));
         }
         let occurrence = self
             .occurrences
@@ -423,7 +474,7 @@ impl OpenDocumentIndex {
             })
     }
 
-    fn resolved_member_identity(&self, identity: &MemberIdentity) -> MemberIdentity {
+    fn resolved_member_identity(&self, graph: &str, identity: &MemberIdentity) -> MemberIdentity {
         let mut resolved = identity.clone();
         let mut owner = identity.owner.clone();
         let mut visited = HashSet::new();
@@ -434,17 +485,41 @@ impl OpenDocumentIndex {
                 kind: identity.kind,
             };
             if self.member_occurrences.iter().any(|occurrence| {
-                occurrence.occurrence.declaration && occurrence.occurrence.identity == candidate
+                occurrence.graph == graph
+                    && occurrence.occurrence.declaration
+                    && occurrence.occurrence.identity == candidate
             }) {
                 return candidate;
             }
-            let Some(parent) = self.member_parents.get(&owner) else {
+            let Some(parent) = self
+                .member_parents
+                .get(graph)
+                .and_then(|parents| parents.get(&owner))
+            else {
                 break;
             };
             owner = parent.clone();
             resolved.owner = owner.clone();
         }
         resolved
+    }
+
+    fn member_occurrence_matches_target(
+        &self,
+        occurrence: &IndexedMemberOccurrence,
+        target: &MemberTarget,
+    ) -> bool {
+        if occurrence.graph != target.graph {
+            return false;
+        }
+        if let Some(root) = target.virtual_root {
+            return occurrence.occurrence.virtual_root == Some(root);
+        }
+        if let Some(declaration) = target.exact_declaration {
+            return occurrence.occurrence.exact_declaration == Some(declaration);
+        }
+        self.resolved_member_identity(&occurrence.graph, &occurrence.occurrence.identity)
+            == target.identity
     }
 
     pub(crate) fn references(
@@ -466,12 +541,12 @@ impl OpenDocumentIndex {
                 })
                 .collect();
         }
-        if let SymbolTarget::Member(identity) = target {
+        if let SymbolTarget::Member(target) = target {
             return self
                 .member_occurrences
                 .iter()
                 .filter(|candidate| {
-                    self.resolved_member_identity(&candidate.occurrence.identity) == *identity
+                    self.member_occurrence_matches_target(candidate, target)
                         && (include_declaration || !candidate.occurrence.declaration)
                 })
                 .map(|candidate| IndexedLocation {
@@ -503,12 +578,26 @@ impl OpenDocumentIndex {
     }
 
     pub(crate) fn definition(&self, uri: &str, offset: usize) -> Option<IndexedLocation> {
-        if let Some(SymbolTarget::Member(identity)) = self.target_at(uri, offset) {
+        if let Some(SymbolTarget::Member(target)) = self.target_at(uri, offset) {
+            if let Some(declaration) = target.exact_declaration {
+                return self
+                    .member_occurrences
+                    .iter()
+                    .find(|candidate| {
+                        candidate.occurrence.declaration
+                            && candidate.occurrence.exact_declaration == Some(declaration)
+                    })
+                    .map(|candidate| IndexedLocation {
+                        uri: candidate.uri.clone(),
+                        span: candidate.occurrence.span,
+                    });
+            }
             return self
                 .member_occurrences
                 .iter()
                 .find(|candidate| {
-                    candidate.occurrence.declaration && candidate.occurrence.identity == identity
+                    candidate.occurrence.declaration
+                        && candidate.occurrence.identity == target.identity
                 })
                 .map(|candidate| IndexedLocation {
                     uri: candidate.uri.clone(),
@@ -550,6 +639,12 @@ impl OpenDocumentIndex {
                 .find(|candidate| {
                     candidate.role == IndexedRole::AliasDeclaration
                         && candidate.alias.as_ref() == Some(alias)
+                })
+                .or_else(|| {
+                    self.occurrences.iter().find(|candidate| {
+                        candidate.symbol == alias.target
+                            && candidate.role == IndexedRole::Declaration
+                    })
                 })
                 .map(indexed_location);
         }
@@ -656,27 +751,36 @@ impl OpenDocumentIndex {
                 edits.dedup_by(|left, right| left.uri == right.uri && left.span == right.span);
                 (!edits.is_empty()).then_some(edits)
             }
-            SymbolTarget::Member(identity) => {
-                let package = symbol_package(&identity.owner)?;
-                if self.incomplete_packages.contains(package)
-                    || self
-                        .member_occurrences
-                        .iter()
-                        .filter(|candidate| {
+            SymbolTarget::Member(target) => {
+                let declarations = self
+                    .member_occurrences
+                    .iter()
+                    .filter(|candidate| candidate.occurrence.declaration)
+                    .filter(|candidate| self.member_occurrence_matches_target(candidate, target))
+                    .collect::<Vec<_>>();
+                if declarations.is_empty()
+                    || declarations.iter().any(|declaration| {
+                        symbol_package(&declaration.occurrence.identity.owner)
+                            .is_none_or(|package| self.incomplete_packages.contains(package))
+                    })
+                    || declarations.iter().any(|declaration| {
+                        self.member_occurrences.iter().any(|candidate| {
                             candidate.occurrence.declaration
-                                && candidate.occurrence.identity == *identity
+                                && candidate.occurrence.identity.owner
+                                    == declaration.occurrence.identity.owner
+                                && candidate.occurrence.identity.kind
+                                    == declaration.occurrence.identity.kind
+                                && candidate.occurrence.identity.name == new_name
+                                && !self.member_occurrence_matches_target(candidate, target)
                         })
-                        .count()
-                        != 1
+                    })
                 {
                     return None;
                 }
                 let mut edits = self
                     .member_occurrences
                     .iter()
-                    .filter(|candidate| {
-                        self.resolved_member_identity(&candidate.occurrence.identity) == *identity
-                    })
+                    .filter(|candidate| self.member_occurrence_matches_target(candidate, target))
                     .map(|candidate| IndexedEdit {
                         uri: candidate.uri.clone(),
                         span: candidate.occurrence.span,
@@ -721,7 +825,89 @@ impl OpenDocumentIndex {
                     ),
                 });
             }
-            SymbolTarget::Member(_) => return None,
+            SymbolTarget::Member(target) => {
+                let occurrence = self.member_occurrence_at(uri, offset)?;
+                let member = target
+                    .exact_declaration
+                    .and_then(|declaration| {
+                        self.hierarchy_members.iter().find(|member| {
+                            member.graph == target.graph && member.member.declaration == declaration
+                        })
+                    })
+                    .or_else(|| {
+                        self.hierarchy_members.iter().find(|member| {
+                            member.graph == target.graph
+                                && member.member.owner == target.identity.owner
+                                && member.member.name == target.identity.name
+                                && member.member.kind == target.identity.kind
+                        })
+                    })?;
+                let mut markdown = format!("```doria\n{}\n```", member.member.detail);
+                if let Some(documentation) = &member.member.documentation {
+                    markdown.push_str("\n\n");
+                    markdown.push_str(documentation);
+                }
+                if member.member.kind == MemberKind::Method {
+                    let role = if member.member.is_override {
+                        "Override"
+                    } else if member.member.is_open {
+                        "Open Virtual Root"
+                    } else {
+                        "Nonvirtual"
+                    };
+                    markdown.push_str(&format!(
+                        "\n\n**Hierarchy Method Role:** {role}\n\n**Effective Receiver:** {}\n\n**Dispatch:** {}",
+                        if member.member.writable_receiver {
+                            "Writable"
+                        } else {
+                            "Readonly"
+                        },
+                        if occurrence.occurrence.direct_parent {
+                            "Direct parent implementation (virtual dispatch bypassed)"
+                        } else if member.member.virtual_root.is_some() {
+                            "Virtual"
+                        } else {
+                            "Direct"
+                        },
+                    ));
+                    if let Some(root) = member.member.virtual_root {
+                        if let Some(label) = self.method_declaration_label(&target.graph, root) {
+                            markdown
+                                .push_str(&format!("\n\n**Root Virtual Declaration:** `{label}`"));
+                        }
+                    }
+                    if let Some(parent) = member.member.overridden_declaration {
+                        if let Some(label) = self.method_declaration_label(&target.graph, parent) {
+                            markdown.push_str(&format!(
+                                "\n\n**Nearest Overridden Declaration:** `{label}`"
+                            ));
+                        }
+                        if let Some(parent_member) =
+                            self.hierarchy_members.iter().find(|candidate| {
+                                candidate.graph == target.graph
+                                    && candidate.member.declaration == parent
+                            })
+                        {
+                            if parent_member.member.detail.contains("= ...") {
+                                markdown.push_str(&format!(
+                                    "\n\n**Inherited Defaults:** `{}`",
+                                    parent_member.member.detail
+                                ));
+                            }
+                            if parent_member.member.detail != member.member.detail {
+                                markdown.push_str(&format!(
+                                    "\n\n**Override Contract:** `{}`\n\n**Effective Signature:** `{}`",
+                                    parent_member.member.detail, member.member.detail
+                                ));
+                            }
+                        }
+                    }
+                }
+                return Some(IndexedHover {
+                    span: occurrence.occurrence.span,
+                    markdown,
+                });
+            }
         };
         let kind = self.symbol_kinds.get(&symbol)?;
         let occurrence = self.occurrences.iter().find(|occurrence| {
@@ -741,6 +927,22 @@ impl OpenDocumentIndex {
             span: occurrence.span,
             markdown,
         })
+    }
+
+    fn method_declaration_label(&self, graph: &str, declaration: Span) -> Option<String> {
+        self.hierarchy_members
+            .iter()
+            .find(|member| {
+                member.graph == graph
+                    && member.member.kind == MemberKind::Method
+                    && member.member.declaration == declaration
+            })
+            .and_then(|member| {
+                self.hierarchy_classes
+                    .get(graph)
+                    .and_then(|classes| classes.get(&member.member.owner))
+                    .map(|class| format!("{}::{}", class.class.qualified_name, member.member.name))
+            })
     }
 
     pub(crate) fn completions(&self, uri: &str) -> Vec<IndexedCompletion> {
@@ -771,6 +973,8 @@ impl OpenDocumentIndex {
                     kind: completion_kind(kind),
                     detail,
                     documentation: None,
+                    insert_text: None,
+                    snippet: false,
                 },
             );
         }
@@ -807,6 +1011,240 @@ impl OpenDocumentIndex {
         let mut completions = completions.into_values().collect::<Vec<_>>();
         completions.sort_by(|left, right| left.label.cmp(&right.label));
         completions
+    }
+
+    pub(crate) fn open_class_completions(
+        &self,
+        uri: &str,
+        context: Option<&HierarchyContext>,
+        excluded_source_name: Option<&str>,
+        recovered_namespace: Option<&str>,
+        recovered_imports: &[(String, String)],
+    ) -> Vec<IndexedCompletion> {
+        let Some(document) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let current = context.and_then(|context| {
+            self.hierarchy_classes
+                .get(&document.graph)
+                .and_then(|classes| classes.get(&context.class))
+        });
+        let mut completions = self
+            .hierarchy_classes
+            .get(&document.graph)
+            .into_iter()
+            .flat_map(|classes| classes.values())
+            .filter(|candidate| candidate.class.is_open)
+            .filter(|candidate| excluded_source_name != Some(candidate.class.source_name.as_str()))
+            .filter(|candidate| {
+                current.is_none_or(|current| {
+                    candidate.class.identity != current.class.identity
+                        && !candidate
+                            .class
+                            .ancestors
+                            .contains(&current.class.qualified_name)
+                })
+            })
+            .filter_map(|candidate| {
+                let label = self.visible_class_label(
+                    document,
+                    candidate,
+                    recovered_namespace,
+                    recovered_imports,
+                )?;
+                let parameters = candidate.class.type_parameters.len();
+                let insert_text = if candidate.class.type_parameters.is_empty() {
+                    None
+                } else {
+                    Some(format!(
+                        "{}<{}>",
+                        label,
+                        candidate
+                            .class
+                            .type_parameters
+                            .iter()
+                            .enumerate()
+                            .map(|(index, parameter)| format!("${{{}:{parameter}}}", index + 1))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                };
+                Some(IndexedCompletion {
+                    label,
+                    kind: 7,
+                    detail: format!(
+                        "Open class `{}` ({parameters} type parameter{})",
+                        candidate.class.qualified_name,
+                        if parameters == 1 { "" } else { "s" }
+                    ),
+                    documentation: Some("Compiler-validated inheritance candidate.".to_string()),
+                    insert_text,
+                    snippet: parameters > 0,
+                })
+            })
+            .collect::<Vec<_>>();
+        completions.sort_by(|left, right| left.label.cmp(&right.label));
+        completions
+    }
+
+    pub(crate) fn override_completions(
+        &self,
+        graph: &str,
+        context: &HierarchyContext,
+    ) -> Vec<IndexedCompletion> {
+        let implemented_roots = self
+            .hierarchy_members
+            .iter()
+            .filter(|member| member.graph == graph)
+            .filter(|member| member.member.owner == context.class)
+            .filter_map(|member| member.member.virtual_root)
+            .collect::<HashSet<_>>();
+        let implemented_names = self
+            .hierarchy_members
+            .iter()
+            .filter(|member| member.graph == graph)
+            .filter(|member| member.member.owner == context.class)
+            .map(|member| member.member.name.as_str())
+            .collect::<HashSet<_>>();
+        let parents = self.member_parents.get(graph);
+        let mut owner = parents.and_then(|parents| parents.get(&context.class));
+        let mut visited = HashSet::new();
+        let mut completions = Vec::new();
+        while let Some(parent) = owner {
+            if !visited.insert(parent.clone()) {
+                break;
+            }
+            completions.extend(
+                self.hierarchy_members
+                    .iter()
+                    .filter(|candidate| candidate.graph == graph)
+                    .filter(|candidate| candidate.member.owner == *parent)
+                    .filter(|candidate| candidate.member.kind == MemberKind::Method)
+                    .filter(|candidate| candidate.member.access == MemberAccess::External)
+                    .filter(|candidate| candidate.member.virtual_root.is_some())
+                    .filter(|candidate| {
+                        candidate
+                            .member
+                            .virtual_root
+                            .is_none_or(|root| !implemented_roots.contains(&root))
+                            && !implemented_names.contains(candidate.member.name.as_str())
+                    })
+                    .map(|candidate| IndexedCompletion {
+                        label: candidate.member.name.clone(),
+                        kind: 2,
+                        detail: format!("Override {}", candidate.member.detail),
+                        documentation: candidate.member.documentation.clone(),
+                        insert_text: candidate.member.override_stub.clone(),
+                        snippet: candidate.member.override_stub.is_some(),
+                    }),
+            );
+            owner = parents.and_then(|parents| parents.get(parent));
+        }
+        let mut labels = HashSet::new();
+        completions.retain(|completion| labels.insert(completion.label.clone()));
+        completions.sort_by(|left, right| left.label.cmp(&right.label));
+        completions
+    }
+
+    pub(crate) fn parent_completions(
+        &self,
+        graph: &str,
+        context: &HierarchyContext,
+    ) -> Vec<IndexedCompletion> {
+        let Some(parents) = self.member_parents.get(graph) else {
+            return Vec::new();
+        };
+        let Some(parent) = parents.get(&context.class) else {
+            return Vec::new();
+        };
+        let static_context = context.method.is_some_and(|method| method.is_static);
+        let constructor_context = context.method.is_some_and(|method| method.constructor);
+        let mut owner = Some(parent);
+        let mut direct = true;
+        let mut visited = HashSet::new();
+        let mut names = HashSet::new();
+        let mut completions = Vec::new();
+        while let Some(current) = owner {
+            if !visited.insert(current.clone()) {
+                break;
+            }
+            completions.extend(
+                self.hierarchy_members
+                    .iter()
+                    .filter(|candidate| candidate.graph == graph)
+                    .filter(|candidate| candidate.member.owner == *current)
+                    .filter(|candidate| candidate.member.access == MemberAccess::External)
+                    .filter(|candidate| candidate.member.name != "__destruct")
+                    .filter(|candidate| {
+                        if candidate.member.name == "__construct" {
+                            return direct && constructor_context;
+                        }
+                        match candidate.member.kind {
+                            MemberKind::Method => !static_context || candidate.member.is_static,
+                            MemberKind::Property => candidate.member.is_static,
+                            MemberKind::Constant | MemberKind::EnumCase => true,
+                        }
+                    })
+                    .filter(|candidate| names.insert(candidate.member.name.clone()))
+                    .map(|candidate| IndexedCompletion {
+                        label: candidate.member.name.clone(),
+                        kind: match candidate.member.kind {
+                            MemberKind::Method => 2,
+                            MemberKind::Property => 10,
+                            MemberKind::Constant | MemberKind::EnumCase => 21,
+                        },
+                        detail: format!("Parent member: {}", candidate.member.detail),
+                        documentation: candidate.member.documentation.clone(),
+                        insert_text: None,
+                        snippet: false,
+                    }),
+            );
+            owner = parents.get(current);
+            direct = false;
+        }
+        completions.sort_by(|left, right| left.label.cmp(&right.label));
+        completions
+    }
+
+    fn visible_class_label(
+        &self,
+        document: &DocumentSummary,
+        candidate: &IndexedHierarchyClass,
+        recovered_namespace: Option<&str>,
+        recovered_imports: &[(String, String)],
+    ) -> Option<String> {
+        let candidate_package = symbol_package(&candidate.class.identity)?;
+        if candidate.class.access == MemberAccess::Internal
+            && candidate_package != &document.package
+        {
+            return None;
+        }
+        if let Some((_, alias)) = recovered_imports
+            .iter()
+            .find(|(target, _)| target == &candidate.class.qualified_name)
+        {
+            return Some(alias.clone());
+        }
+        if let Some(alias) = document.imports.iter().find_map(|(alias, _, target)| {
+            (target.as_ref() == Some(&candidate.class.identity)).then(|| alias.clone())
+        }) {
+            return Some(alias);
+        }
+        if candidate_package == &document.package {
+            let candidate_namespace = self
+                .documents
+                .get(&candidate.uri)
+                .and_then(|document| document.namespace.as_ref());
+            let current_namespace = recovered_namespace.or(document.namespace.as_deref());
+            return Some(
+                if candidate_namespace.map(String::as_str) == current_namespace {
+                    candidate.class.source_name.clone()
+                } else {
+                    candidate.class.qualified_name.clone()
+                },
+            );
+        }
+        None
     }
 
     pub(crate) fn test_symbols(&self, query: &str) -> Vec<IndexedTestSymbol> {
@@ -866,6 +1304,8 @@ impl OpenDocumentIndex {
                     kind: 7,
                     detail: format!("Compiler-known attribute `{name}`"),
                     documentation: Some(compiler_known_attribute_documentation(name)),
+                    insert_text: None,
+                    snippet: false,
                 },
             );
         }
@@ -880,6 +1320,8 @@ impl OpenDocumentIndex {
                     kind: 7,
                     detail: format!("Typed attribute `{}`", schema.canonical_name),
                     documentation: Some(attribute_schema_completion_documentation(schema)),
+                    insert_text: None,
+                    snippet: false,
                 });
         }
         let mut completions = completions.into_values().collect::<Vec<_>>();
@@ -1083,6 +1525,8 @@ fn completion(label: String, kind: GlobalSymbolKind, qualified_name: &str) -> In
         kind: completion_kind(kind),
         detail: format!("{} `{qualified_name}`", kind_name(kind)),
         documentation: None,
+        insert_text: None,
+        snippet: false,
     }
 }
 
@@ -1101,6 +1545,8 @@ fn attribute_parameter_completion(parameter: &AttributeSchemaParameter) -> Index
             doriac::attributes::metadata_type_name(&parameter.ty)
         ),
         documentation: None,
+        insert_text: None,
+        snippet: false,
     }
 }
 
