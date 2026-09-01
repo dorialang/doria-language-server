@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $root = dirname(__DIR__);
-$expectedCompiler = '63db05052f2e22268446b7ae7de85687f89aed70';
+$expectedCompiler = 'c109a55e2a67ecbab9321790c371979288b0fe76';
 
 function native_testing_text(string $path): string
 {

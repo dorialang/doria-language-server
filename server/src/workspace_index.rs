@@ -27,6 +27,7 @@ pub(crate) enum SymbolTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MemberTarget {
+    graph: String,
     identity: MemberIdentity,
     exact_declaration: Option<Span>,
     virtual_root: Option<Span>,
@@ -107,6 +108,7 @@ struct IndexedAttributeParameterOccurrence {
 
 #[derive(Debug, Clone)]
 struct IndexedMemberOccurrence {
+    graph: String,
     uri: String,
     occurrence: MemberOccurrence,
 }
@@ -119,11 +121,13 @@ struct IndexedHierarchyClass {
 
 #[derive(Debug, Clone)]
 struct IndexedHierarchyMember {
+    graph: String,
     member: HierarchyMember,
 }
 
 #[derive(Debug, Clone)]
 struct DocumentSummary {
+    graph: String,
     package: PackageIdentity,
     namespace: Option<String>,
     declarations: Vec<(GlobalSymbolId, String, GlobalSymbolKind)>,
@@ -143,8 +147,8 @@ pub(crate) struct OpenDocumentIndex {
     attribute_schemas: HashMap<AttributeClassIdentity, AttributeClassSchema>,
     attribute_parameter_occurrences: Vec<IndexedAttributeParameterOccurrence>,
     member_occurrences: Vec<IndexedMemberOccurrence>,
-    member_parents: HashMap<GlobalSymbolId, GlobalSymbolId>,
-    hierarchy_classes: HashMap<GlobalSymbolId, IndexedHierarchyClass>,
+    member_parents: HashMap<String, HashMap<GlobalSymbolId, GlobalSymbolId>>,
+    hierarchy_classes: HashMap<String, HashMap<GlobalSymbolId, IndexedHierarchyClass>>,
     hierarchy_members: Vec<IndexedHierarchyMember>,
     test_symbols: Vec<IndexedTestSymbol>,
     documents: HashMap<String, DocumentSummary>,
@@ -152,11 +156,11 @@ pub(crate) struct OpenDocumentIndex {
 
 impl OpenDocumentIndex {
     pub(crate) fn rebuild<'a>(
-        documents: impl Iterator<Item = (&'a str, &'a AnalysisSnapshot)>,
+        documents: impl Iterator<Item = (String, &'a str, &'a AnalysisSnapshot)>,
     ) -> Self {
         let mut index = Self::default();
-        for (uri, snapshot) in documents {
-            index.add_document(uri, snapshot);
+        for (graph, uri, snapshot) in documents {
+            index.add_document(&graph, uri, snapshot);
         }
         index.occurrences.sort_by(|left, right| {
             (&left.uri, left.span.start, left.span.end).cmp(&(
@@ -196,10 +200,11 @@ impl OpenDocumentIndex {
         index
     }
 
-    fn add_document(&mut self, uri: &str, snapshot: &AnalysisSnapshot) {
+    fn add_document(&mut self, graph: &str, uri: &str, snapshot: &AnalysisSnapshot) {
         let facts = snapshot.global_symbols();
         let package = snapshot.compilation_context().package.clone();
         let mut summary = DocumentSummary {
+            graph: graph.to_string(),
             package: package.clone(),
             namespace: facts.namespace.clone(),
             declarations: Vec::new(),
@@ -370,30 +375,35 @@ impl OpenDocumentIndex {
                     .iter()
                     .cloned()
                     .map(|occurrence| IndexedMemberOccurrence {
+                        graph: graph.to_string(),
                         uri: uri.to_string(),
                         occurrence,
                     }),
             );
         for parent in snapshot.member_parents() {
             self.member_parents
+                .entry(graph.to_string())
+                .or_default()
                 .entry(parent.child.clone())
                 .or_insert_with(|| parent.parent.clone());
         }
         for class in snapshot.hierarchy_classes() {
             self.hierarchy_classes
+                .entry(graph.to_string())
+                .or_default()
                 .entry(class.identity.clone())
                 .or_insert_with(|| IndexedHierarchyClass {
                     uri: uri.to_string(),
                     class: class.clone(),
                 });
         }
-        self.hierarchy_members.extend(
-            snapshot
-                .hierarchy_members()
-                .iter()
-                .cloned()
-                .map(|member| IndexedHierarchyMember { member }),
-        );
+        self.hierarchy_members
+            .extend(snapshot.hierarchy_members().iter().cloned().map(|member| {
+                IndexedHierarchyMember {
+                    graph: graph.to_string(),
+                    member,
+                }
+            }));
 
         if !facts.unresolved.is_empty() {
             self.incomplete_packages.insert(package);
@@ -417,7 +427,9 @@ impl OpenDocumentIndex {
         }
         if let Some(occurrence) = self.member_occurrence_at(uri, offset) {
             return Some(SymbolTarget::Member(MemberTarget {
-                identity: self.resolved_member_identity(&occurrence.occurrence.identity),
+                graph: occurrence.graph.clone(),
+                identity: self
+                    .resolved_member_identity(&occurrence.graph, &occurrence.occurrence.identity),
                 exact_declaration: occurrence.occurrence.exact_declaration,
                 virtual_root: occurrence.occurrence.virtual_root,
             }));
@@ -462,7 +474,7 @@ impl OpenDocumentIndex {
             })
     }
 
-    fn resolved_member_identity(&self, identity: &MemberIdentity) -> MemberIdentity {
+    fn resolved_member_identity(&self, graph: &str, identity: &MemberIdentity) -> MemberIdentity {
         let mut resolved = identity.clone();
         let mut owner = identity.owner.clone();
         let mut visited = HashSet::new();
@@ -473,11 +485,17 @@ impl OpenDocumentIndex {
                 kind: identity.kind,
             };
             if self.member_occurrences.iter().any(|occurrence| {
-                occurrence.occurrence.declaration && occurrence.occurrence.identity == candidate
+                occurrence.graph == graph
+                    && occurrence.occurrence.declaration
+                    && occurrence.occurrence.identity == candidate
             }) {
                 return candidate;
             }
-            let Some(parent) = self.member_parents.get(&owner) else {
+            let Some(parent) = self
+                .member_parents
+                .get(graph)
+                .and_then(|parents| parents.get(&owner))
+            else {
                 break;
             };
             owner = parent.clone();
@@ -488,16 +506,20 @@ impl OpenDocumentIndex {
 
     fn member_occurrence_matches_target(
         &self,
-        occurrence: &MemberOccurrence,
+        occurrence: &IndexedMemberOccurrence,
         target: &MemberTarget,
     ) -> bool {
+        if occurrence.graph != target.graph {
+            return false;
+        }
         if let Some(root) = target.virtual_root {
-            return occurrence.virtual_root == Some(root);
+            return occurrence.occurrence.virtual_root == Some(root);
         }
         if let Some(declaration) = target.exact_declaration {
-            return occurrence.exact_declaration == Some(declaration);
+            return occurrence.occurrence.exact_declaration == Some(declaration);
         }
-        self.resolved_member_identity(&occurrence.identity) == target.identity
+        self.resolved_member_identity(&occurrence.graph, &occurrence.occurrence.identity)
+            == target.identity
     }
 
     pub(crate) fn references(
@@ -524,7 +546,7 @@ impl OpenDocumentIndex {
                 .member_occurrences
                 .iter()
                 .filter(|candidate| {
-                    self.member_occurrence_matches_target(&candidate.occurrence, target)
+                    self.member_occurrence_matches_target(candidate, target)
                         && (include_declaration || !candidate.occurrence.declaration)
                 })
                 .map(|candidate| IndexedLocation {
@@ -734,9 +756,7 @@ impl OpenDocumentIndex {
                     .member_occurrences
                     .iter()
                     .filter(|candidate| candidate.occurrence.declaration)
-                    .filter(|candidate| {
-                        self.member_occurrence_matches_target(&candidate.occurrence, target)
-                    })
+                    .filter(|candidate| self.member_occurrence_matches_target(candidate, target))
                     .collect::<Vec<_>>();
                 if declarations.is_empty()
                     || declarations.iter().any(|declaration| {
@@ -751,8 +771,7 @@ impl OpenDocumentIndex {
                                 && candidate.occurrence.identity.kind
                                     == declaration.occurrence.identity.kind
                                 && candidate.occurrence.identity.name == new_name
-                                && !self
-                                    .member_occurrence_matches_target(&candidate.occurrence, target)
+                                && !self.member_occurrence_matches_target(candidate, target)
                         })
                     })
                 {
@@ -761,9 +780,7 @@ impl OpenDocumentIndex {
                 let mut edits = self
                     .member_occurrences
                     .iter()
-                    .filter(|candidate| {
-                        self.member_occurrence_matches_target(&candidate.occurrence, target)
-                    })
+                    .filter(|candidate| self.member_occurrence_matches_target(candidate, target))
                     .map(|candidate| IndexedEdit {
                         uri: candidate.uri.clone(),
                         span: candidate.occurrence.span,
@@ -813,13 +830,14 @@ impl OpenDocumentIndex {
                 let member = target
                     .exact_declaration
                     .and_then(|declaration| {
-                        self.hierarchy_members
-                            .iter()
-                            .find(|member| member.member.declaration == declaration)
+                        self.hierarchy_members.iter().find(|member| {
+                            member.graph == target.graph && member.member.declaration == declaration
+                        })
                     })
                     .or_else(|| {
                         self.hierarchy_members.iter().find(|member| {
-                            member.member.owner == target.identity.owner
+                            member.graph == target.graph
+                                && member.member.owner == target.identity.owner
                                 && member.member.name == target.identity.name
                                 && member.member.kind == target.identity.kind
                         })
@@ -853,21 +871,22 @@ impl OpenDocumentIndex {
                         },
                     ));
                     if let Some(root) = member.member.virtual_root {
-                        if let Some(label) = self.method_declaration_label(root) {
+                        if let Some(label) = self.method_declaration_label(&target.graph, root) {
                             markdown
                                 .push_str(&format!("\n\n**Root Virtual Declaration:** `{label}`"));
                         }
                     }
                     if let Some(parent) = member.member.overridden_declaration {
-                        if let Some(label) = self.method_declaration_label(parent) {
+                        if let Some(label) = self.method_declaration_label(&target.graph, parent) {
                             markdown.push_str(&format!(
                                 "\n\n**Nearest Overridden Declaration:** `{label}`"
                             ));
                         }
-                        if let Some(parent_member) = self
-                            .hierarchy_members
-                            .iter()
-                            .find(|candidate| candidate.member.declaration == parent)
+                        if let Some(parent_member) =
+                            self.hierarchy_members.iter().find(|candidate| {
+                                candidate.graph == target.graph
+                                    && candidate.member.declaration == parent
+                            })
                         {
                             if parent_member.member.detail.contains("= ...") {
                                 markdown.push_str(&format!(
@@ -910,15 +929,18 @@ impl OpenDocumentIndex {
         })
     }
 
-    fn method_declaration_label(&self, declaration: Span) -> Option<String> {
+    fn method_declaration_label(&self, graph: &str, declaration: Span) -> Option<String> {
         self.hierarchy_members
             .iter()
             .find(|member| {
-                member.member.kind == MemberKind::Method && member.member.declaration == declaration
+                member.graph == graph
+                    && member.member.kind == MemberKind::Method
+                    && member.member.declaration == declaration
             })
             .and_then(|member| {
                 self.hierarchy_classes
-                    .get(&member.member.owner)
+                    .get(graph)
+                    .and_then(|classes| classes.get(&member.member.owner))
                     .map(|class| format!("{}::{}", class.class.qualified_name, member.member.name))
             })
     }
@@ -1002,10 +1024,16 @@ impl OpenDocumentIndex {
         let Some(document) = self.documents.get(uri) else {
             return Vec::new();
         };
-        let current = context.and_then(|context| self.hierarchy_classes.get(&context.class));
+        let current = context.and_then(|context| {
+            self.hierarchy_classes
+                .get(&document.graph)
+                .and_then(|classes| classes.get(&context.class))
+        });
         let mut completions = self
             .hierarchy_classes
-            .values()
+            .get(&document.graph)
+            .into_iter()
+            .flat_map(|classes| classes.values())
             .filter(|candidate| candidate.class.is_open)
             .filter(|candidate| excluded_source_name != Some(candidate.class.source_name.as_str()))
             .filter(|candidate| {
@@ -1061,21 +1089,25 @@ impl OpenDocumentIndex {
 
     pub(crate) fn override_completions(
         &self,
+        graph: &str,
         context: &HierarchyContext,
     ) -> Vec<IndexedCompletion> {
         let implemented_roots = self
             .hierarchy_members
             .iter()
+            .filter(|member| member.graph == graph)
             .filter(|member| member.member.owner == context.class)
             .filter_map(|member| member.member.virtual_root)
             .collect::<HashSet<_>>();
         let implemented_names = self
             .hierarchy_members
             .iter()
+            .filter(|member| member.graph == graph)
             .filter(|member| member.member.owner == context.class)
             .map(|member| member.member.name.as_str())
             .collect::<HashSet<_>>();
-        let mut owner = self.member_parents.get(&context.class);
+        let parents = self.member_parents.get(graph);
+        let mut owner = parents.and_then(|parents| parents.get(&context.class));
         let mut visited = HashSet::new();
         let mut completions = Vec::new();
         while let Some(parent) = owner {
@@ -1085,6 +1117,7 @@ impl OpenDocumentIndex {
             completions.extend(
                 self.hierarchy_members
                     .iter()
+                    .filter(|candidate| candidate.graph == graph)
                     .filter(|candidate| candidate.member.owner == *parent)
                     .filter(|candidate| candidate.member.kind == MemberKind::Method)
                     .filter(|candidate| candidate.member.access == MemberAccess::External)
@@ -1105,7 +1138,7 @@ impl OpenDocumentIndex {
                         snippet: candidate.member.override_stub.is_some(),
                     }),
             );
-            owner = self.member_parents.get(parent);
+            owner = parents.and_then(|parents| parents.get(parent));
         }
         let mut labels = HashSet::new();
         completions.retain(|completion| labels.insert(completion.label.clone()));
@@ -1113,8 +1146,15 @@ impl OpenDocumentIndex {
         completions
     }
 
-    pub(crate) fn parent_completions(&self, context: &HierarchyContext) -> Vec<IndexedCompletion> {
-        let Some(parent) = self.member_parents.get(&context.class) else {
+    pub(crate) fn parent_completions(
+        &self,
+        graph: &str,
+        context: &HierarchyContext,
+    ) -> Vec<IndexedCompletion> {
+        let Some(parents) = self.member_parents.get(graph) else {
+            return Vec::new();
+        };
+        let Some(parent) = parents.get(&context.class) else {
             return Vec::new();
         };
         let static_context = context.method.is_some_and(|method| method.is_static);
@@ -1131,6 +1171,7 @@ impl OpenDocumentIndex {
             completions.extend(
                 self.hierarchy_members
                     .iter()
+                    .filter(|candidate| candidate.graph == graph)
                     .filter(|candidate| candidate.member.owner == *current)
                     .filter(|candidate| candidate.member.access == MemberAccess::External)
                     .filter(|candidate| candidate.member.name != "__destruct")
@@ -1158,7 +1199,7 @@ impl OpenDocumentIndex {
                         snippet: false,
                     }),
             );
-            owner = self.member_parents.get(current);
+            owner = parents.get(current);
             direct = false;
         }
         completions.sort_by(|left, right| left.label.cmp(&right.label));

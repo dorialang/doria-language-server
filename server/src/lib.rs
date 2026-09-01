@@ -963,6 +963,7 @@ impl Server {
         let Some((uri, document, offset)) = self.uri_document_and_offset(params) else {
             return completion_items();
         };
+        let graph = self.graph_location(&uri).0;
         if let Some(completions) = document
             .analysis
             .compiler_test_import_completions_at_offset(&document.text, offset)
@@ -1033,13 +1034,16 @@ impl Server {
             }
             return indexed_completion_items(
                 hierarchy_context.as_ref().map_or_else(Vec::new, |context| {
-                    self.document_index.parent_completions(context)
+                    self.document_index.parent_completions(&graph, context)
                 }),
             );
         }
         if override_completion_context(&document.text, offset) {
-            if let Some(context) = hierarchy_context.as_ref() {
-                let completions = self.document_index.override_completions(context);
+            if let Some(context) = hierarchy_context
+                .as_ref()
+                .filter(|context| context.method.is_none())
+            {
+                let completions = self.document_index.override_completions(&graph, context);
                 if !completions.is_empty() {
                     return indexed_completion_items(completions);
                 }
@@ -2060,10 +2064,11 @@ impl Server {
     }
 
     fn rebuild_document_index(&mut self) {
-        self.document_index = OpenDocumentIndex::rebuild(
-            self.all_documents()
-                .map(|(uri, document)| (uri.as_str(), &document.analysis)),
-        );
+        let index =
+            OpenDocumentIndex::rebuild(self.all_documents().map(|(uri, document)| {
+                (self.graph_location(uri).0, uri.as_str(), &document.analysis)
+            }));
+        self.document_index = index;
     }
 
     fn document(&self, uri: &str) -> Option<&Document> {
@@ -8904,6 +8909,30 @@ class Post extends Model
     }
 
     #[test]
+    fn stage34_override_completion_is_not_offered_inside_a_method_body() {
+        let uri = "file:///workspace/override-method.doria";
+        let source = r#"open class Model
+{
+    open function save(): void {}
+}
+class Post extends Model
+{
+    function work(): void
+    {
+
+    }
+}
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+        let offset = source.find("\n\n    }").unwrap() + 1;
+        let completion = server.completion(Some(&params_at(uri, source, offset)));
+        assert!(completion["items"]
+            .as_array()
+            .is_none_or(|items| !items.iter().any(|item| item["label"] == "save")));
+    }
+
+    #[test]
     fn stage34_parent_completion_respects_instance_static_and_lifecycle_contexts() {
         let uri = "file:///workspace/parent-completion.doria";
         let source = r#"open class Grand
@@ -9064,6 +9093,38 @@ function main(): void { Base $base = new Child(); echo $base->value(); }
             .unwrap()
             .iter()
             .all(|edit| edit["newText"] == "measure"));
+    }
+
+    #[test]
+    fn stage34_virtual_families_are_scoped_to_their_compilation_graph() {
+        let first_uri = "file:///first/source.doria";
+        let second_uri = "file:///second/source.doria";
+        let source = r#"open class Base { open function value(): int { return 1; } }
+class Child extends Base { override function value(): int { return parent::value(); } }
+function main(): void { Base $base = new Child(); echo $base->value(); }
+"#;
+        let mut server = stage31_server(&["file:///first", "file:///second"]);
+        open_stage31_document(&mut server, first_uri, source);
+        open_stage31_document(&mut server, second_uri, source);
+        let root = source.find("open function value").unwrap() + "open function ".len();
+
+        let references = server.references(Some(&params_at(first_uri, source, root)));
+        let references = references.as_array().expect("virtual references");
+        assert_eq!(references.len(), 4);
+        assert!(references
+            .iter()
+            .all(|reference| reference["uri"] == first_uri));
+
+        let rename = server.rename(Some(&json!({
+            "textDocument": { "uri": first_uri },
+            "position": params_at(first_uri, source, root)["position"].clone(),
+            "newName": "measure",
+        })));
+        assert_eq!(
+            rename["changes"][first_uri].as_array().map(Vec::len),
+            Some(4)
+        );
+        assert!(rename["changes"].get(second_uri).is_none());
     }
 
     #[test]
