@@ -6,6 +6,15 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Completed Stage 34 tooling for single class inheritance. The server now pins
+  the final Stage 34 compiler, consumes compiler-owned class hierarchy, virtual
+  method family, direct-parent, inherited-member, and callable-contract facts,
+  and projects them into `extends`, override, and `parent::` completion; hierarchy
+  hover and navigation; conservative family-wide references and rename; and
+  semantic tokens. Generated and dependency sources remain readonly, incomplete
+  graphs refuse rename, and VS Code and IntelliJ recognize `open`, `override`,
+  `extends`, and `parent` as presentation only. Interfaces and traits remain the
+  next Stage 35 boundary.
 - Completed Native Testing Foundation Slice 3 and the foundation tooling closure.
   The server now consumes compiler-owned typed matcher candidates for Test-module
   imports and expectation completion, renders collection and checked-Error hover
@@ -35,7 +44,8 @@ This project follows the Doria toolchain CalVer.
   unrelated entrypoints cannot collide while declared dependencies remain navigable.
   Added debounced project watchers, manual refresh, and one Baton path override
   to both official editor integrations. The Native Testing Foundation followed
-  that work and is now complete; Stage 34 is next.
+  that work and is now complete. Stage 34 subsequently completed single class
+  inheritance tooling; Stage 35 interfaces and traits are next.
 
 - Added compiler-resolved go-to-definition and conservative rename for local
   bindings and cross-file methods, properties, class constants, and enum cases,

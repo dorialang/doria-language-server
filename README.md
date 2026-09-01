@@ -59,7 +59,13 @@ and authored navigation. It also projects exact compiler-owned `expect`, `fail`,
 `AssertionError`, `not`, collection/Error matcher, diagnostic, and automatic
 assertion-effect facts. It does not parse testing syntax, recreate matcher
 semantics, infer test scope from file paths, invent Test definitions, or expose
-generated callables. Stage 34 single class inheritance is next. Ordinary
+generated callables. Stage 34 single class inheritance is complete. The server
+projects compiler-owned class hierarchy, virtual-family, direct-parent, and
+inherited-member facts into open-parent, override, and `parent::` completion;
+hierarchy-aware hover and navigation; conservative virtual-family references and
+rename; and semantic tokens. It does not parse or validate inheritance itself,
+and it refuses rename whenever the complete family would cross an incomplete,
+generated, dependency-cache, or otherwise readonly graph boundary. Stage 35 interfaces and traits are next. Ordinary
 analysis remains target-neutral, and highlighting remains presentation only.
 
 Project-aware tooling asks Baton asynchronously for its strict schema-1 project

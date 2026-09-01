@@ -6,6 +6,24 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 class DoriaLexerTest : TestCase() {
+    fun testStage34InheritancePresentationUsesAcceptedKeywordAndTypeTokens() {
+        val tokens = lex(
+            "open class Base { open function value(): int { return 1; } } " +
+                "class Child extends Base { override function value(): int { return parent::value(); } }",
+        )
+
+        for (word in listOf("open", "override", "extends", "parent")) {
+            for (token in tokens.filter { it.text == word }) {
+                assertEquals(DoriaTokenTypes.KEYWORD, token.type)
+            }
+        }
+        for (token in tokens.filter { it.text == "Base" || it.text == "Child" }) {
+            assertEquals(DoriaTokenTypes.TYPE_NAME, token.type)
+        }
+        assertEquals(DoriaTokenTypes.STATIC_METHOD_CALL, tokens.last { it.text == "value" }.type)
+        assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
+    }
+
     fun testNativeTestingSlice2UsesOrdinaryCallMemberAndTypeTokens() {
         val fixture = Files.readString(
             Path.of("..", "..", "fixtures", "native-testing-slice2.doria"),

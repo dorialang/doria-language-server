@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $root = dirname(__DIR__);
-$expectedCompiler = '7d9800c719366b9374921f8679c784d3a3e8d109';
+$expectedCompiler = '63db05052f2e22268446b7ae7de85687f89aed70';
 
 function slice2_text(string $path): string
 {
@@ -141,7 +141,8 @@ foreach ([
     'Native Testing Foundation are complete',
     'collection/Error',
     'type-directed Test import and matcher completion',
-    'Stage 34 single class inheritance is next',
+    'Stage 34 single class inheritance is complete',
+    'Stage 35 interfaces and traits are next',
 ] as $fact) {
     slice2_require(str_contains($docs, $fact), "Slice-2 tooling documentation is missing {$fact}.");
 }
