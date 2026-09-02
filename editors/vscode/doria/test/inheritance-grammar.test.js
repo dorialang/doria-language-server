@@ -36,3 +36,18 @@ test("presents Stage 34 inheritance words without semantic regexes", () => {
   assert.doesNotMatch("opened", new RegExp(inheritance.match));
   assert.doesNotMatch("overridden", new RegExp(inheritance.match));
 });
+
+test("presents constructor parameter roles without accepting an alias", () => {
+  const patterns = grammar.repository.keywords.patterns;
+  const role = patterns.find(
+    (pattern) => pattern.name === "storage.modifier.parameter-role.doria"
+  );
+  const inheritance = patterns.find(
+    (pattern) => pattern.name === "storage.modifier.inheritance.doria"
+  );
+
+  assert.match("parameter", new RegExp(role.match));
+  assert.doesNotMatch("param", new RegExp(role.match));
+  assert.doesNotMatch("parameterized", new RegExp(role.match));
+  assert.match("override", new RegExp(inheritance.match));
+});

@@ -30,6 +30,17 @@ class BadTraitUse
     use HasSlug;
 }
 
+function invalidParameterRole(parameter string $value): void
+{
+}
+
+class InvalidConstructorRoles
+{
+    function __construct(parameter override string $first, internal parameter string $second, parameter parameter string $third)
+    {
+    }
+}
+
 let $bad = function (): void use ($x) {
 };
 

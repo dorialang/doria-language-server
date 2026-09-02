@@ -68,6 +68,16 @@ and it refuses rename whenever the complete family would cross an incomplete,
 generated, dependency-cache, or otherwise readonly graph boundary. Stage 35 interfaces and traits are next. Ordinary
 analysis remains target-neutral, and highlighting remains presentation only.
 
+The post-Stage-34 constructor-parameter-role correction is also implemented.
+The server consumes compiler-owned constructor-parameter and property-family
+facts for default and `internal` promoted properties, inherited-property
+`override` parameters, and constructor-only `parameter` inputs. Those facts
+drive role-preserving signature help, named-argument completion, semantic hover
+and tokens, distinct local/property navigation, member completion, diagnostics,
+fixes, and conservative rename. Override parameters reuse one inherited property;
+constructor-only inputs never appear in `$this->` completion. The server does not
+infer promotion or validate property families independently.
+
 Project-aware tooling asks Baton asynchronously for its strict schema-1 project
 document and gives each package-rooted dependency closure from the supplied
 tooling plan to its own reusable compiler session. This preserves workspace

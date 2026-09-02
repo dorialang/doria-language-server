@@ -2,10 +2,10 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 use doriac::ast::{
-    Block, ClassDecl, ClassMember, ControlFlowFinally, DoWhileStmt, ElseBranch, EnumDecl, Expr,
-    ForIncrement, ForInitializer, FunctionDecl, GivenPrelude, IfStmt, Item, MatchMode, MatchOrigin,
-    MatchPattern, MemberAccess, Param, Program, StaticQualifier, Stmt, TryStmt, VarDecl,
-    WhenExpression, WhileStmt,
+    Block, ClassDecl, ClassMember, ConstructorParameterRole, ControlFlowFinally, DoWhileStmt,
+    ElseBranch, EnumDecl, Expr, ForIncrement, ForInitializer, FunctionDecl, GivenPrelude, IfStmt,
+    Item, MatchMode, MatchOrigin, MatchPattern, MemberAccess, Param, Program, StaticQualifier,
+    Stmt, TryStmt, VarDecl, WhenExpression, WhileStmt,
 };
 use doriac::attributes::{
     AttributeApplication, AttributeClassIdentity, AttributeClassSchema, AttributeSemanticInfo,
@@ -23,8 +23,8 @@ use doriac::ownership::{
     InvocationConsumption,
 };
 use doriac::semantics::{
-    CallableTarget, EnumSemanticInfo, ListAlgorithmCallInfo, ListAlgorithmKind, ListCallbackAccess,
-    SemanticInfo,
+    CallableTarget, ConstructorParameterSemanticRole, EnumSemanticInfo, ListAlgorithmCallInfo,
+    ListAlgorithmKind, ListCallbackAccess, SemanticInfo,
 };
 use doriac::source::{SourceFile, SourceId, Span};
 use doriac::symbols::{BindingKind, BindingOwnership, ReceiverMode};
@@ -260,8 +260,22 @@ fn template_tags(parameters: &[doriac::ast::TypeParamDecl]) -> Vec<String> {
 
 fn documentation_parameter_signature(parameter: &Param) -> String {
     let mut parts = Vec::new();
-    if matches!(parameter.promoted_access, Some(MemberAccess::Internal)) {
-        parts.push("internal".to_string());
+    match parameter.constructor_role {
+        ConstructorParameterRole::Promoted {
+            access: MemberAccess::Internal,
+            ..
+        } => parts.push("internal".to_string()),
+        ConstructorParameterRole::InheritedPropertyOverride { .. } => {
+            parts.push("override".to_string());
+        }
+        ConstructorParameterRole::ConstructorOnly { .. } => {
+            parts.push("parameter".to_string());
+        }
+        ConstructorParameterRole::Ordinary
+        | ConstructorParameterRole::Promoted {
+            access: MemberAccess::External,
+            ..
+        } => {}
     }
     if parameter.take {
         parts.push("take".to_string());
@@ -377,6 +391,7 @@ pub(crate) struct MemberOccurrence {
     pub(crate) exact_declaration: Option<Span>,
     pub(crate) virtual_root: Option<Span>,
     pub(crate) direct_parent: bool,
+    pub(crate) relationship_only: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -448,7 +463,15 @@ struct Symbol {
     documentation: Option<String>,
     local_name: Option<String>,
     parameter_names: Vec<String>,
+    parameter_symbols: Vec<Option<usize>>,
     kind: SymbolKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingNamedArgumentReference {
+    callable: usize,
+    parameter: usize,
+    span: Span,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -469,6 +492,7 @@ enum SymbolKind {
 enum OccurrenceRole {
     Declaration,
     Reference,
+    NamedArgument,
 }
 
 #[derive(Debug, Clone)]
@@ -925,10 +949,38 @@ impl AnalysisSnapshot {
         text: &str,
         offset: usize,
     ) -> Option<SignatureHelp> {
+        Self::analyze(
+            path,
+            &Self::recover_incomplete_call_source(path, text, offset)?,
+        )
+        .signature_help_at_offset(offset)
+    }
+
+    pub(crate) fn recover_incomplete_call_source(
+        path: &str,
+        text: &str,
+        offset: usize,
+    ) -> Option<String> {
         let prefix = text.get(..offset)?;
-        if !matches!(prefix.trim_end().chars().last(), Some('(' | ',')) {
-            return None;
-        }
+        let trimmed = prefix.trim_end();
+        let partial_label = if matches!(trimmed.chars().last(), Some('(' | ',')) {
+            None
+        } else {
+            if trimmed.len() != prefix.len() {
+                return None;
+            }
+            let partial_label = trimmed
+                .rsplit_once(['(', ','])
+                .map(|(_, segment)| segment.trim())
+                .filter(|segment| {
+                    !segment.is_empty()
+                        && segment
+                            .chars()
+                            .all(|character| character == '_' || character.is_ascii_alphanumeric())
+                })?;
+            debug_assert!(!partial_label.is_empty());
+            Some((trimmed.len() - partial_label.len(), partial_label.len()))
+        };
 
         let tokens = doriac::lex_source(path.to_string(), prefix.to_string()).ok()?;
         let unmatched_parens = tokens
@@ -948,15 +1000,22 @@ impl AnalysisSnapshot {
             .chars()
             .take_while(|character| *character == ')')
             .count();
-        let mut insertion = "0".to_string();
+        let mut insertion = if partial_label.is_some() {
+            String::new()
+        } else {
+            "0".to_string()
+        };
         insertion.push_str(&")".repeat(unmatched_parens.saturating_sub(existing_closers)));
         if !trimmed_suffix.starts_with(')') && !trimmed_suffix.starts_with(';') {
             insertion.push(';');
         }
 
         let mut recovered = text.to_string();
+        if let Some((start, length)) = partial_label {
+            recovered.replace_range(start..start + length, &" ".repeat(length));
+        }
         recovered.insert_str(offset, &insertion);
-        Self::analyze(path, &recovered).signature_help_at_offset(offset)
+        Some(recovered)
     }
 
     #[cfg(test)]
@@ -1250,6 +1309,38 @@ impl AnalysisSnapshot {
         })
     }
 
+    pub(crate) fn named_argument_completions_at_offset(
+        &self,
+        offset: usize,
+    ) -> Option<Vec<SemanticCompletion>> {
+        let context = self
+            .call_signatures
+            .iter()
+            .filter(|context| context.span.start <= offset && offset <= context.span.end)
+            .min_by_key(|context| context.span.end.saturating_sub(context.span.start))?;
+        let symbol = self.symbols.get(context.symbol)?;
+        let supplied = context
+            .arguments
+            .iter()
+            .filter(|argument| argument.span.start < offset)
+            .map(|argument| argument.parameter)
+            .collect::<HashSet<_>>();
+        Some(
+            symbol
+                .parameter_names
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !supplied.contains(index))
+                .map(|(_, name)| SemanticCompletion {
+                    label: format!("{name}:"),
+                    kind: 5,
+                    detail: format!("Named argument for {}", symbol.signature),
+                    documentation: None,
+                })
+                .collect(),
+        )
+    }
+
     pub(crate) fn reference_spans_at_offset(
         &self,
         offset: usize,
@@ -1326,18 +1417,81 @@ impl AnalysisSnapshot {
         tokens
     }
 
+    #[cfg(test)]
     pub(crate) fn rename_replacement_at_offset(
         &self,
         offset: usize,
         new_name: &str,
     ) -> Option<String> {
-        let symbol = self.symbols.get(self.symbol_at_offset(offset)?)?;
-        Some(match symbol.kind {
-            SymbolKind::Plain => new_name.to_string(),
-            SymbolKind::Variable if new_name.starts_with('$') => new_name.to_string(),
-            SymbolKind::Variable => format!("${new_name}"),
-            SymbolKind::Keyword => return None,
+        let occurrence = self
+            .occurrences
+            .iter()
+            .filter(|occurrence| span_contains(occurrence.span, offset))
+            .min_by_key(|occurrence| occurrence.span.end.saturating_sub(occurrence.span.start))?;
+        let symbol = self.symbols.get(occurrence.symbol)?;
+        let bare_name = new_name.strip_prefix('$').unwrap_or(new_name);
+        Some(match (symbol.kind, occurrence.role) {
+            (SymbolKind::Plain, _) => new_name.to_string(),
+            (SymbolKind::Variable, OccurrenceRole::NamedArgument) => bare_name.to_string(),
+            (SymbolKind::Variable, _) => format!("${bare_name}"),
+            (SymbolKind::Keyword, _) => return None,
         })
+    }
+
+    pub(crate) fn rename_edits_at_offset(
+        &self,
+        offset: usize,
+        new_name: &str,
+    ) -> Option<Vec<(Span, String)>> {
+        let symbol = self.symbol_at_offset(offset)?;
+        self.rename_edits_for_symbol(symbol, new_name)
+    }
+
+    pub(crate) fn local_rename_edits_at_offset(
+        &self,
+        offset: usize,
+        new_name: &str,
+    ) -> Option<Vec<(Span, String)>> {
+        let symbol = self
+            .occurrences
+            .iter()
+            .filter(|occurrence| span_contains(occurrence.span, offset))
+            .filter(|occurrence| {
+                self.symbols
+                    .get(occurrence.symbol)
+                    .is_some_and(|symbol| symbol.local_name.is_some())
+            })
+            .min_by_key(|occurrence| occurrence.span.end.saturating_sub(occurrence.span.start))?
+            .symbol;
+        self.rename_edits_for_symbol(symbol, new_name)
+    }
+
+    fn rename_edits_for_symbol(
+        &self,
+        symbol: usize,
+        new_name: &str,
+    ) -> Option<Vec<(Span, String)>> {
+        let kind = self.symbols.get(symbol)?.kind;
+        if kind == SymbolKind::Keyword {
+            return None;
+        }
+        let bare_name = new_name.strip_prefix('$').unwrap_or(new_name);
+        Some(
+            self.occurrences
+                .iter()
+                .filter(|occurrence| occurrence.symbol == symbol)
+                .map(|occurrence| {
+                    let replacement = match (kind, occurrence.role) {
+                        (SymbolKind::Variable, OccurrenceRole::NamedArgument) => {
+                            bare_name.to_string()
+                        }
+                        (SymbolKind::Variable, _) => format!("${bare_name}"),
+                        _ => bare_name.to_string(),
+                    };
+                    (occurrence.span, replacement)
+                })
+                .collect(),
+        )
     }
 
     fn symbol_at_offset(&self, offset: usize) -> Option<usize> {
@@ -1596,12 +1750,14 @@ struct SnapshotBuilder<'a> {
     enum_member_completions: HashMap<String, Vec<SemanticCompletion>>,
     methods: HashMap<(String, String), usize>,
     functions: HashMap<String, usize>,
+    callable_declarations: HashMap<Span, usize>,
     member_receivers: Vec<MemberReceiver>,
     static_receivers: Vec<StaticReceiver>,
     local_scopes: Vec<HashMap<String, usize>>,
     local_scope_ends: Vec<usize>,
     local_visibilities: Vec<LocalVisibility>,
     call_signatures: Vec<CallSignatureContext>,
+    pending_named_argument_references: Vec<PendingNamedArgumentReference>,
     semantic_hovers: Vec<SemanticHover>,
     attribute_semantic_tokens: Vec<(Span, u32)>,
     assertion_semantic_tokens: Vec<SemanticTokenSpan>,
@@ -1646,12 +1802,14 @@ impl<'a> SnapshotBuilder<'a> {
             enum_member_completions: HashMap::new(),
             methods: HashMap::new(),
             functions: HashMap::new(),
+            callable_declarations: HashMap::new(),
             member_receivers: Vec::new(),
             static_receivers: Vec::new(),
             local_scopes: Vec::new(),
             local_scope_ends: Vec::new(),
             local_visibilities: Vec::new(),
             call_signatures: Vec::new(),
+            pending_named_argument_references: Vec::new(),
             semantic_hovers: Vec::new(),
             attribute_semantic_tokens: Vec::new(),
             assertion_semantic_tokens: Vec::new(),
@@ -1672,6 +1830,7 @@ impl<'a> SnapshotBuilder<'a> {
         self.collect_declarations(program);
         self.collect_semantic_only_declarations();
         self.collect_references(program);
+        self.resolve_named_argument_references();
         self.collect_attribute_facts(program);
         self.collect_semantic_hovers();
         let attribute_info = self
@@ -1852,6 +2011,8 @@ impl<'a> SnapshotBuilder<'a> {
                     .find(|occurrence| {
                         occurrence.role == OccurrenceRole::Declaration
                             && occurrence.span == name_span
+                            && self.symbols[occurrence.symbol].local_name.as_deref()
+                                == Some(parameter.name.as_str())
                     })
                     .map(|occurrence| occurrence.symbol);
                 if let Some(symbol) = symbol {
@@ -2210,6 +2371,7 @@ impl<'a> SnapshotBuilder<'a> {
                         SymbolKind::Plain,
                     );
                     self.record_callable_parameters(symbol, function);
+                    self.callable_declarations.insert(function.span, symbol);
                     self.functions.insert(function.name.clone(), symbol);
                 }
                 _ => {}
@@ -2521,6 +2683,13 @@ impl<'a> SnapshotBuilder<'a> {
                         selection_span,
                         true,
                     );
+                    if let Some(occurrence) = self
+                        .member_occurrences
+                        .last_mut()
+                        .filter(|occurrence| occurrence.span == selection_span)
+                    {
+                        occurrence.exact_declaration = Some(property.span);
+                    }
                     self.class_members
                         .entry(class.name.clone())
                         .or_default()
@@ -2608,6 +2777,7 @@ impl<'a> SnapshotBuilder<'a> {
             self.hierarchy_semantic_tokens
                 .push((span, SEMANTIC_TOKEN_KEYWORD, 0));
         }
+        self.collect_constructor_parameter_roles(class_name, method);
         let mut documentation = phpdoc_before(self.text, method.span.start);
         self.append_callable_effect_documentation(&mut documentation, method.span);
         if let Some(hierarchy) = self
@@ -2627,6 +2797,7 @@ impl<'a> SnapshotBuilder<'a> {
             SymbolKind::Plain,
         );
         self.record_callable_parameters(symbol, method);
+        self.callable_declarations.insert(method.span, symbol);
         self.methods
             .insert((class_name.to_string(), method.name.clone()), symbol);
         self.record_method_declaration_occurrence(class_name, method, selection_span);
@@ -2654,6 +2825,164 @@ impl<'a> SnapshotBuilder<'a> {
                     .is_some()
                     .then(|| override_stub(method)),
                 body_span: Some(method.body.span),
+            });
+        }
+    }
+
+    fn collect_constructor_parameter_roles(&mut self, class_name: &str, method: &FunctionDecl) {
+        if method.name != "__construct" {
+            return;
+        }
+
+        for parameter in &method.params {
+            let semantic_role = self
+                .semantic_info
+                .and_then(|info| info.constructor_parameters.get(&parameter.span))
+                .map(|parameter| parameter.role.clone());
+            match (parameter.constructor_role, semantic_role) {
+                (
+                    ConstructorParameterRole::Promoted { access, .. },
+                    Some(ConstructorParameterSemanticRole::Promoted {
+                        access: semantic_access,
+                    }),
+                ) if access == semantic_access => {
+                    self.collect_promoted_property(class_name, parameter, access);
+                }
+                (
+                    ConstructorParameterRole::InheritedPropertyOverride { override_span },
+                    Some(ConstructorParameterSemanticRole::InheritedPropertyOverride {
+                        declaring_class,
+                        property_name,
+                        declaration,
+                    }),
+                ) => {
+                    let Some(family) = self
+                        .semantic_info
+                        .and_then(|info| info.property_families.get(&declaration))
+                        .filter(|family| {
+                            family.root_declaring_class == declaring_class
+                                && family.root_property_name == property_name
+                                && family.override_parameters.contains(&parameter.span)
+                        })
+                    else {
+                        continue;
+                    };
+                    self.hierarchy_semantic_tokens
+                        .push((override_span, SEMANTIC_TOKEN_KEYWORD, 0));
+                    self.record_member_occurrence(
+                        &declaring_class,
+                        &property_name,
+                        MemberKind::Property,
+                        override_span,
+                        false,
+                    );
+                    if let Some(occurrence) = self
+                        .member_occurrences
+                        .last_mut()
+                        .filter(|occurrence| occurrence.span == override_span)
+                    {
+                        occurrence.exact_declaration = Some(declaration);
+                        occurrence.relationship_only = true;
+                    }
+                    self.semantic_hovers.push(SemanticHover::new(
+                        override_span,
+                        format!(
+                            "Inherited property override for `{}::{}`.\n\nThe constructor parameter reuses the inherited property and declares no new storage. The parent construction phase initializes the root property.",
+                            family.root_declaring_class, family.root_property_name,
+                        ),
+                    ));
+                }
+                (
+                    ConstructorParameterRole::ConstructorOnly { parameter_span },
+                    Some(ConstructorParameterSemanticRole::ConstructorOnly),
+                ) => {
+                    self.hierarchy_semantic_tokens.push((
+                        parameter_span,
+                        SEMANTIC_TOKEN_KEYWORD,
+                        0,
+                    ));
+                    self.semantic_hovers.push(SemanticHover::new(
+                        parameter_span,
+                        "Constructor-only parameter.\n\nThis input is available only in `__construct` and declares no property or object storage."
+                            .to_string(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn collect_promoted_property(
+        &mut self,
+        class_name: &str,
+        parameter: &Param,
+        access: MemberAccess,
+    ) {
+        let mut documentation = Some(promoted_property_documentation(
+            class_name, parameter, access,
+        ));
+        if parameter.name == "message" && self.error_classes.contains(class_name) {
+            append_documentation(
+                &mut documentation,
+                "Required externally accessible readonly message for the compiler-known `Error` contract.",
+            );
+        }
+        let documentation = documentation.expect("promoted property documentation");
+        let property_symbol = self.add_declaration_symbol(
+            parameter.name_span,
+            format!("{} ${}", parameter.ty, parameter.name),
+            Some(documentation.clone()),
+            SymbolKind::Variable,
+        );
+        self.class_property_symbols.insert(
+            (class_name.to_string(), parameter.name.clone()),
+            property_symbol,
+        );
+        self.record_member_occurrence(
+            class_name,
+            &parameter.name,
+            MemberKind::Property,
+            parameter.name_span,
+            true,
+        );
+        if let Some(occurrence) = self
+            .member_occurrences
+            .last_mut()
+            .filter(|occurrence| occurrence.span == parameter.name_span)
+        {
+            occurrence.exact_declaration = Some(parameter.span);
+        }
+        self.class_members
+            .entry(class_name.to_string())
+            .or_default()
+            .push(ClassMemberCompletion {
+                completion: SemanticCompletion {
+                    label: parameter.name.clone(),
+                    kind: 10,
+                    detail: format!("{} ${}", parameter.ty, parameter.name),
+                    documentation: Some(documentation.clone()),
+                },
+                writable: false,
+                internal: access == MemberAccess::Internal,
+                is_static: false,
+            });
+        if let Some(owner) = self.member_owner(class_name, parameter.span, true) {
+            self.hierarchy_members.push(HierarchyMember {
+                owner,
+                name: parameter.name.clone(),
+                kind: MemberKind::Property,
+                declaration: parameter.span,
+                detail: format!("{} ${}", parameter.ty, parameter.name),
+                documentation: Some(documentation),
+                access,
+                is_static: false,
+                writable_receiver: false,
+                is_open: false,
+                is_override: false,
+                virtual_root: None,
+                overridden_declaration: None,
+                override_stub: None,
+                body_span: None,
             });
         }
     }
@@ -2713,6 +3042,7 @@ impl<'a> SnapshotBuilder<'a> {
             documentation,
             local_name: None,
             parameter_names: Vec::new(),
+            parameter_symbols: Vec::new(),
             kind,
         });
         symbol
@@ -2748,6 +3078,7 @@ impl<'a> SnapshotBuilder<'a> {
             documentation,
             local_name: None,
             parameter_names: Vec::new(),
+            parameter_symbols: Vec::new(),
             kind,
         });
         self.occurrences.push(Occurrence {
@@ -2798,6 +3129,7 @@ impl<'a> SnapshotBuilder<'a> {
             exact_declaration: None,
             virtual_root: None,
             direct_parent: false,
+            relationship_only: false,
         });
     }
 
@@ -2919,6 +3251,7 @@ impl<'a> SnapshotBuilder<'a> {
             .iter()
             .map(|parameter| parameter.name.clone())
             .collect();
+        self.symbols[symbol].parameter_symbols = vec![None; function.params.len()];
     }
 
     fn record_call_signature(&mut self, span: Span, args: &[doriac::ast::Argument], symbol: usize) {
@@ -2936,6 +3269,14 @@ impl<'a> SnapshotBuilder<'a> {
             &vec![false; parameter_name_refs.len()],
             &argument_names,
         );
+        self.pending_named_argument_references
+            .extend(args.iter().enumerate().filter_map(|(index, argument)| {
+                Some(PendingNamedArgumentReference {
+                    callable: symbol,
+                    parameter: bound.arg_to_param[index]?,
+                    span: argument.name.as_ref()?.span,
+                })
+            }));
         self.call_signatures.push(CallSignatureContext {
             span,
             arguments: args
@@ -3051,8 +3392,15 @@ impl<'a> SnapshotBuilder<'a> {
                 self.record_type_reference(&entry.ty, entry.span);
             }
         }
-        for parameter in &function.params {
-            self.declare_parameter(parameter, block.span.start, current_class);
+        let callable = self.callable_declarations.get(&function.span).copied();
+        for (index, parameter) in function.params.iter().enumerate() {
+            let parameter_symbol =
+                self.declare_parameter(parameter, block.span.start, current_class);
+            if let Some(callable) = callable {
+                if let Some(slot) = self.symbols[callable].parameter_symbols.get_mut(index) {
+                    *slot = Some(parameter_symbol);
+                }
+            }
         }
         for statement in &block.statements {
             self.visit_stmt(statement, current_class, parent_class);
@@ -3388,23 +3736,27 @@ impl<'a> SnapshotBuilder<'a> {
         parameter: &Param,
         visibility_start: usize,
         current_class: Option<&str>,
-    ) {
+    ) -> usize {
         let selection_span = find_variable_span(self.tokens, parameter.span, &parameter.name)
             .unwrap_or(parameter.span);
-        let documentation = (parameter.name == "message"
-            && parameter.promoted_access.is_some()
-            && current_class.is_some_and(|class| self.error_classes.contains(class)))
-        .then(|| {
-            "Promoted externally accessible readonly message required by the compiler-known `Error` contract."
-                .to_string()
-        });
+        let mut documentation =
+            constructor_parameter_documentation(self.semantic_info, current_class, parameter);
+        if parameter.name == "message"
+            && parameter.constructor_role.is_promoted()
+            && current_class.is_some_and(|class| self.error_classes.contains(class))
+        {
+            append_documentation(
+                &mut documentation,
+                "Required externally accessible readonly message for the compiler-known `Error` contract.",
+            );
+        }
         self.declare_local_binding_with_documentation(
             &parameter.name,
             selection_span,
             parameter_signature(parameter),
             visibility_start,
             documentation,
-        );
+        )
     }
 
     fn declare_local_binding(
@@ -3430,7 +3782,7 @@ impl<'a> SnapshotBuilder<'a> {
         signature: String,
         visibility_start: usize,
         documentation: Option<String>,
-    ) {
+    ) -> usize {
         let symbol = self.add_declaration_symbol(
             selection_span,
             signature,
@@ -3450,6 +3802,27 @@ impl<'a> SnapshotBuilder<'a> {
         });
         if let Some(scope) = self.local_scopes.last_mut() {
             scope.insert(name.to_string(), symbol);
+        }
+        symbol
+    }
+
+    fn resolve_named_argument_references(&mut self) {
+        let references = std::mem::take(&mut self.pending_named_argument_references);
+        for reference in references {
+            let Some(symbol) = self
+                .symbols
+                .get(reference.callable)
+                .and_then(|callable| callable.parameter_symbols.get(reference.parameter))
+                .copied()
+                .flatten()
+            else {
+                continue;
+            };
+            self.occurrences.push(Occurrence {
+                span: reference.span,
+                symbol,
+                role: OccurrenceRole::NamedArgument,
+            });
         }
     }
 
@@ -5605,8 +5978,22 @@ fn override_stub(function: &FunctionDecl) -> String {
 
 fn parameter_signature(parameter: &Param) -> String {
     let mut parts = Vec::new();
-    if matches!(parameter.promoted_access, Some(MemberAccess::Internal)) {
-        parts.push("internal".to_string());
+    match parameter.constructor_role {
+        ConstructorParameterRole::Promoted {
+            access: MemberAccess::Internal,
+            ..
+        } => parts.push("internal".to_string()),
+        ConstructorParameterRole::InheritedPropertyOverride { .. } => {
+            parts.push("override".to_string());
+        }
+        ConstructorParameterRole::ConstructorOnly { .. } => {
+            parts.push("parameter".to_string());
+        }
+        ConstructorParameterRole::Ordinary
+        | ConstructorParameterRole::Promoted {
+            access: MemberAccess::External,
+            ..
+        } => {}
     }
     if parameter.take {
         parts.push("take".to_string());
@@ -5634,6 +6021,80 @@ fn parameter_signature_without_default(parameter: &Param) -> String {
     parts.push(parameter.ty.to_string());
     parts.push(format!("${}", parameter.name));
     parts.join(" ")
+}
+
+fn constructor_parameter_documentation(
+    semantic_info: Option<&SemanticInfo>,
+    current_class: Option<&str>,
+    parameter: &Param,
+) -> Option<String> {
+    let semantic_info = semantic_info?;
+    let role = semantic_info.constructor_parameters.get(&parameter.span)?;
+    Some(match &role.role {
+        ConstructorParameterSemanticRole::Promoted { access } => {
+            promoted_property_documentation(current_class.unwrap_or("class"), parameter, *access)
+        }
+        ConstructorParameterSemanticRole::ConstructorOnly => format!(
+            "**Constructor-Only Parameter**\n\nDeclares No Property\n\nAvailable In `__construct` Only\n\n**Parameter Mode:** {}",
+            parameter_mode_documentation(parameter),
+        ),
+        ConstructorParameterSemanticRole::InheritedPropertyOverride {
+            declaring_class,
+            property_name,
+            ..
+        } => {
+            let root_mutability = semantic_info
+                .classes
+                .iter()
+                .flat_map(|class| &class.properties)
+                .find(|property| {
+                    property.declaring_class == *declaring_class
+                        && property.name == *property_name
+                })
+                .map_or("Compiler-resolved", |property| {
+                    if property.writable {
+                        "Writable"
+                    } else {
+                        "Readonly"
+                    }
+                });
+            format!(
+                "**Inherited Property Override Parameter**\n\nReuses `{declaring_class}::{property_name}`\n\nDeclares No New Storage\n\nInitialized By The Parent Construction Phase\n\n**Parameter Mode:** {}\n\n**Inherited Property Mutability:** {root_mutability}",
+                parameter_mode_documentation(parameter),
+            )
+        }
+    })
+}
+
+fn promoted_property_documentation(
+    class_name: &str,
+    parameter: &Param,
+    access: MemberAccess,
+) -> String {
+    format!(
+        "**Promoted Property**\n\n**Accessibility:** {}\n\n**Mutability:** {}\n\nDeclares `{class_name}::{}`",
+        if access == MemberAccess::Internal {
+            "Internal"
+        } else {
+            "External"
+        },
+        if parameter.writable {
+            "Writable"
+        } else {
+            "Readonly"
+        },
+        parameter.name,
+    )
+}
+
+fn parameter_mode_documentation(parameter: &Param) -> &'static str {
+    if parameter.take {
+        "Owned (`take`)"
+    } else if parameter.writable {
+        "Writable Borrow"
+    } else {
+        "Readonly Borrow"
+    }
 }
 
 fn type_parameter_signature(parameters: &[doriac::ast::TypeParamDecl]) -> String {

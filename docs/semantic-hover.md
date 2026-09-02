@@ -81,6 +81,16 @@ dispatch facts. A `parent::` call names its exact direct parent declaration and
 states that virtual dispatch is bypassed. The server does not reconstruct a
 hierarchy or override checker from source text.
 
+Constructor parameter hover likewise consumes compiler-owned role facts. A
+promoted parameter identifies its declared property, external or internal
+accessibility, and property mutability. A `parameter` input is identified as
+constructor-only and as declaring no property. A constructor `override` input
+names the inherited root property, states that it creates no storage, and keeps
+the parameter's borrow or ownership mode separate from the root property's
+mutability. Role-preserving signature help and named-argument completion use the
+same callable symbol. No hover exposes physical slots, backend symbols, or
+runtime descriptors.
+
 Attribute application hover uses compiler-owned Stage 32 metadata. It shows the
 canonical attribute class, declaration target, constructor parameter types,
 evaluated constant values, and whether a value came from a default without
@@ -143,7 +153,8 @@ identifiers return no semantic hover.
 hover. Free functions, instance methods, static methods, and constructors show
 parameter and return types together with any declared `throws` entries in source
 order. The server does not reconstruct or alphabetize the compiler's checked-error
-effects. A clause-free `main` hover remains clause-free rather than synthesizing
+effects. Constructor signatures preserve authored `internal`, `override`, and
+`parameter` roles. A clause-free `main` hover remains clause-free rather than synthesizing
 the compiler's inferred effective set as source syntax.
 
 ## PHPDoc presentation

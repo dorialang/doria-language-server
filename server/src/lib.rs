@@ -37,7 +37,7 @@ use file_uri::file_uri_to_path;
 use project::{ProjectDocument, SourceEditPolicy};
 use string_surface::{STRING_COMPANION_METHODS, STRING_PROPERTIES};
 use workspace_graph::{analyze_open_graph, analyze_project_graph, GraphDocument, OpenSource};
-use workspace_index::OpenDocumentIndex;
+use workspace_index::{IndexedEdit, OpenDocumentIndex, SymbolTarget};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LspPosition {
@@ -1049,6 +1049,34 @@ impl Server {
                 }
             }
         }
+        if named_argument_completion_context(&document.text, offset) {
+            if let Some(recovered) =
+                AnalysisSnapshot::recover_incomplete_call_source(&uri, &document.text, offset)
+            {
+                let analysis = self
+                    .analyze_temporary_project_overlay(&uri, &recovered)
+                    .unwrap_or_else(|| {
+                        AnalysisSnapshot::analyze_with_context(
+                            &uri,
+                            &recovered,
+                            document.analysis.compilation_context().clone(),
+                        )
+                    });
+                if let Some(completions) = analysis
+                    .named_argument_completions_at_offset(offset)
+                    .filter(|completions| !completions.is_empty())
+                {
+                    return semantic_completion_items(completions);
+                }
+            }
+            if let Some(completions) = document
+                .analysis
+                .named_argument_completions_at_offset(offset)
+                .filter(|completions| !completions.is_empty())
+            {
+                return semantic_completion_items(completions);
+            }
+        }
         if let Some(completions) = document.analysis.member_completions_at_offset(offset) {
             return semantic_completion_items(completions);
         }
@@ -1122,6 +1150,16 @@ impl Server {
                 .filter_map(|item| item.get("label").and_then(Value::as_str))
                 .map(str::to_string)
                 .collect::<std::collections::HashSet<_>>();
+            if constructor_parameter_role_completion_context(&document.text, offset)
+                && labels.insert("parameter".to_string())
+            {
+                items.push(json!({
+                    "label": "parameter",
+                    "kind": 14,
+                    "detail": "Doria constructor-parameter role",
+                    "documentation": "Declares a constructor-only input. It remains in the constructor signature and body but creates no property or object storage.",
+                }));
+            }
             for candidate in self.document_index.completions(&uri) {
                 if labels.insert(candidate.label.clone()) {
                     items.push(json!({
@@ -1243,9 +1281,33 @@ impl Server {
             return Value::Null;
         };
         if let Some(target) = self.document_index.target_at(&uri, offset) {
-            let Some(edits) = self.document_index.rename(&target, new_name) else {
+            let Some(mut edits) = self.document_index.rename(&target, new_name) else {
                 return Value::Null;
             };
+            if matches!(target, SymbolTarget::Member(_)) {
+                if let Some(local_edits) = document
+                    .analysis
+                    .local_rename_edits_at_offset(offset, new_name)
+                {
+                    edits.extend(
+                        local_edits
+                            .into_iter()
+                            .map(|(span, replacement)| IndexedEdit {
+                                uri: uri.clone(),
+                                span,
+                                replacement,
+                            }),
+                    );
+                }
+            }
+            edits.sort_by(|left, right| {
+                (&left.uri, left.span.start, left.span.end).cmp(&(
+                    &right.uri,
+                    right.span.start,
+                    right.span.end,
+                ))
+            });
+            edits.dedup_by(|left, right| left.uri == right.uri && left.span == right.span);
             let mut changes = serde_json::Map::new();
             for edit in edits {
                 if !self.source_is_editable(&edit.uri) {
@@ -1254,6 +1316,16 @@ impl Server {
                 let Some(target_document) = self.document(&edit.uri) else {
                     return Value::Null;
                 };
+                let replacement = if target_document
+                    .text
+                    .get(edit.span.start..edit.span.end)
+                    .is_some_and(|source| source.starts_with('$'))
+                    && !edit.replacement.starts_with('$')
+                {
+                    format!("${}", edit.replacement)
+                } else {
+                    edit.replacement
+                };
                 changes
                     .entry(edit.uri)
                     .or_insert_with(|| Value::Array(Vec::new()))
@@ -1261,22 +1333,22 @@ impl Server {
                     .expect("workspace rename changes are arrays")
                     .push(json!({
                         "range": span_to_range(&target_document.text, edit.span),
-                        "newText": edit.replacement,
+                        "newText": replacement,
                     }));
             }
             return json!({ "changes": changes });
         }
-        let Some(replacement) = document
-            .analysis
-            .rename_replacement_at_offset(offset, new_name)
-        else {
+        let Some(edits) = document.analysis.rename_edits_at_offset(offset, new_name) else {
             return Value::Null;
         };
-        let edits = document
-            .analysis
-            .reference_spans_at_offset(offset, true)
+        let edits = edits
             .into_iter()
-            .map(|span| json!({ "range": span_to_range(&document.text, span), "newText": replacement }))
+            .map(|(span, replacement)| {
+                json!({
+                    "range": span_to_range(&document.text, span),
+                    "newText": replacement,
+                })
+            })
             .collect::<Vec<_>>();
         if edits.is_empty() {
             Value::Null
@@ -2684,8 +2756,6 @@ fn completion_items() -> Value {
         "await",
         "unsafe",
         "extern",
-        "open",
-        "override",
         "get",
         "set",
         "insteadof",
@@ -2966,6 +3036,42 @@ fn override_completion_context(text: &str, offset: usize) -> bool {
         .map_or(prefix, |(_, line)| line)
         .trim();
     line.is_empty() || "override".starts_with(line)
+}
+
+fn constructor_parameter_role_completion_context(text: &str, offset: usize) -> bool {
+    let Some(prefix) = text.get(..offset) else {
+        return false;
+    };
+    let Ok(tokens) = doriac::lex_source("<constructor-parameter-completion>", prefix) else {
+        return false;
+    };
+    let Some(open_index) = tokens.windows(3).rposition(|window| {
+        matches!(window[0].kind, TokenKind::Function)
+            && matches!(&window[1].kind, TokenKind::Identifier(name) if name == "__construct")
+            && matches!(window[2].kind, TokenKind::LeftParen)
+    }) else {
+        return false;
+    };
+    let mut depth = 0_usize;
+    for token in &tokens[open_index + 2..] {
+        match token.kind {
+            TokenKind::LeftParen => depth += 1,
+            TokenKind::RightParen => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    depth == 1
+}
+
+fn named_argument_completion_context(text: &str, offset: usize) -> bool {
+    let Some(prefix) = text.get(..offset) else {
+        return false;
+    };
+    let segment = prefix
+        .rsplit_once(['(', ','])
+        .map_or(prefix, |(_, segment)| segment)
+        .trim();
+    segment.is_empty() || segment.chars().all(is_identifier_character)
 }
 
 fn is_identifier_character(character: char) -> bool {
@@ -3500,7 +3606,10 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "Permits subclassing on a class or creates a virtual method slot on a method.",
         ),
         TokenKind::Override => Some(
-            "Marks a method as the checked implementation of an inherited open virtual slot.",
+            "Marks a method as the checked implementation of an inherited open virtual slot, or marks a constructor parameter as reusing one inherited property without creating storage.",
+        ),
+        TokenKind::Parameter => Some(
+            "Marks a constructor-only parameter. The binding is available in `__construct` and declares no property or object storage.",
         ),
         TokenKind::Extends => Some(
             "Declares the single direct parent of a class. The parent must be visible and open.",
@@ -4114,8 +4223,6 @@ mod tests {
             "await",
             "unsafe",
             "extern",
-            "open",
-            "override",
             "get",
             "set",
             "insteadof",
@@ -4128,6 +4235,10 @@ mod tests {
                 item["documentation"],
                 "Accepted planned Doria syntax; compiler support lands in a later stage."
             );
+        }
+        for keyword in ["open", "override"] {
+            let item = completion_item(keyword);
+            assert_eq!(item["detail"], "Doria keyword");
         }
     }
 
@@ -9400,5 +9511,364 @@ open class Base
         let parent_name = fixed.rfind("Base").unwrap();
         let definition = server.definition(Some(&params_at(uri, fixed, parent_name)));
         assert_eq!(definition["uri"], uri);
+    }
+
+    #[test]
+    fn constructor_parameter_roles_drive_tokens_hovers_signatures_and_completion() {
+        let uri = "file:///workspace/constructor-roles.doria";
+        let source = r#"class Promoted
+{
+    function __construct(string $title, internal writable int $revision) {}
+}
+open class Document
+{
+    function __construct(string $title) {}
+    open function heading(): string { return $this->title; }
+}
+class Article extends Document
+{
+    string $raw = "";
+    function __construct(override string $title, parameter string $raw)
+    {
+        parent::__construct($title);
+        echo $raw;
+    }
+    override function heading(): string { return $this->title; }
+}
+function main(): void { let $article = new Article("title", "raw"); }
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+        assert!(
+            server.documents[uri].analysis.diagnostics().is_empty(),
+            "accepted role fixture: {:#?}",
+            server.documents[uri].analysis.diagnostics()
+        );
+
+        let tokens = semantic_token_records(&server.semantic_tokens(Some(&json!({
+            "textDocument": { "uri": uri }
+        }))));
+        for needle in ["parameter string", "override string", "override function"] {
+            let offset = source.find(needle).unwrap();
+            let position = byte_offset_to_position(source, offset);
+            assert!(
+                tokens.iter().any(|token| token.0 == position.line
+                    && token.1 == position.character
+                    && token.3 == 4),
+                "missing role token for {needle}: {tokens:?}"
+            );
+        }
+
+        for (needle, expected) in [
+            ("$title, internal", "**Promoted Property**"),
+            ("$revision)", "**Promoted Property**"),
+            (
+                "$title, parameter",
+                "**Inherited Property Override Parameter**",
+            ),
+            ("$raw)\n", "**Constructor-Only Parameter**"),
+        ] {
+            let offset = source.find(needle).unwrap();
+            let hover = server
+                .hover(Some(&params_at(uri, source, offset)))
+                .unwrap_or_else(|| panic!("hover for {needle}"));
+            assert!(
+                hover["contents"]["value"]
+                    .as_str()
+                    .is_some_and(|markdown| markdown.contains(expected)),
+                "{needle}: {hover:#?}"
+            );
+        }
+
+        let call = source.find("new Article(").unwrap();
+        let second_argument = source[call..].find("\"raw\"").unwrap() + call;
+        let signature = server.signature_help(Some(&params_at(uri, source, second_argument)));
+        assert_eq!(
+            signature["signatures"][0]["label"],
+            "function Article::__construct(override string $title, parameter string $raw)"
+        );
+        assert_eq!(signature["activeParameter"], 1);
+
+        let constructor_prefix = source.replace(
+            "function main(): void { let $article = new Article(\"title\", \"raw\"); }",
+            "function main(): void { let $article = new Article(); }",
+        );
+        let completion_offset =
+            constructor_prefix.find("new Article(").unwrap() + "new Article(".len();
+        open_stage31_document(&mut server, uri, &constructor_prefix);
+        let labels =
+            request_completion_labels(&server, uri, &constructor_prefix, completion_offset);
+        assert!(labels.contains("title:"), "named arguments: {labels:?}");
+        assert!(labels.contains("raw:"), "named arguments: {labels:?}");
+
+        let partial_label = source.replace(
+            "function main(): void { let $article = new Article(\"title\", \"raw\"); }",
+            "function main(): void { let $article = new Article(ti); }",
+        );
+        let partial_offset = partial_label.find("Article(ti").unwrap() + "Article(ti".len();
+        open_stage31_document(&mut server, uri, &partial_label);
+        let labels = request_completion_labels(&server, uri, &partial_label, partial_offset);
+        assert!(
+            labels.contains("title:"),
+            "a partial named label must retain its matching completion: {labels:?}"
+        );
+
+        for (candidate, offered) in [
+            ("class C { function __construct(", true),
+            ("function ordinary(", false),
+            ("class C { function method(", false),
+            ("class C { function __destruct(", false),
+        ] {
+            open_stage31_document(&mut server, uri, candidate);
+            let labels = request_completion_labels(&server, uri, candidate, candidate.len());
+            assert_eq!(
+                labels.contains("parameter"),
+                offered,
+                "parameter completion in `{candidate}`: {labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn constructor_parameter_roles_keep_local_and_property_identities_distinct() {
+        let uri = "file:///workspace/constructor-role-navigation.doria";
+        let source = r#"open class Document
+{
+    function __construct(string $title) {}
+}
+class Article extends Document
+{
+    string $raw = "property";
+    function __construct(override string $title, parameter string $raw)
+    {
+        parent::__construct($title);
+        echo $raw;
+        echo $this->raw;
+        echo $this->title;
+    }
+}
+
+function main(): void { let $article = new Article(title: "title", raw: "input"); }
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+        assert!(server.documents[uri].analysis.diagnostics().is_empty());
+
+        let parameter_declaration =
+            source.find("parameter string $raw").unwrap() + "parameter string ".len();
+        let parameter_use = source.find("echo $raw").unwrap() + "echo ".len();
+        let parameter_target = server.definition(Some(&params_at(uri, source, parameter_use)));
+        assert_eq!(
+            parameter_target["range"]["start"],
+            params_at(uri, source, parameter_declaration)["position"]
+        );
+
+        let property_declaration = source.find("string $raw =").unwrap() + "string ".len();
+        let property_use = source.find("$this->raw").unwrap() + "$this->".len();
+        let property_target = server.definition(Some(&params_at(uri, source, property_use)));
+        assert_eq!(
+            property_target["range"]["start"],
+            params_at(uri, source, property_declaration)["position"]
+        );
+
+        let override_keyword = source.find("override string").unwrap();
+        let override_target = server.definition(Some(&params_at(uri, source, override_keyword)));
+        let root_property = source.find("string $title").unwrap() + "string ".len();
+        assert_eq!(
+            override_target["range"]["start"],
+            params_at(uri, source, root_property)["position"]
+        );
+
+        assert_eq!(
+            server
+                .references(Some(&params_at(uri, source, parameter_declaration)))
+                .as_array()
+                .map(Vec::len),
+            Some(3),
+            "declaration, local use, and named argument"
+        );
+        assert_eq!(
+            server
+                .references(Some(&params_at(uri, source, property_declaration)))
+                .as_array()
+                .map(Vec::len),
+            Some(2),
+            "the property declaration and access remain separate from local and named-argument references"
+        );
+
+        let rename = server.rename(Some(&json!({
+            "textDocument": { "uri": uri },
+            "position": params_at(uri, source, parameter_declaration)["position"].clone(),
+            "newName": "source",
+        })));
+        let edits = rename["changes"][uri].as_array().expect("parameter rename");
+        assert_eq!(edits.len(), 3);
+        assert!(edits
+            .iter()
+            .all(|edit| edit["newText"] == "$source" || edit["newText"] == "source"));
+        assert_eq!(
+            server.rename(Some(&json!({
+                "textDocument": { "uri": uri },
+                "position": params_at(uri, source, override_keyword)["position"].clone(),
+                "newName": "heading",
+            }))),
+            Value::Null,
+            "an override family rename must be atomic or conservatively refused"
+        );
+
+        let member_source = source.replace("echo $this->title;", "echo $this->;");
+        open_stage31_document(&mut server, uri, &member_source);
+        let member_offset = member_source.find("$this->;").unwrap() + "$this->".len();
+        let labels = request_completion_labels(&server, uri, &member_source, member_offset);
+        assert_eq!(labels.iter().filter(|label| *label == "title").count(), 1);
+        assert_eq!(labels.iter().filter(|label| *label == "raw").count(), 1);
+    }
+
+    #[test]
+    fn promoted_parameter_rename_updates_both_source_identities_atomically() {
+        let uri = "file:///workspace/promoted-parameter-rename.doria";
+        let source = r#"class Article
+{
+    function __construct(string $title)
+    {
+        echo $title;
+        echo $this->title;
+    }
+}
+function main(): void { let $article = new Article(title: "Doria"); }
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+        assert!(server.documents[uri].analysis.diagnostics().is_empty());
+
+        let declaration = source.find("$title)").unwrap();
+        let rename = server.rename(Some(&json!({
+            "textDocument": { "uri": uri },
+            "position": params_at(uri, source, declaration)["position"].clone(),
+            "newName": "headline",
+        })));
+        let edits = rename["changes"][uri]
+            .as_array()
+            .expect("atomic promoted-parameter rename");
+        assert_eq!(
+            edits.len(),
+            4,
+            "declaration, local use, property use, and label: {edits:#?}"
+        );
+        assert_eq!(
+            edits
+                .iter()
+                .filter(|edit| edit["newText"] == "$headline")
+                .count(),
+            2,
+            "the declaration and bare parameter use retain the variable sigil"
+        );
+        assert_eq!(
+            edits
+                .iter()
+                .filter(|edit| edit["newText"] == "headline")
+                .count(),
+            2,
+            "the property member and named label remain identifier-shaped"
+        );
+    }
+
+    #[test]
+    fn duplicate_callable_recovery_keeps_parameter_symbols_declaration_local() {
+        let uri = "file:///workspace/duplicate-callables.doria";
+        let source = r#"function f(int $first, int $second): void {}
+function f(): void {}
+class C
+{
+    function m(int $first, int $second): void {}
+    function m(): void {}
+}
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+        assert!(
+            !server.documents[uri].analysis.diagnostics().is_empty(),
+            "the compiler should still report the duplicate declarations"
+        );
+        let first = source.find("$first").unwrap();
+        assert!(
+            !server
+                .references(Some(&params_at(uri, source, first)))
+                .as_array()
+                .expect("references response")
+                .is_empty(),
+            "the earlier declaration keeps its own parameter vector"
+        );
+    }
+
+    #[test]
+    fn constructor_parameter_role_diagnostics_actions_and_utf16_ranges_are_compiler_owned() {
+        let uri = "file:///workspace/constructor-role-diagnostics.doria";
+        let missing = "// 😀\nopen class Base { function __construct(string $title) {} } class Child extends Base { function __construct(string $title) { parent::__construct($title); } }";
+        let diagnostics = diagnostics_for_document(uri, missing);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic["code"] == "E0743")
+            .expect("missing override diagnostic");
+        let title = missing.rfind("string $title").unwrap();
+        let expected = byte_offset_to_position(missing, title);
+        assert_eq!(diagnostic["range"]["start"]["line"], expected.line);
+        assert_eq!(
+            diagnostic["range"]["start"]["character"],
+            expected.character
+        );
+        let actions = code_actions_for_document(uri, missing);
+        assert!(actions
+            .iter()
+            .any(|action| action["title"] == "Reuse The Inherited Property"));
+        assert!(diagnostic["data"]["fixes"]
+            .as_array()
+            .is_some_and(|fixes| fixes.iter().any(|fix| {
+                fix["title"] == "Keep This As A Constructor-Only Parameter"
+                    && fix["applicability"] == "requiresReview"
+            })));
+
+        for (source, code) in [
+            ("function f(parameter string $value): void {}", "E0737"),
+            (
+                "class C { function __construct(internal parameter string $value) {} }",
+                "E0739",
+            ),
+            (
+                "class C { function __construct(writable parameter string $value) {} }",
+                "E0740",
+            ),
+            (
+                "class C { function __construct(parameter parameter string $value) {} }",
+                "E0744",
+            ),
+            (
+                "class C { function __construct(override string $value) {} }",
+                "E0741",
+            ),
+        ] {
+            let diagnostics = diagnostics_for_document(uri, source);
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic["code"] == code),
+                "missing {code}: {diagnostics:#?}"
+            );
+        }
+
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, missing);
+        assert!(server.documents[uri]
+            .analysis
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0743"));
+        let fixed = missing.replacen(
+            "class Child extends Base { function __construct(string $title)",
+            "class Child extends Base { function __construct(override string $title)",
+            1,
+        );
+        open_stage31_document(&mut server, uri, &fixed);
+        assert!(server.documents[uri].analysis.diagnostics().is_empty());
     }
 }

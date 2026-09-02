@@ -38,6 +38,14 @@ It does not parse or check inheritance independently, and it preserves incomplet
 generated, and dependency-source edit safety. Stage 35 interfaces and traits are
 next.
 
+The post-Stage-34 constructor-parameter-role correction is implemented through
+compiler-owned constructor-role and property-family facts. Hover, signature and
+named-argument completion, member completion, navigation, references, and rename
+therefore distinguish promoted properties, inherited-property `override`
+parameters, and constructor-only `parameter` inputs without a second promotion
+or inheritance checker. Property-family rename is refused when the complete
+atomic edit cannot be proven.
+
 The compiler classifies checked effects into source-required effects and ambient
 canonical I/O effects. Hovers keep source signatures focused on required
 `throws` contracts and describe the exact ambient

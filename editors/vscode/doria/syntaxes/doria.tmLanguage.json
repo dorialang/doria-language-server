@@ -931,6 +931,10 @@
           "match": "\\b(?:open|override)\\b"
         },
         {
+          "name": "storage.modifier.parameter-role.doria",
+          "match": "\\bparameter\\b"
+        },
+        {
           "name": "keyword.declaration.variable.doria",
           "match": "\\b(?:let)\\b"
         },

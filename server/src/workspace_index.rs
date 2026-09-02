@@ -516,7 +516,12 @@ impl OpenDocumentIndex {
             return occurrence.occurrence.virtual_root == Some(root);
         }
         if let Some(declaration) = target.exact_declaration {
-            return occurrence.occurrence.exact_declaration == Some(declaration);
+            return occurrence.occurrence.exact_declaration == Some(declaration)
+                || (!occurrence.occurrence.declaration
+                    && self.resolved_member_identity(
+                        &occurrence.graph,
+                        &occurrence.occurrence.identity,
+                    ) == target.identity);
         }
         self.resolved_member_identity(&occurrence.graph, &occurrence.occurrence.identity)
             == target.identity
@@ -752,6 +757,16 @@ impl OpenDocumentIndex {
                 (!edits.is_empty()).then_some(edits)
             }
             SymbolTarget::Member(target) => {
+                if self.member_occurrences.iter().any(|candidate| {
+                    candidate.occurrence.relationship_only
+                        && self.member_occurrence_matches_target(candidate, target)
+                }) {
+                    // An inherited-property override links a constructor binding to a
+                    // property family. Until the compiler publishes the complete
+                    // editable family graph, a partial property rename would break
+                    // that relation, so refuse it conservatively.
+                    return None;
+                }
                 let declarations = self
                     .member_occurrences
                     .iter()
