@@ -37,7 +37,7 @@ use file_uri::file_uri_to_path;
 use project::{ProjectDocument, SourceEditPolicy};
 use string_surface::{STRING_COMPANION_METHODS, STRING_PROPERTIES};
 use workspace_graph::{analyze_open_graph, analyze_project_graph, GraphDocument, OpenSource};
-use workspace_index::OpenDocumentIndex;
+use workspace_index::{IndexedEdit, OpenDocumentIndex, SymbolTarget};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LspPosition {
@@ -1050,13 +1050,6 @@ impl Server {
             }
         }
         if named_argument_completion_context(&document.text, offset) {
-            if let Some(completions) = document
-                .analysis
-                .named_argument_completions_at_offset(offset)
-                .filter(|completions| !completions.is_empty())
-            {
-                return semantic_completion_items(completions);
-            }
             if let Some(recovered) =
                 AnalysisSnapshot::recover_incomplete_call_source(&uri, &document.text, offset)
             {
@@ -1075,6 +1068,13 @@ impl Server {
                 {
                     return semantic_completion_items(completions);
                 }
+            }
+            if let Some(completions) = document
+                .analysis
+                .named_argument_completions_at_offset(offset)
+                .filter(|completions| !completions.is_empty())
+            {
+                return semantic_completion_items(completions);
             }
         }
         if let Some(completions) = document.analysis.member_completions_at_offset(offset) {
@@ -1281,9 +1281,33 @@ impl Server {
             return Value::Null;
         };
         if let Some(target) = self.document_index.target_at(&uri, offset) {
-            let Some(edits) = self.document_index.rename(&target, new_name) else {
+            let Some(mut edits) = self.document_index.rename(&target, new_name) else {
                 return Value::Null;
             };
+            if matches!(target, SymbolTarget::Member(_)) {
+                if let Some(local_edits) = document
+                    .analysis
+                    .local_rename_edits_at_offset(offset, new_name)
+                {
+                    edits.extend(
+                        local_edits
+                            .into_iter()
+                            .map(|(span, replacement)| IndexedEdit {
+                                uri: uri.clone(),
+                                span,
+                                replacement,
+                            }),
+                    );
+                }
+            }
+            edits.sort_by(|left, right| {
+                (&left.uri, left.span.start, left.span.end).cmp(&(
+                    &right.uri,
+                    right.span.start,
+                    right.span.end,
+                ))
+            });
+            edits.dedup_by(|left, right| left.uri == right.uri && left.span == right.span);
             let mut changes = serde_json::Map::new();
             for edit in edits {
                 if !self.source_is_editable(&edit.uri) {
@@ -1292,6 +1316,16 @@ impl Server {
                 let Some(target_document) = self.document(&edit.uri) else {
                     return Value::Null;
                 };
+                let replacement = if target_document
+                    .text
+                    .get(edit.span.start..edit.span.end)
+                    .is_some_and(|source| source.starts_with('$'))
+                    && !edit.replacement.starts_with('$')
+                {
+                    format!("${}", edit.replacement)
+                } else {
+                    edit.replacement
+                };
                 changes
                     .entry(edit.uri)
                     .or_insert_with(|| Value::Array(Vec::new()))
@@ -1299,22 +1333,22 @@ impl Server {
                     .expect("workspace rename changes are arrays")
                     .push(json!({
                         "range": span_to_range(&target_document.text, edit.span),
-                        "newText": edit.replacement,
+                        "newText": replacement,
                     }));
             }
             return json!({ "changes": changes });
         }
-        let Some(replacement) = document
-            .analysis
-            .rename_replacement_at_offset(offset, new_name)
-        else {
+        let Some(edits) = document.analysis.rename_edits_at_offset(offset, new_name) else {
             return Value::Null;
         };
-        let edits = document
-            .analysis
-            .reference_spans_at_offset(offset, true)
+        let edits = edits
             .into_iter()
-            .map(|span| json!({ "range": span_to_range(&document.text, span), "newText": replacement }))
+            .map(|(span, replacement)| {
+                json!({
+                    "range": span_to_range(&document.text, span),
+                    "newText": replacement,
+                })
+            })
             .collect::<Vec<_>>();
         if edits.is_empty() {
             Value::Null
@@ -9567,6 +9601,18 @@ function main(): void { let $article = new Article("title", "raw"); }
         assert!(labels.contains("title:"), "named arguments: {labels:?}");
         assert!(labels.contains("raw:"), "named arguments: {labels:?}");
 
+        let partial_label = source.replace(
+            "function main(): void { let $article = new Article(\"title\", \"raw\"); }",
+            "function main(): void { let $article = new Article(ti); }",
+        );
+        let partial_offset = partial_label.find("Article(ti").unwrap() + "Article(ti".len();
+        open_stage31_document(&mut server, uri, &partial_label);
+        let labels = request_completion_labels(&server, uri, &partial_label, partial_offset);
+        assert!(
+            labels.contains("title:"),
+            "a partial named label must retain its matching completion: {labels:?}"
+        );
+
         for (candidate, offered) in [
             ("class C { function __construct(", true),
             ("function ordinary(", false),
@@ -9601,6 +9647,7 @@ class Article extends Document
         echo $this->title;
     }
 }
+
 function main(): void { let $article = new Article(title: "title", raw: "input"); }
 "#;
         let mut server = stage31_server(&["file:///workspace"]);
@@ -9645,8 +9692,8 @@ function main(): void { let $article = new Article(title: "title", raw: "input")
                 .references(Some(&params_at(uri, source, property_declaration)))
                 .as_array()
                 .map(Vec::len),
-            Some(1),
-            "the property access remains separate from local and named-argument references"
+            Some(2),
+            "the property declaration and access remain separate from local and named-argument references"
         );
 
         let rename = server.rename(Some(&json!({
@@ -9675,6 +9722,83 @@ function main(): void { let $article = new Article(title: "title", raw: "input")
         let labels = request_completion_labels(&server, uri, &member_source, member_offset);
         assert_eq!(labels.iter().filter(|label| *label == "title").count(), 1);
         assert_eq!(labels.iter().filter(|label| *label == "raw").count(), 1);
+    }
+
+    #[test]
+    fn promoted_parameter_rename_updates_both_source_identities_atomically() {
+        let uri = "file:///workspace/promoted-parameter-rename.doria";
+        let source = r#"class Article
+{
+    function __construct(string $title)
+    {
+        echo $title;
+        echo $this->title;
+    }
+}
+function main(): void { let $article = new Article(title: "Doria"); }
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+        assert!(server.documents[uri].analysis.diagnostics().is_empty());
+
+        let declaration = source.find("$title)").unwrap();
+        let rename = server.rename(Some(&json!({
+            "textDocument": { "uri": uri },
+            "position": params_at(uri, source, declaration)["position"].clone(),
+            "newName": "headline",
+        })));
+        let edits = rename["changes"][uri]
+            .as_array()
+            .expect("atomic promoted-parameter rename");
+        assert_eq!(
+            edits.len(),
+            4,
+            "declaration, local use, property use, and label: {edits:#?}"
+        );
+        assert_eq!(
+            edits
+                .iter()
+                .filter(|edit| edit["newText"] == "$headline")
+                .count(),
+            2,
+            "the declaration and bare parameter use retain the variable sigil"
+        );
+        assert_eq!(
+            edits
+                .iter()
+                .filter(|edit| edit["newText"] == "headline")
+                .count(),
+            2,
+            "the property member and named label remain identifier-shaped"
+        );
+    }
+
+    #[test]
+    fn duplicate_callable_recovery_keeps_parameter_symbols_declaration_local() {
+        let uri = "file:///workspace/duplicate-callables.doria";
+        let source = r#"function f(int $first, int $second): void {}
+function f(): void {}
+class C
+{
+    function m(int $first, int $second): void {}
+    function m(): void {}
+}
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+        assert!(
+            !server.documents[uri].analysis.diagnostics().is_empty(),
+            "the compiler should still report the duplicate declarations"
+        );
+        let first = source.find("$first").unwrap();
+        assert!(
+            !server
+                .references(Some(&params_at(uri, source, first)))
+                .as_array()
+                .expect("references response")
+                .is_empty(),
+            "the earlier declaration keeps its own parameter vector"
+        );
     }
 
     #[test]

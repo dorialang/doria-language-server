@@ -492,6 +492,7 @@ enum SymbolKind {
 enum OccurrenceRole {
     Declaration,
     Reference,
+    NamedArgument,
 }
 
 #[derive(Debug, Clone)]
@@ -961,9 +962,25 @@ impl AnalysisSnapshot {
         offset: usize,
     ) -> Option<String> {
         let prefix = text.get(..offset)?;
-        if !matches!(prefix.trim_end().chars().last(), Some('(' | ',')) {
-            return None;
-        }
+        let trimmed = prefix.trim_end();
+        let partial_label = if matches!(trimmed.chars().last(), Some('(' | ',')) {
+            None
+        } else {
+            if trimmed.len() != prefix.len() {
+                return None;
+            }
+            let partial_label = trimmed
+                .rsplit_once(['(', ','])
+                .map(|(_, segment)| segment.trim())
+                .filter(|segment| {
+                    !segment.is_empty()
+                        && segment
+                            .chars()
+                            .all(|character| character == '_' || character.is_ascii_alphanumeric())
+                })?;
+            debug_assert!(!partial_label.is_empty());
+            Some((trimmed.len() - partial_label.len(), partial_label.len()))
+        };
 
         let tokens = doriac::lex_source(path.to_string(), prefix.to_string()).ok()?;
         let unmatched_parens = tokens
@@ -983,13 +1000,20 @@ impl AnalysisSnapshot {
             .chars()
             .take_while(|character| *character == ')')
             .count();
-        let mut insertion = "0".to_string();
+        let mut insertion = if partial_label.is_some() {
+            String::new()
+        } else {
+            "0".to_string()
+        };
         insertion.push_str(&")".repeat(unmatched_parens.saturating_sub(existing_closers)));
         if !trimmed_suffix.starts_with(')') && !trimmed_suffix.starts_with(';') {
             insertion.push(';');
         }
 
         let mut recovered = text.to_string();
+        if let Some((start, length)) = partial_label {
+            recovered.replace_range(start..start + length, &" ".repeat(length));
+        }
         recovered.insert_str(offset, &insertion);
         Some(recovered)
     }
@@ -1393,18 +1417,81 @@ impl AnalysisSnapshot {
         tokens
     }
 
+    #[cfg(test)]
     pub(crate) fn rename_replacement_at_offset(
         &self,
         offset: usize,
         new_name: &str,
     ) -> Option<String> {
-        let symbol = self.symbols.get(self.symbol_at_offset(offset)?)?;
-        Some(match symbol.kind {
-            SymbolKind::Plain => new_name.to_string(),
-            SymbolKind::Variable if new_name.starts_with('$') => new_name.to_string(),
-            SymbolKind::Variable => format!("${new_name}"),
-            SymbolKind::Keyword => return None,
+        let occurrence = self
+            .occurrences
+            .iter()
+            .filter(|occurrence| span_contains(occurrence.span, offset))
+            .min_by_key(|occurrence| occurrence.span.end.saturating_sub(occurrence.span.start))?;
+        let symbol = self.symbols.get(occurrence.symbol)?;
+        let bare_name = new_name.strip_prefix('$').unwrap_or(new_name);
+        Some(match (symbol.kind, occurrence.role) {
+            (SymbolKind::Plain, _) => new_name.to_string(),
+            (SymbolKind::Variable, OccurrenceRole::NamedArgument) => bare_name.to_string(),
+            (SymbolKind::Variable, _) => format!("${bare_name}"),
+            (SymbolKind::Keyword, _) => return None,
         })
+    }
+
+    pub(crate) fn rename_edits_at_offset(
+        &self,
+        offset: usize,
+        new_name: &str,
+    ) -> Option<Vec<(Span, String)>> {
+        let symbol = self.symbol_at_offset(offset)?;
+        self.rename_edits_for_symbol(symbol, new_name)
+    }
+
+    pub(crate) fn local_rename_edits_at_offset(
+        &self,
+        offset: usize,
+        new_name: &str,
+    ) -> Option<Vec<(Span, String)>> {
+        let symbol = self
+            .occurrences
+            .iter()
+            .filter(|occurrence| span_contains(occurrence.span, offset))
+            .filter(|occurrence| {
+                self.symbols
+                    .get(occurrence.symbol)
+                    .is_some_and(|symbol| symbol.local_name.is_some())
+            })
+            .min_by_key(|occurrence| occurrence.span.end.saturating_sub(occurrence.span.start))?
+            .symbol;
+        self.rename_edits_for_symbol(symbol, new_name)
+    }
+
+    fn rename_edits_for_symbol(
+        &self,
+        symbol: usize,
+        new_name: &str,
+    ) -> Option<Vec<(Span, String)>> {
+        let kind = self.symbols.get(symbol)?.kind;
+        if kind == SymbolKind::Keyword {
+            return None;
+        }
+        let bare_name = new_name.strip_prefix('$').unwrap_or(new_name);
+        Some(
+            self.occurrences
+                .iter()
+                .filter(|occurrence| occurrence.symbol == symbol)
+                .map(|occurrence| {
+                    let replacement = match (kind, occurrence.role) {
+                        (SymbolKind::Variable, OccurrenceRole::NamedArgument) => {
+                            bare_name.to_string()
+                        }
+                        (SymbolKind::Variable, _) => format!("${bare_name}"),
+                        _ => bare_name.to_string(),
+                    };
+                    (occurrence.span, replacement)
+                })
+                .collect(),
+        )
     }
 
     fn symbol_at_offset(&self, offset: usize) -> Option<usize> {
@@ -1663,6 +1750,7 @@ struct SnapshotBuilder<'a> {
     enum_member_completions: HashMap<String, Vec<SemanticCompletion>>,
     methods: HashMap<(String, String), usize>,
     functions: HashMap<String, usize>,
+    callable_declarations: HashMap<Span, usize>,
     member_receivers: Vec<MemberReceiver>,
     static_receivers: Vec<StaticReceiver>,
     local_scopes: Vec<HashMap<String, usize>>,
@@ -1714,6 +1802,7 @@ impl<'a> SnapshotBuilder<'a> {
             enum_member_completions: HashMap::new(),
             methods: HashMap::new(),
             functions: HashMap::new(),
+            callable_declarations: HashMap::new(),
             member_receivers: Vec::new(),
             static_receivers: Vec::new(),
             local_scopes: Vec::new(),
@@ -2282,6 +2371,7 @@ impl<'a> SnapshotBuilder<'a> {
                         SymbolKind::Plain,
                     );
                     self.record_callable_parameters(symbol, function);
+                    self.callable_declarations.insert(function.span, symbol);
                     self.functions.insert(function.name.clone(), symbol);
                 }
                 _ => {}
@@ -2707,6 +2797,7 @@ impl<'a> SnapshotBuilder<'a> {
             SymbolKind::Plain,
         );
         self.record_callable_parameters(symbol, method);
+        self.callable_declarations.insert(method.span, symbol);
         self.methods
             .insert((class_name.to_string(), method.name.clone()), symbol);
         self.record_method_declaration_occurrence(class_name, method, selection_span);
@@ -3301,18 +3392,14 @@ impl<'a> SnapshotBuilder<'a> {
                 self.record_type_reference(&entry.ty, entry.span);
             }
         }
-        let callable = current_class
-            .and_then(|class| {
-                self.methods
-                    .get(&(class.to_string(), function.name.clone()))
-                    .copied()
-            })
-            .or_else(|| self.functions.get(&function.name).copied());
+        let callable = self.callable_declarations.get(&function.span).copied();
         for (index, parameter) in function.params.iter().enumerate() {
             let parameter_symbol =
                 self.declare_parameter(parameter, block.span.start, current_class);
             if let Some(callable) = callable {
-                self.symbols[callable].parameter_symbols[index] = Some(parameter_symbol);
+                if let Some(slot) = self.symbols[callable].parameter_symbols.get_mut(index) {
+                    *slot = Some(parameter_symbol);
+                }
             }
         }
         for statement in &block.statements {
@@ -3731,7 +3818,11 @@ impl<'a> SnapshotBuilder<'a> {
             else {
                 continue;
             };
-            self.record_reference(reference.span, symbol);
+            self.occurrences.push(Occurrence {
+                span: reference.span,
+                symbol,
+                role: OccurrenceRole::NamedArgument,
+            });
         }
     }
 

@@ -516,7 +516,12 @@ impl OpenDocumentIndex {
             return occurrence.occurrence.virtual_root == Some(root);
         }
         if let Some(declaration) = target.exact_declaration {
-            return occurrence.occurrence.exact_declaration == Some(declaration);
+            return occurrence.occurrence.exact_declaration == Some(declaration)
+                || (!occurrence.occurrence.declaration
+                    && self.resolved_member_identity(
+                        &occurrence.graph,
+                        &occurrence.occurrence.identity,
+                    ) == target.identity);
         }
         self.resolved_member_identity(&occurrence.graph, &occurrence.occurrence.identity)
             == target.identity
