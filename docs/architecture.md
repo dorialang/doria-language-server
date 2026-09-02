@@ -118,6 +118,18 @@ refused when a family is incomplete or requires edits to generated,
 dependency-cache, or otherwise readonly sources. Interfaces and traits remain
 outside this graph until Stage 35.
 
+The post-Stage-34 constructor-parameter-role correction extends that projection,
+not the editor's semantic authority. Compiler-owned `constructor_parameters` and
+`property_families` identify promoted properties, inherited-property override
+relationships, and constructor-only parameters. The server uses those identities
+for hover, signatures, named arguments, member completion, definition,
+references, and rename. Named argument labels are linked to their declared
+parameter symbols after the complete source traversal, so forward calls do not
+make references declaration-order dependent. An inherited override relationship
+is navigation-visible but forces conservative rename refusal unless a complete
+atomic property-family edit can be proven. No layout slot or second promotion
+checker exists in the server.
+
 ### Editor clients
 
 Clients start and supervise `doria-lsp`, translate native editor APIs to LSP
@@ -154,7 +166,7 @@ The TextMate grammar and IntelliJ lexer are deliberately local and fast. They cl
 
 ## Shared fixtures
 
-`editors/fixtures/latest-tokens.doria` exercises accepted and planned presentation vocabulary, including namespace, individual/aliased/grouped imports, include syntax, and Stage 34 `open`/`override`/`extends`/`parent` forms. `editors/fixtures/stage32-attributes.doria` and `stage32-attributes-rejected.doria` preserve the accepted attribute/comment boundary and malformed or semantically rejected examples. `editors/fixtures/native-testing-slice2.doria` and `native-testing-slice2-rejected.doria` preserve the compiler-owned expectation surface and its rejected boundaries without adding editor-side semantics. `editors/fixtures/rejected-syntax.doria` ensures rejected PHP-shaped, preprocessor, wildcard-import, malformed-group, computed-include, and nested-directive syntax does not accidentally look accepted.
+`editors/fixtures/latest-tokens.doria` exercises accepted and planned presentation vocabulary, including namespace, individual/aliased/grouped imports, include syntax, Stage 34 `open`/`override`/`extends`/`parent` forms, and accepted constructor `override`/`parameter` roles. `editors/fixtures/stage32-attributes.doria` and `stage32-attributes-rejected.doria` preserve the accepted attribute/comment boundary and malformed or semantically rejected examples. `editors/fixtures/native-testing-slice2.doria` and `native-testing-slice2-rejected.doria` preserve the compiler-owned expectation surface and its rejected boundaries without adding editor-side semantics. `editors/fixtures/rejected-syntax.doria` ensures rejected PHP-shaped, preprocessor, wildcard-import, malformed-group, computed-include, constructor-role placement, and nested-directive syntax does not accidentally look accepted.
 
 Both editor implementations must be checked against the same fixtures and token inventory.
 

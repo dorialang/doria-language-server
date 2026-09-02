@@ -24,6 +24,23 @@ class DoriaLexerTest : TestCase() {
         assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
     }
 
+    fun testConstructorParameterRolesUseAcceptedKeywordTokens() {
+        val tokens = lex(
+            "class Value { function __construct(parameter string \$raw) {} } " +
+                "open class Base { function __construct(string \$title) {} } " +
+                "class Child extends Base { function __construct(override string \$title) {} } " +
+                "param parameterized; \"parameter override\"; // parameter override\n",
+        )
+
+        assertEquals(DoriaTokenTypes.KEYWORD, tokens.first { it.text == "parameter" }.type)
+        assertEquals(DoriaTokenTypes.KEYWORD, tokens.first { it.text == "override" }.type)
+        assertEquals(DoriaTokenTypes.IDENTIFIER, tokens.first { it.text == "param" }.type)
+        assertEquals(DoriaTokenTypes.IDENTIFIER, tokens.first { it.text == "parameterized" }.type)
+        assertEquals(DoriaTokenTypes.STRING, tokens.first { it.text == "\"parameter override\"" }.type)
+        assertEquals(DoriaTokenTypes.COMMENT, tokens.first { it.text.startsWith("//") }.type)
+        assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
+    }
+
     fun testNativeTestingSlice2UsesOrdinaryCallMemberAndTypeTokens() {
         val fixture = Files.readString(
             Path.of("..", "..", "fixtures", "native-testing-slice2.doria"),

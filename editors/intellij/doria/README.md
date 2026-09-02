@@ -124,6 +124,11 @@ activate PHP exports. Top-level
 presentation with `internal` as a modifier. The presentation lexer does not
 implement package visibility or other semantics.
 
+The lexer also presents the accepted constructor-only `parameter` keyword and
+constructor `override` roles. Semantic meaning, role diagnostics, hover,
+signatures, member completion, navigation, and rename remain compiler-backed
+through `doria-lsp`; the plugin does not infer property promotion.
+
 Compiler-backed hover separates required source `throws` effects from the exact
 ambient canonical I/O effects transported at runtime. Ambient I/O does not require
 source declarations, including in source `finally` blocks; escaping finalizer

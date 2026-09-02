@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $root = dirname(__DIR__);
-$expectedCompiler = 'c109a55e2a67ecbab9321790c371979288b0fe76';
+$expectedCompiler = 'b2e2b2b7768e14904cf137d4ca5d9d0f223c646a';
 
 function stage34_text(string $path): string
 {

@@ -1049,6 +1049,7 @@ class DoriaLexer : LexerBase() {
             "extern",
             "open",
             "override",
+            "parameter",
             "with",
             "fn",
             "once",

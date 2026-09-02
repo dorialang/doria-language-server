@@ -6,6 +6,13 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Added tooling for the post-Stage-34 constructor-parameter-role correction.
+  The server consumes compiler-owned promoted, inherited-override, and
+  constructor-only roles; preserves them in hover and signatures; offers named
+  arguments and constructor-scoped `parameter` completion; keeps parameter and
+  property identities distinct; and refuses property-family rename unless the
+  complete edit is provably atomic. VS Code and IntelliJ now present the accepted
+  `parameter` keyword while retaining invalid-placement fixtures.
 - Completed Stage 34 tooling for single class inheritance. The server now pins
   the final Stage 34 compiler, consumes compiler-owned class hierarchy, virtual
   method family, direct-parent, inherited-member, and callable-contract facts,

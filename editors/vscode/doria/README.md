@@ -53,6 +53,11 @@ semantics, or PHP export behavior. Top-level
 modifier. The grammar does not implement package visibility, capture, callable,
 or execution semantics.
 
+The grammar also presents the accepted constructor-only `parameter` keyword and
+constructor `override` roles. Semantic meaning, role diagnostics, hover,
+signatures, member completion, navigation, and rename remain compiler-backed
+through `doria-lsp`; the TextMate grammar does not infer property promotion.
+
 Compiler-backed hover separates required source `throws` effects from the exact
 ambient canonical I/O effects transported at runtime. Ambient I/O does not require
 source declarations, including in source `finally` blocks; escaping finalizer

@@ -42,6 +42,10 @@ internal function packageHelper(): void
 // overrides, and direct parent dispatch.
 open class EditorModel
 {
+    function __construct(string $title)
+    {
+    }
+
     open function render(): string
     {
         return "model";
@@ -50,6 +54,11 @@ open class EditorModel
 
 class EditorDocument extends EditorModel
 {
+    function __construct(override string $title, parameter string $rawTitle)
+    {
+        parent::__construct($title);
+    }
+
     override function render(): string
     {
         return parent::render();

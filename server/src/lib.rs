@@ -1049,6 +1049,34 @@ impl Server {
                 }
             }
         }
+        if named_argument_completion_context(&document.text, offset) {
+            if let Some(completions) = document
+                .analysis
+                .named_argument_completions_at_offset(offset)
+                .filter(|completions| !completions.is_empty())
+            {
+                return semantic_completion_items(completions);
+            }
+            if let Some(recovered) =
+                AnalysisSnapshot::recover_incomplete_call_source(&uri, &document.text, offset)
+            {
+                let analysis = self
+                    .analyze_temporary_project_overlay(&uri, &recovered)
+                    .unwrap_or_else(|| {
+                        AnalysisSnapshot::analyze_with_context(
+                            &uri,
+                            &recovered,
+                            document.analysis.compilation_context().clone(),
+                        )
+                    });
+                if let Some(completions) = analysis
+                    .named_argument_completions_at_offset(offset)
+                    .filter(|completions| !completions.is_empty())
+                {
+                    return semantic_completion_items(completions);
+                }
+            }
+        }
         if let Some(completions) = document.analysis.member_completions_at_offset(offset) {
             return semantic_completion_items(completions);
         }
@@ -1122,6 +1150,16 @@ impl Server {
                 .filter_map(|item| item.get("label").and_then(Value::as_str))
                 .map(str::to_string)
                 .collect::<std::collections::HashSet<_>>();
+            if constructor_parameter_role_completion_context(&document.text, offset)
+                && labels.insert("parameter".to_string())
+            {
+                items.push(json!({
+                    "label": "parameter",
+                    "kind": 14,
+                    "detail": "Doria constructor-parameter role",
+                    "documentation": "Declares a constructor-only input. It remains in the constructor signature and body but creates no property or object storage.",
+                }));
+            }
             for candidate in self.document_index.completions(&uri) {
                 if labels.insert(candidate.label.clone()) {
                     items.push(json!({
@@ -2684,8 +2722,6 @@ fn completion_items() -> Value {
         "await",
         "unsafe",
         "extern",
-        "open",
-        "override",
         "get",
         "set",
         "insteadof",
@@ -2966,6 +3002,42 @@ fn override_completion_context(text: &str, offset: usize) -> bool {
         .map_or(prefix, |(_, line)| line)
         .trim();
     line.is_empty() || "override".starts_with(line)
+}
+
+fn constructor_parameter_role_completion_context(text: &str, offset: usize) -> bool {
+    let Some(prefix) = text.get(..offset) else {
+        return false;
+    };
+    let Ok(tokens) = doriac::lex_source("<constructor-parameter-completion>", prefix) else {
+        return false;
+    };
+    let Some(open_index) = tokens.windows(3).rposition(|window| {
+        matches!(window[0].kind, TokenKind::Function)
+            && matches!(&window[1].kind, TokenKind::Identifier(name) if name == "__construct")
+            && matches!(window[2].kind, TokenKind::LeftParen)
+    }) else {
+        return false;
+    };
+    let mut depth = 0_usize;
+    for token in &tokens[open_index + 2..] {
+        match token.kind {
+            TokenKind::LeftParen => depth += 1,
+            TokenKind::RightParen => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    depth == 1
+}
+
+fn named_argument_completion_context(text: &str, offset: usize) -> bool {
+    let Some(prefix) = text.get(..offset) else {
+        return false;
+    };
+    let segment = prefix
+        .rsplit_once(['(', ','])
+        .map_or(prefix, |(_, segment)| segment)
+        .trim();
+    segment.is_empty() || segment.chars().all(is_identifier_character)
 }
 
 fn is_identifier_character(character: char) -> bool {
@@ -3500,7 +3572,10 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "Permits subclassing on a class or creates a virtual method slot on a method.",
         ),
         TokenKind::Override => Some(
-            "Marks a method as the checked implementation of an inherited open virtual slot.",
+            "Marks a method as the checked implementation of an inherited open virtual slot, or marks a constructor parameter as reusing one inherited property without creating storage.",
+        ),
+        TokenKind::Parameter => Some(
+            "Marks a constructor-only parameter. The binding is available in `__construct` and declares no property or object storage.",
         ),
         TokenKind::Extends => Some(
             "Declares the single direct parent of a class. The parent must be visible and open.",
@@ -4114,8 +4189,6 @@ mod tests {
             "await",
             "unsafe",
             "extern",
-            "open",
-            "override",
             "get",
             "set",
             "insteadof",
@@ -4128,6 +4201,10 @@ mod tests {
                 item["documentation"],
                 "Accepted planned Doria syntax; compiler support lands in a later stage."
             );
+        }
+        for keyword in ["open", "override"] {
+            let item = completion_item(keyword);
+            assert_eq!(item["detail"], "Doria keyword");
         }
     }
 
@@ -9400,5 +9477,274 @@ open class Base
         let parent_name = fixed.rfind("Base").unwrap();
         let definition = server.definition(Some(&params_at(uri, fixed, parent_name)));
         assert_eq!(definition["uri"], uri);
+    }
+
+    #[test]
+    fn constructor_parameter_roles_drive_tokens_hovers_signatures_and_completion() {
+        let uri = "file:///workspace/constructor-roles.doria";
+        let source = r#"class Promoted
+{
+    function __construct(string $title, internal writable int $revision) {}
+}
+open class Document
+{
+    function __construct(string $title) {}
+    open function heading(): string { return $this->title; }
+}
+class Article extends Document
+{
+    string $raw = "";
+    function __construct(override string $title, parameter string $raw)
+    {
+        parent::__construct($title);
+        echo $raw;
+    }
+    override function heading(): string { return $this->title; }
+}
+function main(): void { let $article = new Article("title", "raw"); }
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+        assert!(
+            server.documents[uri].analysis.diagnostics().is_empty(),
+            "accepted role fixture: {:#?}",
+            server.documents[uri].analysis.diagnostics()
+        );
+
+        let tokens = semantic_token_records(&server.semantic_tokens(Some(&json!({
+            "textDocument": { "uri": uri }
+        }))));
+        for needle in ["parameter string", "override string", "override function"] {
+            let offset = source.find(needle).unwrap();
+            let position = byte_offset_to_position(source, offset);
+            assert!(
+                tokens.iter().any(|token| token.0 == position.line
+                    && token.1 == position.character
+                    && token.3 == 4),
+                "missing role token for {needle}: {tokens:?}"
+            );
+        }
+
+        for (needle, expected) in [
+            ("$title, internal", "**Promoted Property**"),
+            ("$revision)", "**Promoted Property**"),
+            (
+                "$title, parameter",
+                "**Inherited Property Override Parameter**",
+            ),
+            ("$raw)\n", "**Constructor-Only Parameter**"),
+        ] {
+            let offset = source.find(needle).unwrap();
+            let hover = server
+                .hover(Some(&params_at(uri, source, offset)))
+                .unwrap_or_else(|| panic!("hover for {needle}"));
+            assert!(
+                hover["contents"]["value"]
+                    .as_str()
+                    .is_some_and(|markdown| markdown.contains(expected)),
+                "{needle}: {hover:#?}"
+            );
+        }
+
+        let call = source.find("new Article(").unwrap();
+        let second_argument = source[call..].find("\"raw\"").unwrap() + call;
+        let signature = server.signature_help(Some(&params_at(uri, source, second_argument)));
+        assert_eq!(
+            signature["signatures"][0]["label"],
+            "function Article::__construct(override string $title, parameter string $raw)"
+        );
+        assert_eq!(signature["activeParameter"], 1);
+
+        let constructor_prefix = source.replace(
+            "function main(): void { let $article = new Article(\"title\", \"raw\"); }",
+            "function main(): void { let $article = new Article(); }",
+        );
+        let completion_offset =
+            constructor_prefix.find("new Article(").unwrap() + "new Article(".len();
+        open_stage31_document(&mut server, uri, &constructor_prefix);
+        let labels =
+            request_completion_labels(&server, uri, &constructor_prefix, completion_offset);
+        assert!(labels.contains("title:"), "named arguments: {labels:?}");
+        assert!(labels.contains("raw:"), "named arguments: {labels:?}");
+
+        for (candidate, offered) in [
+            ("class C { function __construct(", true),
+            ("function ordinary(", false),
+            ("class C { function method(", false),
+            ("class C { function __destruct(", false),
+        ] {
+            open_stage31_document(&mut server, uri, candidate);
+            let labels = request_completion_labels(&server, uri, candidate, candidate.len());
+            assert_eq!(
+                labels.contains("parameter"),
+                offered,
+                "parameter completion in `{candidate}`: {labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn constructor_parameter_roles_keep_local_and_property_identities_distinct() {
+        let uri = "file:///workspace/constructor-role-navigation.doria";
+        let source = r#"open class Document
+{
+    function __construct(string $title) {}
+}
+class Article extends Document
+{
+    string $raw = "property";
+    function __construct(override string $title, parameter string $raw)
+    {
+        parent::__construct($title);
+        echo $raw;
+        echo $this->raw;
+        echo $this->title;
+    }
+}
+function main(): void { let $article = new Article(title: "title", raw: "input"); }
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+        assert!(server.documents[uri].analysis.diagnostics().is_empty());
+
+        let parameter_declaration =
+            source.find("parameter string $raw").unwrap() + "parameter string ".len();
+        let parameter_use = source.find("echo $raw").unwrap() + "echo ".len();
+        let parameter_target = server.definition(Some(&params_at(uri, source, parameter_use)));
+        assert_eq!(
+            parameter_target["range"]["start"],
+            params_at(uri, source, parameter_declaration)["position"]
+        );
+
+        let property_declaration = source.find("string $raw =").unwrap() + "string ".len();
+        let property_use = source.find("$this->raw").unwrap() + "$this->".len();
+        let property_target = server.definition(Some(&params_at(uri, source, property_use)));
+        assert_eq!(
+            property_target["range"]["start"],
+            params_at(uri, source, property_declaration)["position"]
+        );
+
+        let override_keyword = source.find("override string").unwrap();
+        let override_target = server.definition(Some(&params_at(uri, source, override_keyword)));
+        let root_property = source.find("string $title").unwrap() + "string ".len();
+        assert_eq!(
+            override_target["range"]["start"],
+            params_at(uri, source, root_property)["position"]
+        );
+
+        assert_eq!(
+            server
+                .references(Some(&params_at(uri, source, parameter_declaration)))
+                .as_array()
+                .map(Vec::len),
+            Some(3),
+            "declaration, local use, and named argument"
+        );
+        assert_eq!(
+            server
+                .references(Some(&params_at(uri, source, property_declaration)))
+                .as_array()
+                .map(Vec::len),
+            Some(1),
+            "the property access remains separate from local and named-argument references"
+        );
+
+        let rename = server.rename(Some(&json!({
+            "textDocument": { "uri": uri },
+            "position": params_at(uri, source, parameter_declaration)["position"].clone(),
+            "newName": "source",
+        })));
+        let edits = rename["changes"][uri].as_array().expect("parameter rename");
+        assert_eq!(edits.len(), 3);
+        assert!(edits
+            .iter()
+            .all(|edit| edit["newText"] == "$source" || edit["newText"] == "source"));
+        assert_eq!(
+            server.rename(Some(&json!({
+                "textDocument": { "uri": uri },
+                "position": params_at(uri, source, override_keyword)["position"].clone(),
+                "newName": "heading",
+            }))),
+            Value::Null,
+            "an override family rename must be atomic or conservatively refused"
+        );
+
+        let member_source = source.replace("echo $this->title;", "echo $this->;");
+        open_stage31_document(&mut server, uri, &member_source);
+        let member_offset = member_source.find("$this->;").unwrap() + "$this->".len();
+        let labels = request_completion_labels(&server, uri, &member_source, member_offset);
+        assert_eq!(labels.iter().filter(|label| *label == "title").count(), 1);
+        assert_eq!(labels.iter().filter(|label| *label == "raw").count(), 1);
+    }
+
+    #[test]
+    fn constructor_parameter_role_diagnostics_actions_and_utf16_ranges_are_compiler_owned() {
+        let uri = "file:///workspace/constructor-role-diagnostics.doria";
+        let missing = "// 😀\nopen class Base { function __construct(string $title) {} } class Child extends Base { function __construct(string $title) { parent::__construct($title); } }";
+        let diagnostics = diagnostics_for_document(uri, missing);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic["code"] == "E0743")
+            .expect("missing override diagnostic");
+        let title = missing.rfind("string $title").unwrap();
+        let expected = byte_offset_to_position(missing, title);
+        assert_eq!(diagnostic["range"]["start"]["line"], expected.line);
+        assert_eq!(
+            diagnostic["range"]["start"]["character"],
+            expected.character
+        );
+        let actions = code_actions_for_document(uri, missing);
+        assert!(actions
+            .iter()
+            .any(|action| action["title"] == "Reuse The Inherited Property"));
+        assert!(diagnostic["data"]["fixes"]
+            .as_array()
+            .is_some_and(|fixes| fixes.iter().any(|fix| {
+                fix["title"] == "Keep This As A Constructor-Only Parameter"
+                    && fix["applicability"] == "requiresReview"
+            })));
+
+        for (source, code) in [
+            ("function f(parameter string $value): void {}", "E0737"),
+            (
+                "class C { function __construct(internal parameter string $value) {} }",
+                "E0739",
+            ),
+            (
+                "class C { function __construct(writable parameter string $value) {} }",
+                "E0740",
+            ),
+            (
+                "class C { function __construct(parameter parameter string $value) {} }",
+                "E0744",
+            ),
+            (
+                "class C { function __construct(override string $value) {} }",
+                "E0741",
+            ),
+        ] {
+            let diagnostics = diagnostics_for_document(uri, source);
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic["code"] == code),
+                "missing {code}: {diagnostics:#?}"
+            );
+        }
+
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, missing);
+        assert!(server.documents[uri]
+            .analysis
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0743"));
+        let fixed = missing.replacen(
+            "class Child extends Base { function __construct(string $title)",
+            "class Child extends Base { function __construct(override string $title)",
+            1,
+        );
+        open_stage31_document(&mut server, uri, &fixed);
+        assert!(server.documents[uri].analysis.diagnostics().is_empty());
     }
 }
