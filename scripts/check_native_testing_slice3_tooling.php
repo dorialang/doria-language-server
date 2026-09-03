@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $root = dirname(__DIR__);
-$expectedCompiler = '2fc90327d49ab388e9ae296c8e7fc5fbc0113ce1';
+$expectedCompiler = 'f664e585725678251c8c7ae6e3deb0b971bbde80';
 
 function slice3Text(string $path): string
 {
