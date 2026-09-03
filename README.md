@@ -81,9 +81,12 @@ infer promotion or validate property families independently.
 The post-Stage-34 indexed-foreach and scalar-display correction is implemented.
 The server consumes compiler-owned foreach semantic facts, presenting readonly
 zero-based `int` indexes for `List<T>` and `T[]`, authored keys for Dictionary
-families, and the resolved element/value access separately. It does not implement
-a second foreach checker: unsupported first bindings, ranges, fixes, and UTF-16
-ranges remain compiler diagnostics. Interpolation and `%s` materialize strings;
+families, and the resolved element/value access separately. Decision 0133
+requires an explicit type on every foreach binding; compiler inference powers
+diagnostics and Machine Applicable insertion fixes, not accepted implicit
+declarations. The server does not implement a second foreach checker:
+unsupported first bindings, ranges, fixes, and UTF-16 ranges remain compiler
+diagnostics. Interpolation and `%s` materialize strings;
 the tooling invents no primitive `toString` or scalar-cast API. Stage 35 remains
 next, and property hooks remain future work.
 

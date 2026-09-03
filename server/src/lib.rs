@@ -4613,7 +4613,7 @@ function main(): void
 "#,
             r#"function main(List<string> $args): void
 {
-    foreach ($args as $argument) {
+    foreach ($args as string $argument) {
         echo $argument;
     }
 }
@@ -9341,7 +9341,7 @@ class Child extends Base
     override function value(): int { return parent::value(); }
     function render(): void
     {
-        foreach ($this->entries as $slot => $entry) { echo $slot; }
+        foreach ($this->entries as int $slot => string $entry) { echo $slot; }
     }
 }
 "#;
@@ -9901,7 +9901,7 @@ class C
 function main(): void
 {
     string[] $letters = ["a"];
-    foreach ($letters as $offset => $letter) { echo $offset; }
+    foreach ($letters as int $offset => string $letter) { echo $offset; }
     Dictionary<string, int> $map = ["left" => 1];
     foreach ($map as string $id => int $number) { echo $id; }
     SortedDictionary<int, string> $sorted = SortedDictionary::from([1 => "one"]);
@@ -9946,7 +9946,10 @@ function main(): void
             ("$line", source.find("$line").unwrap()),
             ("$content", source.find("$content").unwrap()),
             ("$offset", source.find("$offset").unwrap()),
-            ("$letter", source.find("=> $letter").unwrap() + 3),
+            (
+                "$letter",
+                source.find("=> string $letter").unwrap() + "=> string ".len(),
+            ),
             ("$id", source.find("$id").unwrap()),
             ("$number", source.find("$number").unwrap()),
         ] {
@@ -9967,6 +9970,16 @@ function main(): void
     fn indexed_foreach_diagnostics_ranges_and_actions_remain_compiler_owned() {
         let uri = "file:///workspace/indexed-foreach-errors.doria";
         for (source, code, replacement) in [
+            (
+                "function main(): void { List<string> $v = [\"a\"]; foreach ($v as $i => string $value) {} }",
+                "E0748",
+                "int ",
+            ),
+            (
+                "function main(): void { List<string> $v = [\"a\"]; foreach ($v as int $i => $value) {} }",
+                "E0748",
+                "string ",
+            ),
             (
                 "function main(): void { List<int> $v = [1]; foreach ($v as string $i => int $value) {} }",
                 "E0746",
@@ -10039,7 +10052,7 @@ function main(): void
         let base_uri = "file:///workspace/base-window.doria";
         let child_uri = "file:///workspace/window.doria";
         let list_base = "open class BaseWindow { writable List<string> $entries = [\"alpha\"]; }";
-        let child = "class Window extends BaseWindow { function render(): void { foreach ($this->entries as $slot => $value) { echo $slot; } } }";
+        let child = "class Window extends BaseWindow { function render(): void { foreach ($this->entries as int $slot => string $value) { echo $slot; } } }";
         let mut server = stage31_server(&["file:///workspace"]);
         open_stage31_document(&mut server, base_uri, list_base);
         open_stage31_document(&mut server, child_uri, child);
@@ -10062,7 +10075,7 @@ function main(): void
         let markdown = hover["contents"]["value"].as_str().unwrap();
         assert!(markdown.contains("Zero-Based Sequence Index"), "{markdown}");
 
-        let dictionary_base = "open class BaseWindow { writable Dictionary<string, string> $entries = [\"left\" => \"alpha\"]; }";
+        let dictionary_base = "open class BaseWindow { writable Dictionary<int, string> $entries = [0 => \"alpha\"]; }";
         open_stage31_document(&mut server, base_uri, dictionary_base);
         let hover = server
             .hover(Some(&params_at(
@@ -10072,7 +10085,7 @@ function main(): void
             )))
             .expect("cross-file Dictionary key hover");
         let markdown = hover["contents"]["value"].as_str().unwrap();
-        assert!(markdown.contains("string $slot"), "{markdown}");
+        assert!(markdown.contains("int $slot"), "{markdown}");
         assert!(markdown.contains("Dictionary Key"), "{markdown}");
 
         let set_base =

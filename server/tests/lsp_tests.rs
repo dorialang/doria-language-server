@@ -2512,3 +2512,44 @@ function cleanup(): void throws Failure, Doria\Std\Io\IoError
     let diagnostics = diagnostics_for_document("file:///finally-error.doria", &finalizer);
     assert!(diagnostics.is_empty(), "{diagnostics:#?}");
 }
+
+#[test]
+fn explicit_foreach_binding_types_forward_utf16_safe_compiler_fixes() {
+    let uri = "file:///explicit-foreach-bindings.doria";
+    let source = "function main(): void { /* 😀 */ List<string> $values = [\"a\"]; foreach ($values as $index => $value) {} }";
+    let diagnostics = diagnostics_for_document(uri, source);
+    let missing_types = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic["code"] == "E0748")
+        .collect::<Vec<_>>();
+    assert_eq!(missing_types.len(), 2, "{diagnostics:#?}");
+
+    let actions = code_actions_for_document(uri, source);
+    for (binding, replacement) in [("$index", "int "), ("$value", "string ")] {
+        let binding_offset = source.rfind(binding).expect("foreach binding");
+        let expected = byte_offset_to_position(source, binding_offset);
+        let diagnostic = missing_types
+            .iter()
+            .find(|diagnostic| diagnostic["range"]["start"]["character"] == expected.character)
+            .unwrap_or_else(|| panic!("missing diagnostic for {binding}: {diagnostics:#?}"));
+        assert_eq!(diagnostic["range"]["start"]["line"], expected.line);
+        assert_eq!(
+            diagnostic["data"]["fixes"][0]["applicability"],
+            "machineApplicable"
+        );
+
+        let action = actions
+            .iter()
+            .find(|action| action["edit"]["changes"][uri][0]["newText"] == replacement)
+            .unwrap_or_else(|| panic!("missing {replacement:?} action: {actions:#?}"));
+        assert_eq!(action["isPreferred"], true);
+        assert_eq!(
+            action["edit"]["changes"][uri][0]["range"]["start"]["line"],
+            expected.line
+        );
+        assert_eq!(
+            action["edit"]["changes"][uri][0]["range"]["start"]["character"],
+            expected.character
+        );
+    }
+}

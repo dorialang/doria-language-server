@@ -8751,7 +8751,7 @@ class Window
 }
 function generic<T>(List<T> $items): void
 {
-    foreach ($items as $index => $item) { echo $index; }
+    foreach ($items as int $index => T $item) { echo $index; }
 }
 function main(): void
 {

@@ -33,7 +33,9 @@ test("keeps indexed foreach roles in compiler semantics", () => {
       "foreach ($this->contents as int $line => string $content)"
     )
   );
-  assert.ok(accepted.includes("foreach ($contents as $index => $content)"));
+  assert.ok(
+    accepted.includes("foreach ($contents as int $index => string $content)")
+  );
   assert.ok(accepted.includes("foreach ($counts as string $name => int $count)"));
   assert.ok(rejected.includes("foreach ($labels as int $index => string $label)"));
   assert.ok(rejected.includes("foreach (0..<2 as int $index => int $value)"));

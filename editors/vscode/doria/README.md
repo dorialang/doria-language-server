@@ -61,7 +61,9 @@ through `doria-lsp`; the TextMate grammar does not infer property promotion.
 Indexed foreach uses the same compiler boundary. `doria-lsp` presents
 compiler-owned Zero-Based Sequence Index and Dictionary Key roles, value access,
 diagnostics, and fixes. The TextMate grammar keeps both bindings as ordinary
-variables and implements no foreach checker. Interpolation and `%s` do not cause
+variables and implements no foreach checker. Decision 0133 keeps every binding
+explicitly typed; inferred compiler facts only support diagnostics and insertion
+fixes for omissions. Interpolation and `%s` do not cause
 the extension to invent primitive `toString` or scalar-cast completion. The
 corrective beat is complete; Stage 35 remains next and property hooks remain
 future work.

@@ -13,7 +13,7 @@ class Window
 function main(): void
 {
     List<string> $contents = ["alpha", "beta"];
-    foreach ($contents as $index => $content) {
+    foreach ($contents as int $index => string $content) {
         echo "{$index}: {$content}\n";
     }
 

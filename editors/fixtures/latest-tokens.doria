@@ -293,11 +293,11 @@ function main(List<string> $args): void
         echo "x";
     }
 
-    foreach (0..<10 as $i) {
+    foreach (0..<10 as int $i) {
         echo "r";
     }
 
-    foreach (0..10 as $i) {
+    foreach (0..10 as int $i) {
         break;
     }
 

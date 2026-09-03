@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $root = dirname(__DIR__);
-$expectedCompiler = 'f664e585725678251c8c7ae6e3deb0b971bbde80';
+$expectedCompiler = 'd102a89ee89b1b9c4d5037f7175d0e04c3ebd410';
 
 function indexed_foreach_text(string $path): string
 {
@@ -28,6 +28,7 @@ $manifest = indexed_foreach_text($root . '/Cargo.toml');
 $lock = indexed_foreach_text($root . '/Cargo.lock');
 $analysis = indexed_foreach_text($root . '/server/src/analysis.rs');
 $server = indexed_foreach_text($root . '/server/src/lib.rs');
+$lspTests = indexed_foreach_text($root . '/server/tests/lsp_tests.rs');
 $accepted = indexed_foreach_text($root . '/editors/fixtures/indexed-foreach.doria');
 $rejected = indexed_foreach_text($root . '/editors/fixtures/indexed-foreach-rejected.doria');
 $vscodeGrammar = indexed_foreach_text($root . '/editors/vscode/doria/syntaxes/doria.tmLanguage.json');
@@ -78,6 +79,10 @@ foreach ([
 ] as $coverage) {
     indexed_foreach_require(str_contains($server, $coverage), "tooling coverage is missing {$coverage}.");
 }
+indexed_foreach_require(
+    str_contains($lspTests, 'explicit_foreach_binding_types_forward_utf16_safe_compiler_fixes'),
+    'tooling coverage must forward Decision 0133 diagnostics and fixes through the public LSP boundary.',
+);
 
 $production = explode("\n#[cfg(test)]\nmod tests", $analysis, 2)[0]
     . explode("\n#[cfg(test)]\nmod tests", $server, 2)[0];
@@ -100,7 +105,7 @@ foreach (['Int::toString', 'Float::toString', 'String::from(int', 'String::from(
 
 foreach ([
     'foreach ($this->contents as int $line => string $content)',
-    'foreach ($contents as $index => $content)',
+    'foreach ($contents as int $index => string $content)',
     'foreach ($counts as string $name => int $count)',
 ] as $fixture) {
     indexed_foreach_require(str_contains($accepted, $fixture), "accepted fixture is missing {$fixture}.");
@@ -123,6 +128,9 @@ indexed_foreach_require(
 
 foreach ([
     'post-Stage-34 indexed-foreach and scalar-display correction is implemented',
+    'Decision 0133',
+    'every foreach binding',
+    'explicitly typed',
     'compiler-owned foreach semantic facts',
     'Zero-Based Sequence Index',
     'Dictionary Key',
@@ -132,6 +140,12 @@ foreach ([
 ] as $fact) {
     indexed_foreach_require(str_contains($docs, $fact), "tooling documentation is missing {$fact}.");
 }
+
+indexed_foreach_require(
+    str_contains($server . $lspTests, 'E0748')
+        && !str_contains($accepted, 'foreach ($contents as $index => $content)'),
+    'omitted foreach binding types must remain rejected with compiler-owned E0748 fixes.',
+);
 
 indexed_foreach_require(
     !str_contains($server, 'fn stage35_'),

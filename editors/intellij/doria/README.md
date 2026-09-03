@@ -132,7 +132,9 @@ through `doria-lsp`; the plugin does not infer property promotion.
 Indexed foreach also remains compiler-backed. `doria-lsp` presents
 compiler-owned Zero-Based Sequence Index and Dictionary Key roles, value access,
 diagnostics, and fixes; the IntelliJ lexer keeps both bindings as ordinary
-variables and implements no foreach checker. Interpolation and `%s` do not cause
+variables and implements no foreach checker. Decision 0133 keeps every binding
+explicitly typed; inferred compiler facts only support diagnostics and insertion
+fixes for omissions. Interpolation and `%s` do not cause
 the plugin to invent primitive `toString` or scalar-cast completion. The
 corrective beat is complete; Stage 35 remains next and property hooks remain
 future work.

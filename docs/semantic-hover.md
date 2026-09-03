@@ -96,8 +96,10 @@ Foreach binding hover is driven by compiler-owned foreach semantic facts. A
 Index** with canonical type `int`; Dictionary and SortedDictionary first
 bindings are shown as readonly **Dictionary Key** values with their authored key
 type. Element/value hover independently preserves its resolved type and readonly
-or writable access. The server does not infer these roles from source spelling or
-short type names. Interpolation and `%s` remain materialized strings and do not
+or writable access. Decision 0133 requires those types to remain visible in
+source on every binding. The server does not infer these roles from source
+spelling or short type names; compiler inference on an omitted type is recovery
+for diagnostics and fixes only. Interpolation and `%s` remain materialized strings and do not
 create a primitive `toString` or scalar-cast hover/completion surface.
 
 Attribute application hover uses compiler-owned Stage 32 metadata. It shows the
