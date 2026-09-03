@@ -9339,11 +9339,16 @@ use Lib\Base;
 class Child extends Base
 {
     override function value(): int { return parent::value(); }
+    function render(): void
+    {
+        foreach ($this->entries as $slot => $entry) { echo $slot; }
+    }
 }
 "#;
         let base_source = r#"namespace Lib;
 open class Base
 {
+    writable List<string> $entries = ["alpha"];
     open function value(): int { return 1; }
 }
 "#;
@@ -9429,6 +9434,14 @@ open class Base
             .as_str()
             .unwrap()
             .contains("Lib\\Base::value"));
+        let index = child_source.find("$slot").unwrap();
+        let hover = server
+            .hover(Some(&params_at(&child_uri, child_source, index)))
+            .expect("cross-package sequence-index hover");
+        let markdown = hover["contents"]["value"].as_str().unwrap();
+        assert!(markdown.contains("int $slot"), "{markdown}");
+        assert!(markdown.contains("Zero-Based Sequence Index"), "{markdown}");
+        assert!(markdown.contains("List<string>"), "{markdown}");
 
         let base_method = base_source.find("open function value").unwrap() + "open function ".len();
         assert_eq!(
@@ -9870,5 +9883,256 @@ class C
         );
         open_stage31_document(&mut server, uri, &fixed);
         assert!(server.documents[uri].analysis.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn indexed_foreach_protocol_preserves_roles_hovers_and_variable_tokens() {
+        let uri = "file:///workspace/indexed-foreach.doria";
+        let source = r#"class Window
+{
+    internal writable List<string> $entries = ["alpha"];
+    function render(): void
+    {
+        foreach ($this->entries as int $line => string $content) {
+            echo "{$line}:{$content}";
+        }
+    }
+}
+function main(): void
+{
+    string[] $letters = ["a"];
+    foreach ($letters as $offset => $letter) { echo $offset; }
+    Dictionary<string, int> $map = ["left" => 1];
+    foreach ($map as string $id => int $number) { echo $id; }
+    SortedDictionary<int, string> $sorted = SortedDictionary::from([1 => "one"]);
+    foreach ($sorted as int $rank => string $label) { echo $rank; }
+}
+"#;
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+        assert!(
+            server.documents[uri].analysis.diagnostics().is_empty(),
+            "accepted indexed foreach fixture: {:#?}",
+            server.documents[uri].analysis.diagnostics()
+        );
+        assert!(!diagnostics_for_document(uri, source)
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "M1101"));
+
+        for (needle, expected) in [
+            ("$line", "Zero-Based Sequence Index"),
+            ("$offset", "Zero-Based Sequence Index"),
+            ("$id", "Dictionary Key"),
+            ("$rank", "Dictionary Key"),
+            ("$content", "Sequence Element"),
+            ("$number", "Dictionary Value"),
+        ] {
+            let offset = source.find(needle).unwrap();
+            let hover = server
+                .hover(Some(&params_at(uri, source, offset)))
+                .unwrap_or_else(|| panic!("hover for {needle}"));
+            let markdown = hover["contents"]["value"].as_str().unwrap();
+            assert!(markdown.contains(expected), "{needle}: {markdown}");
+            assert!(
+                markdown.contains("**Access:** Readonly"),
+                "{needle}: {markdown}"
+            );
+        }
+
+        let tokens = semantic_token_records(&server.semantic_tokens(Some(&json!({
+            "textDocument": { "uri": uri }
+        }))));
+        for (needle, offset) in [
+            ("$line", source.find("$line").unwrap()),
+            ("$content", source.find("$content").unwrap()),
+            ("$offset", source.find("$offset").unwrap()),
+            ("$letter", source.find("=> $letter").unwrap() + 3),
+            ("$id", source.find("$id").unwrap()),
+            ("$number", source.find("$number").unwrap()),
+        ] {
+            let position = byte_offset_to_position(source, offset);
+            assert!(
+                tokens.iter().any(|token| {
+                    token.0 == position.line
+                        && token.1 == position.character
+                        && token.3 == 0
+                        && token.4 == 1
+                }),
+                "missing variable declaration token for {needle}: {tokens:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn indexed_foreach_diagnostics_ranges_and_actions_remain_compiler_owned() {
+        let uri = "file:///workspace/indexed-foreach-errors.doria";
+        for (source, code, replacement) in [
+            (
+                "function main(): void { List<int> $v = [1]; foreach ($v as string $i => int $value) {} }",
+                "E0746",
+                "int",
+            ),
+            (
+                "function main(): void { int[] $v = [1]; foreach ($v as writable int $i => int $value) {} }",
+                "E0520",
+                "",
+            ),
+            (
+                "function main(): void { Set<int> $v = Set::from([1]); foreach ($v as int $i => int $value) {} }",
+                "E0745",
+                "",
+            ),
+            (
+                "function main(): void { SortedSet<int> $v = SortedSet::from([1]); foreach ($v as int $i => int $value) {} }",
+                "E0745",
+                "",
+            ),
+            (
+                "function main(): void { Deque<int> $v = Deque::from([1]); foreach ($v as int $i => int $value) {} }",
+                "E0745",
+                "",
+            ),
+            (
+                "function main(): void { foreach (0..<2 as int $i => int $value) {} }",
+                "E0745",
+                "",
+            ),
+            (
+                "function main(): void { Dictionary<string, int> $v = [\"a\" => 1]; foreach ($v->keys as int $i => string $value) {} }",
+                "E0745",
+                "",
+            ),
+        ] {
+            let diagnostics = diagnostics_for_document(uri, source);
+            let diagnostic = diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic["code"] == code)
+                .unwrap_or_else(|| panic!("missing {code}: {diagnostics:#?}"));
+            assert_eq!(diagnostic["source"], "doriac");
+            let actions = code_actions_for_document(uri, source);
+            assert!(
+                actions.iter().any(|action| {
+                    action["edit"]["changes"][uri]
+                        .as_array()
+                        .is_some_and(|edits| edits.iter().any(|edit| edit["newText"] == replacement))
+                }),
+                "missing compiler action for {code}: {actions:#?}"
+            );
+        }
+
+        let source = "// 📦\nfunction main(): void { List<int> $v = [1]; foreach ($v as string $i => int $value) {} }";
+        let diagnostics = diagnostics_for_document(uri, source);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic["code"] == "E0746")
+            .expect("UTF-16 sequence-index diagnostic");
+        let expected = byte_offset_to_position(source, source.find("string $i").unwrap());
+        assert_eq!(diagnostic["range"]["start"]["line"], expected.line);
+        assert_eq!(
+            diagnostic["range"]["start"]["character"],
+            expected.character
+        );
+    }
+
+    #[test]
+    fn indexed_foreach_property_facts_refresh_across_unsaved_files() {
+        let base_uri = "file:///workspace/base-window.doria";
+        let child_uri = "file:///workspace/window.doria";
+        let list_base = "open class BaseWindow { writable List<string> $entries = [\"alpha\"]; }";
+        let child = "class Window extends BaseWindow { function render(): void { foreach ($this->entries as $slot => $value) { echo $slot; } } }";
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, base_uri, list_base);
+        open_stage31_document(&mut server, child_uri, child);
+        assert!(
+            server.documents[child_uri]
+                .analysis
+                .diagnostics()
+                .is_empty(),
+            "cross-file List fixture: {:#?}",
+            server.documents[child_uri].analysis.diagnostics()
+        );
+
+        let hover = server
+            .hover(Some(&params_at(
+                child_uri,
+                child,
+                child.find("$slot").unwrap(),
+            )))
+            .expect("cross-file List index hover");
+        let markdown = hover["contents"]["value"].as_str().unwrap();
+        assert!(markdown.contains("Zero-Based Sequence Index"), "{markdown}");
+
+        let dictionary_base = "open class BaseWindow { writable Dictionary<string, string> $entries = [\"left\" => \"alpha\"]; }";
+        open_stage31_document(&mut server, base_uri, dictionary_base);
+        let hover = server
+            .hover(Some(&params_at(
+                child_uri,
+                child,
+                child.find("$slot").unwrap(),
+            )))
+            .expect("cross-file Dictionary key hover");
+        let markdown = hover["contents"]["value"].as_str().unwrap();
+        assert!(markdown.contains("string $slot"), "{markdown}");
+        assert!(markdown.contains("Dictionary Key"), "{markdown}");
+
+        let set_base =
+            "open class BaseWindow { writable Set<string> $entries = Set::from([\"alpha\"]); }";
+        open_stage31_document(&mut server, base_uri, set_base);
+        assert!(server.documents[child_uri]
+            .analysis
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0745"));
+
+        open_stage31_document(&mut server, base_uri, list_base);
+        assert!(server.documents[child_uri]
+            .analysis
+            .diagnostics()
+            .is_empty());
+        let hover = server
+            .hover(Some(&params_at(
+                child_uri,
+                child,
+                child.find("$slot").unwrap(),
+            )))
+            .expect("restored List index hover");
+        assert!(hover["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("Zero-Based Sequence Index"));
+    }
+
+    #[test]
+    fn scalar_display_tooling_preserves_materialization_without_invented_apis() {
+        let uri = "file:///workspace/scalar-display.doria";
+        let source = r#"function accept(string $value): void {}
+function materialize(int $line, float $ratio): string
+{
+    string $interpolated = "{$line}:{$ratio}";
+    string $formatted = sprintf("%s %.2f", $line, $ratio);
+    List<string> $stored = [$interpolated, $formatted];
+    accept($stored[0]);
+    return $stored[1];
+}
+"#;
+        assert!(
+            diagnostics_for_document(uri, source).is_empty(),
+            "interpolation and sprintf remain accepted string materialization"
+        );
+
+        for (ty, literal) in [("int", "1"), ("float", "1.5")] {
+            let incomplete =
+                format!("function main(): void {{ {ty} $scalar = {literal}; $scalar->; }}");
+            let offset = incomplete.find("->;").unwrap() + 2;
+            let mut server = stage31_server(&["file:///workspace"]);
+            open_stage31_document(&mut server, uri, &incomplete);
+            let labels = request_completion_labels(&server, uri, &incomplete, offset);
+            for invented in ["toString", "cast", "as"] {
+                assert!(
+                    !labels.contains(invented),
+                    "{ty} invented {invented}: {labels:?}"
+                );
+            }
+        }
     }
 }

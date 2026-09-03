@@ -1,0 +1,9 @@
+function rejectedFirstBindings(): void
+{
+    Set<string> $labels = Set::from(["alpha"]);
+    foreach ($labels as int $index => string $label) {
+    }
+
+    foreach (0..<2 as int $index => int $value) {
+    }
+}

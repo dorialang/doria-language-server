@@ -91,6 +91,15 @@ mutability. Role-preserving signature help and named-argument completion use the
 same callable symbol. No hover exposes physical slots, backend symbols, or
 runtime descriptors.
 
+Foreach binding hover is driven by compiler-owned foreach semantic facts. A
+`List<T>` or `T[]` first binding is shown as a readonly **Zero-Based Sequence
+Index** with canonical type `int`; Dictionary and SortedDictionary first
+bindings are shown as readonly **Dictionary Key** values with their authored key
+type. Element/value hover independently preserves its resolved type and readonly
+or writable access. The server does not infer these roles from source spelling or
+short type names. Interpolation and `%s` remain materialized strings and do not
+create a primitive `toString` or scalar-cast hover/completion surface.
+
 Attribute application hover uses compiler-owned Stage 32 metadata. It shows the
 canonical attribute class, declaration target, constructor parameter types,
 evaluated constant values, and whether a value came from a default without
