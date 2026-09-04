@@ -2203,8 +2203,9 @@ impl<'a> SnapshotBuilder<'a> {
                 .unwrap_or(loop_info.value_binding_span)
         });
         for loop_info in foreach_loops {
-            if let (Some(binding_span), Some(ty)) = (
+            if let (Some(binding_span), Some(_), Some(ty)) = (
                 loop_info.first_binding_span,
+                loop_info.first_binding_type_span,
                 loop_info.first_binding_type.as_ref(),
             ) {
                 let role = match loop_info.iteration_kind {
@@ -2232,15 +2233,17 @@ impl<'a> SnapshotBuilder<'a> {
                 ForeachValueAccess::Readonly => "Readonly",
                 ForeachValueAccess::Writable => "Writable",
             };
-            hovers.extend(foreach_binding_hovers(
-                info,
-                loop_info.value_binding_span,
-                BindingKind::ForeachValue,
-                &loop_info.value_binding_type,
-                role,
-                access,
-                &loop_info.iterable_type,
-            ));
+            if loop_info.value_binding_type_span.is_some() {
+                hovers.extend(foreach_binding_hovers(
+                    info,
+                    loop_info.value_binding_span,
+                    BindingKind::ForeachValue,
+                    &loop_info.value_binding_type,
+                    role,
+                    access,
+                    &loop_info.iterable_type,
+                ));
+            }
         }
 
         let mut bindings = info
@@ -8827,6 +8830,33 @@ function main(): void
 
         for needle in ["$line", "$content", "$position", "$value"] {
             assert!(hover(source, needle, 1).markdown.contains(needle));
+        }
+    }
+
+    #[test]
+    fn inferred_foreach_recovery_types_do_not_publish_hovers() {
+        let source = r#"
+function main(): void
+{
+    List<string> $items = ["a"];
+    foreach ($items as $index => $value) {}
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("indexed-foreach-recovery.doria", source);
+        assert_eq!(
+            snapshot
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "E0748")
+                .count(),
+            2
+        );
+        for binding in ["$index", "$value"] {
+            let offset = source.rfind(binding).expect("foreach binding");
+            assert!(
+                snapshot.hover_at_offset(offset).is_none(),
+                "recovery-only type published a hover for {binding}"
+            );
         }
     }
 
