@@ -48,6 +48,10 @@ stage34_require(
     'Cargo.toml must pin an exact 40-character compiler revision.',
 );
 stage34_require(
+    doria_compiler_revision_is_authoritative($expectedCompiler),
+    'Cargo.toml must retain the centrally recorded compiler authority revision.',
+);
+stage34_require(
     doria_lock_resolves_revision($lock, $expectedCompiler),
     'Cargo.lock must resolve every compiler package to the current manifest revision.',
 );

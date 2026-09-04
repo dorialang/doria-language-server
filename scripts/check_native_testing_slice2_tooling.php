@@ -56,6 +56,10 @@ $docs = slice2_text($root . '/README.md')
 $expectedCompiler = doria_compiler_revision($manifest);
 slice2_require($expectedCompiler !== null, 'Cargo.toml must pin an exact 40-character compiler revision.');
 slice2_require(
+    doria_compiler_revision_is_authoritative($expectedCompiler),
+    'Cargo.toml must retain the centrally recorded compiler authority revision.',
+);
+slice2_require(
     doria_lock_resolves_revision($lock, $expectedCompiler),
     'Cargo.lock must resolve every Doria package to the current manifest revision.',
 );

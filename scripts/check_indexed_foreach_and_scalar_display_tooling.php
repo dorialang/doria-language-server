@@ -51,6 +51,10 @@ indexed_foreach_require(
     'Cargo.toml must pin an exact 40-character compiler revision.',
 );
 indexed_foreach_require(
+    doria_compiler_revision_is_authoritative($expectedCompiler),
+    'Cargo.toml must retain the centrally recorded compiler authority revision.',
+);
+indexed_foreach_require(
     doria_lock_resolves_revision($lock, $expectedCompiler),
     'Cargo.lock must resolve every Doria package to the current manifest revision.',
 );
@@ -149,10 +153,17 @@ indexed_foreach_require(
 );
 
 foreach (glob($root . '/scripts/check_*.php') ?: [] as $guardPath) {
+    $guard = indexed_foreach_text($guardPath);
     indexed_foreach_require(
-        preg_match('/\b[0-9a-f]{40}\b/', indexed_foreach_text($guardPath)) !== 1,
+        preg_match('/\b[0-9a-f]{40}\b/', $guard) !== 1,
         basename($guardPath) . ' must derive the current compiler revision instead of hard-coding a stale pin.',
     );
+    if (str_contains($guard, 'doria_compiler_revision($manifest)')) {
+        indexed_foreach_require(
+            str_contains($guard, 'doria_compiler_revision_is_authoritative($expectedCompiler)'),
+            basename($guardPath) . ' must enforce the central compiler authority revision.',
+        );
+    }
 }
 
 indexed_foreach_require(
