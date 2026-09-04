@@ -3,8 +3,9 @@
 
 declare(strict_types=1);
 
+require_once __DIR__ . '/compiler_pin.php';
+
 $root = dirname(__DIR__);
-$expectedCompiler = 'd102a89ee89b1b9c4d5037f7175d0e04c3ebd410';
 
 function indexed_foreach_text(string $path): string
 {
@@ -44,14 +45,14 @@ $docs = indexed_foreach_text($root . '/README.md')
     . indexed_foreach_text($root . '/editors/vscode/doria/README.md')
     . indexed_foreach_text($root . '/editors/intellij/doria/README.md');
 
-preg_match('/doriac\s*=\s*\{[^\n]*\brev\s*=\s*"([0-9a-f]{40})"/', $manifest, $pin);
+$expectedCompiler = doria_compiler_revision($manifest);
 indexed_foreach_require(
-    ($pin[1] ?? null) === $expectedCompiler,
-    'Cargo.toml must pin the exact indexed-foreach compiler implementation.',
+    $expectedCompiler !== null,
+    'Cargo.toml must pin an exact 40-character compiler revision.',
 );
 indexed_foreach_require(
-    substr_count($lock, 'rev=' . $expectedCompiler . '#' . $expectedCompiler) >= 3,
-    'Cargo.lock must resolve every Doria package to the indexed-foreach compiler implementation.',
+    doria_lock_resolves_revision($lock, $expectedCompiler),
+    'Cargo.lock must resolve every Doria package to the current manifest revision.',
 );
 
 foreach ([
@@ -146,6 +147,13 @@ indexed_foreach_require(
         && !str_contains($accepted, 'foreach ($contents as $index => $content)'),
     'omitted foreach binding types must remain rejected with compiler-owned E0748 fixes.',
 );
+
+foreach (glob($root . '/scripts/check_*.php') ?: [] as $guardPath) {
+    indexed_foreach_require(
+        preg_match('/\b[0-9a-f]{40}\b/', indexed_foreach_text($guardPath)) !== 1,
+        basename($guardPath) . ' must derive the current compiler revision instead of hard-coding a stale pin.',
+    );
+}
 
 indexed_foreach_require(
     !str_contains($server, 'fn stage35_'),

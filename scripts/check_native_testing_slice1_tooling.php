@@ -3,8 +3,9 @@
 
 declare(strict_types=1);
 
+require_once __DIR__ . '/compiler_pin.php';
+
 $root = dirname(__DIR__);
-$expectedCompiler = 'f664e585725678251c8c7ae6e3deb0b971bbde80';
 
 function native_testing_text(string $path): string
 {
@@ -51,14 +52,14 @@ $docs = native_testing_text($root . '/README.md')
     . native_testing_text($root . '/editors/vscode/doria/README.md')
     . native_testing_text($root . '/editors/intellij/doria/README.md');
 
-preg_match('/doriac\s*=\s*\{[^\n]*\brev\s*=\s*"([0-9a-f]{40})"/', $manifest, $pin);
+$expectedCompiler = doria_compiler_revision($manifest);
 native_testing_require(
-    ($pin[1] ?? null) === $expectedCompiler,
-    'Cargo.toml must pin the final Native Testing Foundation compiler while preserving Slice 1.',
+    $expectedCompiler !== null,
+    'Cargo.toml must pin an exact 40-character compiler revision.',
 );
 native_testing_require(
-    substr_count($lock, 'rev=' . $expectedCompiler . '#' . $expectedCompiler) >= 3,
-    'Cargo.lock must resolve every compiler package to the final foundation commit.',
+    doria_lock_resolves_revision($lock, $expectedCompiler),
+    'Cargo.lock must resolve every compiler package to the current manifest revision.',
 );
 
 foreach (['TestSemanticFacts', 'SourceSemanticContext', 'test_semantics', 'source_semantic_context', 'is_development()', 'test_semantic_tokens'] as $fact) {

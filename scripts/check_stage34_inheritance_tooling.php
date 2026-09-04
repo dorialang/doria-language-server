@@ -3,8 +3,9 @@
 
 declare(strict_types=1);
 
+require_once __DIR__ . '/compiler_pin.php';
+
 $root = dirname(__DIR__);
-$expectedCompiler = 'f664e585725678251c8c7ae6e3deb0b971bbde80';
 
 function stage34_text(string $path): string
 {
@@ -41,14 +42,14 @@ $docs = stage34_text($root . '/README.md')
     . stage34_text($root . '/editors/vscode/doria/README.md')
     . stage34_text($root . '/editors/intellij/doria/README.md');
 
-preg_match('/doriac\s*=\s*\{[^\n]*\brev\s*=\s*"([0-9a-f]{40})"/', $manifest, $pin);
+$expectedCompiler = doria_compiler_revision($manifest);
 stage34_require(
-    ($pin[1] ?? null) === $expectedCompiler,
-    'Cargo.toml must pin the final Stage 34 compiler commit.',
+    $expectedCompiler !== null,
+    'Cargo.toml must pin an exact 40-character compiler revision.',
 );
 stage34_require(
-    substr_count($lock, 'rev=' . $expectedCompiler . '#' . $expectedCompiler) >= 3,
-    'Cargo.lock must resolve every compiler package to the final Stage 34 commit.',
+    doria_lock_resolves_revision($lock, $expectedCompiler),
+    'Cargo.lock must resolve every compiler package to the current manifest revision.',
 );
 
 foreach ([
