@@ -65,7 +65,7 @@ inherited-member facts into open-parent, override, and `parent::` completion;
 hierarchy-aware hover and navigation; conservative virtual-family references and
 rename; and semantic tokens. It does not parse or validate inheritance itself,
 and it refuses rename whenever the complete family would cross an incomplete,
-generated, dependency-cache, or otherwise readonly graph boundary. Stage 35 interfaces and traits are next. Ordinary
+generated, dependency-cache, or otherwise readonly graph boundary. Stage 35 interfaces and traits authority is accepted under Decision 0134; Slice 1 is next. Ordinary
 analysis remains target-neutral, and highlighting remains presentation only.
 
 The post-Stage-34 constructor-parameter-role correction is also implemented.

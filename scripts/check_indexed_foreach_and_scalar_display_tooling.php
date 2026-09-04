@@ -140,7 +140,7 @@ foreach ([
     'Zero-Based Sequence Index',
     'Dictionary Key',
     'no primitive `toString` or scalar-cast completion',
-    'Stage 35 remains next',
+    'Stage 35 authority is accepted and Slice 1 is next',
     'property hooks remain future work',
 ] as $fact) {
     indexed_foreach_require(str_contains($docs, $fact), "tooling documentation is missing {$fact}.");

@@ -147,7 +147,7 @@ foreach ([
     'collection/Error',
     'type-directed Test import and matcher completion',
     'Stage 34 single class inheritance is complete',
-    'Stage 35 interfaces and traits are next',
+    'Stage 35 interfaces and traits authority is accepted under Decision 0134',
 ] as $fact) {
     slice2_require(str_contains($docs, $fact), "Slice-2 tooling documentation is missing {$fact}.");
 }

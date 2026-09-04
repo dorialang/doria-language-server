@@ -116,7 +116,7 @@ foreach ([
     'post-Stage-34 constructor-parameter-role correction',
     'compiler-owned constructor-role and property-family facts',
     'does not infer property promotion',
-    'Stage 35 interfaces and traits are next',
+    'Stage 35 interfaces and traits authority is accepted under Decision 0134',
 ] as $fact) {
     constructor_role_require(str_contains($docs, $fact), "constructor-role tooling documentation is missing {$fact}.");
 }
