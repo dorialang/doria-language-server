@@ -23,8 +23,8 @@ use doriac::ownership::{
     InvocationConsumption,
 };
 use doriac::semantics::{
-    CallableTarget, ConstructorParameterSemanticRole, EnumSemanticInfo, ListAlgorithmCallInfo,
-    ListAlgorithmKind, ListCallbackAccess, SemanticInfo,
+    CallableTarget, ConstructorParameterSemanticRole, EnumSemanticInfo, ForeachIterationKind,
+    ForeachValueAccess, ListAlgorithmCallInfo, ListAlgorithmKind, ListCallbackAccess, SemanticInfo,
 };
 use doriac::source::{SourceFile, SourceId, Span};
 use doriac::symbols::{BindingKind, BindingOwnership, ReceiverMode};
@@ -328,6 +328,7 @@ pub(crate) struct AnalysisSnapshot {
     directive_semantic_tokens: Vec<(Span, u32)>,
     attribute_semantic_tokens: Vec<(Span, u32)>,
     assertion_semantic_tokens: Vec<SemanticTokenSpan>,
+    foreach_semantic_tokens: Vec<SemanticTokenSpan>,
     hierarchy_semantic_tokens: Vec<SemanticTokenSpan>,
     assertion_completions: Vec<(Span, doriac::semantics::AssertionCompletionInfo)>,
     test_semantics: TestSemanticFacts,
@@ -1410,6 +1411,7 @@ impl AnalysisSnapshot {
             .map(|(span, token_type)| (span, token_type, 0))
             .chain(test_semantic_tokens)
             .chain(self.assertion_semantic_tokens.iter().copied())
+            .chain(self.foreach_semantic_tokens.iter().copied())
             .chain(self.hierarchy_semantic_tokens.iter().copied())
             .collect::<Vec<_>>();
         tokens.sort_by_key(|(span, _, _)| (span.start, span.end));
@@ -1690,6 +1692,53 @@ fn test_semantic_tokens(facts: &TestSemanticFacts, source_id: SourceId) -> Vec<S
     tokens
 }
 
+fn foreach_binding_semantic_tokens(
+    info: &SemanticInfo,
+    source_id: SourceId,
+) -> Vec<SemanticTokenSpan> {
+    const VARIABLE: u32 = 0;
+
+    let foreach_bindings = info
+        .binding_resolution
+        .declarations_by_id
+        .values()
+        .filter(|declaration| {
+            matches!(
+                declaration.kind,
+                BindingKind::ForeachFirst | BindingKind::ForeachValue
+            )
+        })
+        .filter_map(|declaration| {
+            declaration
+                .span
+                .filter(|span| span.source == source_id)
+                .map(|span| (declaration.id, span))
+        })
+        .collect::<Vec<_>>();
+    let binding_ids = foreach_bindings
+        .iter()
+        .map(|(binding, _)| *binding)
+        .collect::<HashSet<_>>();
+    let mut tokens = foreach_bindings
+        .into_iter()
+        .map(|(_, span)| (span, VARIABLE, SEMANTIC_TOKEN_DECLARATION))
+        .collect::<Vec<_>>();
+    tokens.extend(
+        info.binding_resolution
+            .uses_by_span
+            .iter()
+            .filter_map(|(span, binding)| {
+                (span.source == source_id && binding_ids.contains(binding))
+                    .then_some((*span, VARIABLE, 0))
+            }),
+    );
+    tokens.sort_by_key(|(span, token_type, modifiers)| {
+        (span.start, span.end, *token_type, *modifiers)
+    });
+    tokens.dedup();
+    tokens
+}
+
 fn compiler_assertion_symbol_tokens(
     facts: &GlobalSymbolFacts,
     source_id: SourceId,
@@ -1761,6 +1810,7 @@ struct SnapshotBuilder<'a> {
     semantic_hovers: Vec<SemanticHover>,
     attribute_semantic_tokens: Vec<(Span, u32)>,
     assertion_semantic_tokens: Vec<SemanticTokenSpan>,
+    foreach_semantic_tokens: Vec<SemanticTokenSpan>,
     hierarchy_semantic_tokens: Vec<SemanticTokenSpan>,
     assertion_completions: Vec<(Span, doriac::semantics::AssertionCompletionInfo)>,
     attribute_parameter_occurrences: Vec<AttributeParameterOccurrence>,
@@ -1813,6 +1863,7 @@ impl<'a> SnapshotBuilder<'a> {
             semantic_hovers: Vec::new(),
             attribute_semantic_tokens: Vec::new(),
             assertion_semantic_tokens: Vec::new(),
+            foreach_semantic_tokens: Vec::new(),
             hierarchy_semantic_tokens: Vec::new(),
             assertion_completions: Vec::new(),
             attribute_parameter_occurrences: Vec::new(),
@@ -1844,6 +1895,8 @@ impl<'a> SnapshotBuilder<'a> {
                 info.test_semantics.clone()
             });
         if let Some(info) = self.semantic_info {
+            self.foreach_semantic_tokens
+                .extend(foreach_binding_semantic_tokens(info, self.source_id));
             self.assertion_semantic_tokens
                 .extend(compiler_assertion_symbol_tokens(
                     &info.global_symbols,
@@ -1885,6 +1938,7 @@ impl<'a> SnapshotBuilder<'a> {
             directive_semantic_tokens: Vec::new(),
             attribute_semantic_tokens: self.attribute_semantic_tokens,
             assertion_semantic_tokens: self.assertion_semantic_tokens,
+            foreach_semantic_tokens: self.foreach_semantic_tokens,
             hierarchy_semantic_tokens: self.hierarchy_semantic_tokens,
             assertion_completions: self.assertion_completions,
             test_semantics,
@@ -2136,6 +2190,60 @@ impl<'a> SnapshotBuilder<'a> {
                     display_resolved_type(ty),
                 ),
             ));
+        }
+
+        let mut foreach_loops = info
+            .foreach_loops
+            .values()
+            .filter(|loop_info| loop_info.value_binding_span.source == self.source_id)
+            .collect::<Vec<_>>();
+        foreach_loops.sort_by_key(|loop_info| {
+            loop_info
+                .first_binding_span
+                .unwrap_or(loop_info.value_binding_span)
+        });
+        for loop_info in foreach_loops {
+            if let (Some(binding_span), Some(_), Some(ty)) = (
+                loop_info.first_binding_span,
+                loop_info.first_binding_type_span,
+                loop_info.first_binding_type.as_ref(),
+            ) {
+                let role = match loop_info.iteration_kind {
+                    ForeachIterationKind::SequenceIndex => "Zero-Based Sequence Index",
+                    ForeachIterationKind::DictionaryKey => "Dictionary Key",
+                    ForeachIterationKind::ValueOnly => continue,
+                };
+                hovers.extend(foreach_binding_hovers(
+                    info,
+                    binding_span,
+                    BindingKind::ForeachFirst,
+                    ty,
+                    role,
+                    "Readonly",
+                    &loop_info.iterable_type,
+                ));
+            }
+
+            let role = match loop_info.iteration_kind {
+                ForeachIterationKind::SequenceIndex => "Sequence Element",
+                ForeachIterationKind::DictionaryKey => "Dictionary Value",
+                ForeachIterationKind::ValueOnly => "Iteration Value",
+            };
+            let access = match loop_info.value_access {
+                ForeachValueAccess::Readonly => "Readonly",
+                ForeachValueAccess::Writable => "Writable",
+            };
+            if loop_info.value_binding_type_span.is_some() {
+                hovers.extend(foreach_binding_hovers(
+                    info,
+                    loop_info.value_binding_span,
+                    BindingKind::ForeachValue,
+                    &loop_info.value_binding_type,
+                    role,
+                    access,
+                    &loop_info.iterable_type,
+                ));
+            }
         }
 
         let mut bindings = info
@@ -5323,6 +5431,59 @@ fn narrowed_function_type_for_use<'a>(
         }
         _ => None,
     }
+}
+
+fn foreach_binding_hovers(
+    info: &SemanticInfo,
+    binding_span: Span,
+    kind: BindingKind,
+    ty: &ResolvedType,
+    role: &str,
+    access: &str,
+    iterable_type: &ResolvedType,
+) -> Vec<SemanticHover> {
+    let source_id = binding_span.source;
+    let Some(declaration) = info
+        .binding_resolution
+        .declarations_by_id
+        .values()
+        .filter(|declaration| declaration.kind == kind)
+        .filter_map(|declaration| declaration.span.map(|span| (declaration, span)))
+        .filter(|(_, span)| {
+            span.source == source_id
+                && binding_span.start <= span.start
+                && span.end <= binding_span.end
+        })
+        .min_by_key(|(declaration, span)| (span.start, span.end, declaration.id))
+        .map(|(declaration, _)| declaration)
+    else {
+        return Vec::new();
+    };
+    let Some(declaration_span) = declaration.span else {
+        return Vec::new();
+    };
+    let markdown = format!(
+        "```doria\n{} ${}\n```\n\n**Role:** {role}\n\n**Access:** {access}\n\n**Iterable:** `{}`",
+        display_resolved_type(ty),
+        declaration.name,
+        display_resolved_type(iterable_type),
+    );
+
+    let mut spans = vec![declaration_span];
+    spans.extend(
+        info.binding_resolution
+            .uses_by_span
+            .iter()
+            .filter_map(|(span, binding)| {
+                (*binding == declaration.id && span.source == source_id).then_some(*span)
+            }),
+    );
+    spans.sort_by_key(|span| (span.start, span.end));
+    spans.dedup();
+    spans
+        .into_iter()
+        .map(|span| SemanticHover::new(span, markdown.clone()))
+        .collect()
 }
 
 fn member_receiver_class_name(ty: &ResolvedType) -> Option<&str> {
@@ -8576,6 +8737,127 @@ function main(): void
             .hover_at_offset(source.rfind("fn() => 1").expect("stored callback"))
             .expect("stored callback hover");
         assert!(owned_callback.markdown.contains("Owned callback"));
+    }
+
+    #[test]
+    fn indexed_foreach_hovers_project_compiler_owned_roles_types_and_access() {
+        let source = r#"
+class Window
+{
+    internal writable List<string> $entries = ["alpha"];
+    function render(): void
+    {
+        foreach ($this->entries as int $line => string $content) {
+            echo "{$line}:{$content}";
+        }
+    }
+}
+function generic<T>(List<T> $items): void
+{
+    foreach ($items as int $index => T $item) { echo $index; }
+}
+function main(): void
+{
+    string[] $letters = ["a"];
+    foreach ($letters as int $offset => string $letter) { echo $offset; }
+    Dictionary<string, int> $map = ["left" => 1];
+    foreach ($map as string $id => int $number) { echo $id; }
+    SortedDictionary<int, string> $sorted = SortedDictionary::from([1 => "one"]);
+    foreach ($sorted as int $rank => string $label) { echo $rank; }
+    writable List<int> $numbers = [1];
+    foreach ($numbers as int $position => writable int $value) { $value += $position; }
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("indexed-foreach-hover.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "accepted indexed foreach fixture: {:#?}",
+            snapshot.diagnostics()
+        );
+
+        for (needle, role, ty, iterable) in [
+            (
+                "$line",
+                "Zero-Based Sequence Index",
+                "int $line",
+                "List<string>",
+            ),
+            (
+                "$index",
+                "Zero-Based Sequence Index",
+                "int $index",
+                "List<T>",
+            ),
+            (
+                "$offset",
+                "Zero-Based Sequence Index",
+                "int $offset",
+                "string[]",
+            ),
+            (
+                "$id",
+                "Dictionary Key",
+                "string $id",
+                "Dictionary<string, int>",
+            ),
+            (
+                "$rank",
+                "Dictionary Key",
+                "int $rank",
+                "SortedDictionary<int, string>",
+            ),
+        ] {
+            let markdown = hover(source, needle, 0).markdown;
+            assert!(markdown.contains(ty), "{needle}: {markdown}");
+            assert!(markdown.contains(role), "{needle}: {markdown}");
+            assert!(
+                markdown.contains("**Access:** Readonly"),
+                "{needle}: {markdown}"
+            );
+            assert!(markdown.contains(iterable), "{needle}: {markdown}");
+        }
+
+        let content = hover(source, "$content", 0).markdown;
+        assert!(content.contains("string $content"));
+        assert!(content.contains("Sequence Element"));
+        assert!(content.contains("**Access:** Readonly"));
+        assert!(hover(source, "$number", 0)
+            .markdown
+            .contains("Dictionary Value"));
+        let writable = hover(source, "$value", 0).markdown;
+        assert!(writable.contains("int $value"));
+        assert!(writable.contains("**Access:** Writable"));
+
+        for needle in ["$line", "$content", "$position", "$value"] {
+            assert!(hover(source, needle, 1).markdown.contains(needle));
+        }
+    }
+
+    #[test]
+    fn inferred_foreach_recovery_types_do_not_publish_hovers() {
+        let source = r#"
+function main(): void
+{
+    List<string> $items = ["a"];
+    foreach ($items as $index => $value) {}
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("indexed-foreach-recovery.doria", source);
+        assert_eq!(
+            snapshot
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "E0748")
+                .count(),
+            2
+        );
+        for binding in ["$index", "$value"] {
+            let offset = source.rfind(binding).expect("foreach binding");
+            assert!(
+                snapshot.hover_at_offset(offset).is_none(),
+                "recovery-only type published a hover for {binding}"
+            );
+        }
     }
 
     #[test]

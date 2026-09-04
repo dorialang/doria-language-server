@@ -3,8 +3,9 @@
 
 declare(strict_types=1);
 
+require_once __DIR__ . '/compiler_pin.php';
+
 $root = dirname(__DIR__);
-$expectedCompiler = 'c155c91d8c7e9ab8f919d2747a87a976760a6780';
 
 function slice3Text(string $path): string
 {
@@ -53,11 +54,15 @@ $docs = slice3Text($root . '/README.md')
     . slice3Text($root . '/editors/vscode/doria/README.md')
     . slice3Text($root . '/editors/intellij/doria/README.md');
 
-preg_match('/doriac\s*=\s*\{[^\n]*\brev\s*=\s*"([0-9a-f]{40})"/', $manifest, $pin);
-slice3Require(($pin[1] ?? null) === $expectedCompiler, 'Cargo.toml must pin final foundation Doria.');
+$expectedCompiler = doria_compiler_revision($manifest);
+slice3Require($expectedCompiler !== null, 'Cargo.toml must pin an exact 40-character compiler revision.');
 slice3Require(
-    substr_count($lock, 'rev=' . $expectedCompiler . '#' . $expectedCompiler) >= 3,
-    'Cargo.lock must resolve every Doria package to the final foundation commit.',
+    doria_compiler_revision_is_authoritative($expectedCompiler),
+    'Cargo.toml must retain the centrally recorded compiler authority revision.',
+);
+slice3Require(
+    doria_lock_resolves_revision($lock, $expectedCompiler),
+    'Cargo.lock must resolve every Doria package to the current manifest revision.',
 );
 
 foreach ([

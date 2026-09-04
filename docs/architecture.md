@@ -130,6 +130,19 @@ is navigation-visible but forces conservative rename refusal unless a complete
 atomic property-family edit can be proven. No layout slot or second promotion
 checker exists in the server.
 
+Indexed foreach follows the same projection boundary. Compiler-owned foreach
+semantic facts identify the iterable family, first-binding role and type,
+value-binding type and access, and source spans. The server uses those facts for
+Zero-Based Sequence Index and Dictionary Key hover plus ordinary variable
+semantic tokens; it does not parse or type-check foreach again. Compiler
+diagnostics and Machine Applicable fixes remain unchanged. Decision 0133
+requires every foreach binding to be explicitly typed; inferred compiler facts
+support diagnostics and insertion fixes but never make omitted source types
+valid. Scalar interpolation
+and `%s` are compiler-owned string materialization, so tooling adds no primitive
+`toString` or scalar cast. The corrective beat is complete, Stage 35 remains
+next, and property hooks remain future work.
+
 ### Editor clients
 
 Clients start and supervise `doria-lsp`, translate native editor APIs to LSP

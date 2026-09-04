@@ -6,6 +6,14 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Added tooling for the post-Stage-34 indexed-foreach and scalar-display
+  correction. The server projects compiler-owned foreach semantic facts into
+  distinct Zero-Based Sequence Index and Dictionary Key hovers, preserves value
+  access and variable semantic tokens, and forwards unsupported-family and
+  Decision 0133 explicit-binding diagnostics and fixes unchanged. Every foreach
+  binding remains explicitly typed; inferred types only drive compiler fixes.
+  Interpolation and `%s` remain string
+  materialization; no primitive `toString` or scalar-cast completion was added.
 - Added tooling for the post-Stage-34 constructor-parameter-role correction.
   The server consumes compiler-owned promoted, inherited-override, and
   constructor-only roles; preserves them in hover and signatures; offers named

@@ -1,0 +1,24 @@
+class Window
+{
+    internal writable List<string> $contents = ["alpha", "beta"];
+
+    function render(): void
+    {
+        foreach ($this->contents as int $line => string $content) {
+            echo "{$line}: {$content}\n";
+        }
+    }
+}
+
+function main(): void
+{
+    List<string> $contents = ["alpha", "beta"];
+    foreach ($contents as int $index => string $content) {
+        echo "{$index}: {$content}\n";
+    }
+
+    Dictionary<string, int> $counts = ["alpha" => 1];
+    foreach ($counts as string $name => int $count) {
+        echo "{$name}: {$count}\n";
+    }
+}

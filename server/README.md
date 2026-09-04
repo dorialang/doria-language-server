@@ -46,6 +46,16 @@ parameters, and constructor-only `parameter` inputs without a second promotion
 or inheritance checker. Property-family rename is refused when the complete
 atomic edit cannot be proven.
 
+The post-Stage-34 indexed-foreach and scalar-display correction is implemented
+through compiler-owned foreach semantic facts. Hover distinguishes readonly
+Zero-Based Sequence Index bindings from Dictionary Key bindings and preserves
+the value binding's resolved access; semantic tokens remain ordinary variables.
+Decision 0133 requires an explicit type on every binding. Omitted types remain
+compiler diagnostics with Machine Applicable insertion fixes; they are never
+accepted as inferred declarations. Diagnostics and fixes are forwarded from the
+compiler, with no second foreach checker. Scalar interpolation and `%s` add no primitive `toString` or scalar-cast
+completion. Stage 35 remains next, and property hooks remain future work.
+
 The compiler classifies checked effects into source-required effects and ambient
 canonical I/O effects. Hovers keep source signatures focused on required
 `throws` contracts and describe the exact ambient
