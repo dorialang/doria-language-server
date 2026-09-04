@@ -117,7 +117,7 @@ foreach (['expect($bytes)->toContain', 'expect($values)->toContain', 'expect($it
 slice3Require(str_contains($vscode, 'presents Slice 3 collection and Error expectations'), 'VS Code Slice-3 fixture coverage is missing.');
 slice3Require(str_contains($intellij, 'testNativeTestingSlice3KeepsMatcherSemanticsInTheLanguageServer'), 'IntelliJ Slice-3 fixture coverage is missing.');
 
-foreach (['Native Testing Foundation are complete', 'Stage 34 single class inheritance is complete', 'Stage 35 interfaces and traits are next'] as $fact) {
+foreach (['Native Testing Foundation are complete', 'Stage 34 single class inheritance is complete', 'Stage 35 interfaces and traits authority is accepted under Decision 0134'] as $fact) {
     slice3Require(str_contains($docs, $fact), "final foundation documentation is missing {$fact}.");
 }
 foreach (['Slice 3 is next', 'foundation remains in progress', 'wait for Slice 3', 'remains blocked until the foundation'] as $stale) {

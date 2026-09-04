@@ -65,8 +65,8 @@ variables and implements no foreach checker. Decision 0133 keeps every binding
 explicitly typed; inferred compiler facts only support diagnostics and insertion
 fixes for omissions. Interpolation and `%s` do not cause
 the extension to invent primitive `toString` or scalar-cast completion. The
-corrective beat is complete; Stage 35 remains next and property hooks remain
-future work.
+corrective beat is complete; Stage 35 authority is accepted and Slice 1 is next,
+while property hooks remain future work.
 
 Compiler-backed hover separates required source `throws` effects from the exact
 ambient canonical I/O effects transported at runtime. Ambient I/O does not require

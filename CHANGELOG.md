@@ -60,7 +60,8 @@ This project follows the Doria toolchain CalVer.
   Added debounced project watchers, manual refresh, and one Baton path override
   to both official editor integrations. The Native Testing Foundation followed
   that work and is now complete. Stage 34 subsequently completed single class
-  inheritance tooling; Stage 35 interfaces and traits are next.
+  inheritance tooling; Stage 35 interfaces and traits authority is accepted
+  under Decision 0134, and Slice 1 is next.
 
 - Added compiler-resolved go-to-definition and conservative rename for local
   bindings and cross-file methods, properties, class constants, and enum cases,

@@ -122,13 +122,18 @@ stage34_require(
 
 foreach ([
     'Stage 34 single class inheritance is complete',
-    'Stage 35 interfaces and traits are next',
+    'Stage 35 interfaces and traits authority is accepted under Decision 0134',
     'compiler-owned class hierarchy',
     'does not parse or check inheritance independently',
 ] as $fact) {
     stage34_require(str_contains($docs, $fact), "Stage 34 tooling documentation is missing {$fact}.");
 }
-foreach (['Stage 34 single class inheritance is next', 'Stage 34 is next'] as $stale) {
+foreach ([
+    'Stage 34 single class inheritance is next',
+    'Stage 34 is next',
+    'Stage 35 interfaces and traits are next',
+    'Stage 35 remains next',
+] as $stale) {
     stage34_require(!str_contains($docs, $stale), "stale Stage 34 boundary remains: {$stale}.");
 }
 

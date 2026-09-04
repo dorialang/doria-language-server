@@ -2867,7 +2867,7 @@ fn completion_items() -> Value {
         "label": "Displayable",
         "kind": 8,
         "detail": "compiler-known Doria interface",
-        "documentation": "`interface Displayable` requires an explicit `implements Displayable` declaration and exactly `function toString(): string`. It controls interpolation, echo, concatenation, and `%s`. Other interfaces are not supported by this compiler.",
+        "documentation": "`interface Displayable` is the currently executable compiler-known display contract. It requires an explicit `implements Displayable` declaration and exactly `function toString(): string`, controlling interpolation, echo, concatenation, and `%s`. Decision 0134 accepts user-defined interfaces; their conformance implementation begins in Stage 35 Slice 1.",
     }));
     items.push(json!({
         "label": "Error",
@@ -3615,10 +3615,10 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "Declares the single direct parent of a class. The parent must be visible and open.",
         ),
         TokenKind::Interface => Some(
-            "Declares an interface. The compiler currently provides the compiler-known `Displayable` and `Error` contracts.",
+            "Declares accepted user-defined interface syntax. Decision 0134 defines the contract, and conformance implementation begins in Stage 35 Slice 1. The currently executable contracts are compiler-known `Displayable` and `Error`.",
         ),
         TokenKind::Implements => Some(
-            "Declares nominal conformance to a compiler-known contract such as `Displayable` or `Error`.",
+            "Declares nominal conformance. Compiler-known `Displayable` and `Error` are currently executable; Decision 0134 accepts user-defined conformance for Stage 35 Slice 1.",
         ),
         TokenKind::Function => Some(
             "Declares a named function or method, an anonymous block closure, or a structural function type according to context. Function types preserve readonly, writable, or once invocation; parameter ownership; and checked effects. The compiler checks structural callable compatibility.",
@@ -3683,7 +3683,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "Direct parent-implementation qualifier. Calls through `parent::` bypass virtual dispatch.",
         ),
         TokenKind::Trait => Some(
-            "Declares accepted trait syntax. Trait composition semantics land in Stage 35.",
+            "Declares accepted trait syntax. Decision 0134 defines composition, whose implementation lands in Stage 35 Slice 4.",
         ),
         TokenKind::Const => Some("Declares a compile-time-evaluated constant."),
         TokenKind::Enum => Some("Declares a nominal Doria enum type."),
@@ -3722,7 +3722,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
         }
         TokenKind::Identifier(name) => match name.as_str() {
             "Error" => Some("`interface Error` is the compiler-known checked-error contract. Conforming classes explicitly declare `implements Error` and expose an externally accessible readonly `string $message` property."),
-            "Displayable" => Some("`interface Displayable` is the compiler-known display contract. A class must explicitly declare `implements Displayable` and provide `function toString(): string`. It controls interpolation, echo, concatenation, and `%s`. Other interfaces are not supported by this compiler."),
+            "Displayable" => Some("`interface Displayable` is the currently executable compiler-known display contract. A class must explicitly declare `implements Displayable` and provide `function toString(): string`. It controls interpolation, echo, concatenation, and `%s`. Decision 0134 accepts user-defined interfaces; their conformance implementation begins in Stage 35 Slice 1."),
             "toString" => Some("`function toString(): string` is the exact externally accessible readonly instance method required by `Displayable`."),
             "List" => Some("`List<T>` is the growable, insertion-ordered sequence: `add`, `insertAt`, `removeAt`, `pop`, `contains`, `first`/`last`, and the `count`/`isEmpty` properties (decision 0100). An owned move type."),
             "Dictionary" => Some("`Dictionary<K, V>` is the insertion-ordered map: `get` (`?V`), `set`, `remove` (`?V`), `has`, the `keys`/`values` projections, and `count`/`isEmpty` (decision 0100). Keys require `Hashable`. An owned move type."),
@@ -4689,7 +4689,7 @@ function main(): void
     }
 
     #[test]
-    fn completion_and_hover_document_the_narrow_displayable_contract() {
+    fn completion_and_hover_document_the_current_and_accepted_interface_boundary() {
         let completion = completion_item("Displayable");
         let documentation = completion["documentation"]
             .as_str()
@@ -4697,7 +4697,9 @@ function main(): void
         assert!(documentation.contains("interface Displayable"));
         assert!(documentation.contains("function toString(): string"));
         assert!(documentation.contains("interpolation, echo, concatenation, and `%s`"));
-        assert!(documentation.contains("Other interfaces are not supported by this compiler"));
+        assert!(documentation.contains("currently executable"));
+        assert!(documentation.contains("Decision 0134"));
+        assert!(documentation.contains("Stage 35 Slice 1"));
 
         let source = "class Label implements Displayable {}";
         let hover = hover_at_offset(
@@ -4710,7 +4712,27 @@ function main(): void
             .expect("hover contents should be markdown");
         assert!(text.contains("interface Displayable"));
         assert!(text.contains("function toString(): string"));
-        assert!(text.contains("Other interfaces are not supported by this compiler"));
+        assert!(text.contains("currently executable"));
+        assert!(text.contains("Decision 0134"));
+        assert!(text.contains("Stage 35 Slice 1"));
+
+        let interface_source = "interface Label {}";
+        let interface_hover = hover_at_offset(interface_source, 0)
+            .expect("interface keyword should provide hover information");
+        let interface_text = interface_hover["contents"]["value"]
+            .as_str()
+            .expect("interface hover contents should be markdown");
+        assert!(interface_text.contains("Decision 0134"));
+        assert!(interface_text.contains("Stage 35 Slice 1"));
+
+        let trait_source = "trait Formats {}";
+        let trait_hover = hover_at_offset(trait_source, 0)
+            .expect("trait keyword should provide hover information");
+        let trait_text = trait_hover["contents"]["value"]
+            .as_str()
+            .expect("trait hover contents should be markdown");
+        assert!(trait_text.contains("Decision 0134"));
+        assert!(trait_text.contains("Stage 35 Slice 4"));
     }
 
     #[test]

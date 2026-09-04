@@ -35,8 +35,8 @@ class inheritance is complete. The server consumes compiler-owned class
 hierarchy, inherited-member, virtual-family, direct-parent, and callable-contract
 facts for completion, hover, navigation, references, rename, and semantic tokens.
 It does not parse or check inheritance independently, and it preserves incomplete,
-generated, and dependency-source edit safety. Stage 35 interfaces and traits are
-next.
+generated, and dependency-source edit safety. Stage 35 interfaces and traits
+authority is accepted under Decision 0134; Slice 1 is next.
 
 The post-Stage-34 constructor-parameter-role correction is implemented through
 compiler-owned constructor-role and property-family facts. Hover, signature and
@@ -54,7 +54,8 @@ Decision 0133 requires an explicit type on every binding. Omitted types remain
 compiler diagnostics with Machine Applicable insertion fixes; they are never
 accepted as inferred declarations. Diagnostics and fixes are forwarded from the
 compiler, with no second foreach checker. Scalar interpolation and `%s` add no primitive `toString` or scalar-cast
-completion. Stage 35 remains next, and property hooks remain future work.
+completion. Stage 35 authority is accepted and Slice 1 is next; property hooks
+remain future work.
 
 The compiler classifies checked effects into source-required effects and ambient
 canonical I/O effects. Hovers keep source signatures focused on required
