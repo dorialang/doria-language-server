@@ -289,4 +289,5 @@ Language-server and editor releases track the Doria toolchain CalVer. The curren
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE).
+Third-party components retain their own licenses and notices.

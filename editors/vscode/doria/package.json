@@ -5,7 +5,7 @@
   "version": "2026.3.1-canary",
   "doriaToolchainVersion": "2026.03.1-canary",
   "publisher": "doria",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/dorialang/doria-language-server.git"
