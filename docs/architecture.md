@@ -122,6 +122,14 @@ implementations. Rename refuses incomplete multi-declaration families rather
 than changing only part of a contract. Trait members are not injected into
 composers; interface erasure and composition remain pending Slices 2 and 4.
 
+Each source is indexed in every compiler analysis graph that contains it, including
+dependencies shared by workspace members. Hierarchy completion uses that indexed
+graph identity, not the workspace-folder URI. Navigation and rename join authored
+locations by URI and byte range; graph-local SourceIds are never compared across
+graphs. Shared dependencies contribute one source declaration, not duplicate
+declarations or edits. Generic arguments in contract lists retain ordinary type
+completion; unfinished declaration headers are recovered through the compiler parser.
+
 The post-Stage-34 constructor-parameter-role correction extends that projection,
 not the editor's semantic authority. Compiler-owned `constructor_parameters` and
 `property_families` identify promoted properties, inherited-property override

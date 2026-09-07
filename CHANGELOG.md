@@ -6,6 +6,11 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Fixed Baton-project parent and override completion, contract navigation across
+  shared workspace dependencies, and ordinary type completion inside generic
+  interface and trait arguments. Shared declarations and edits are deduplicated
+  without losing their per-graph compiler identities.
+
 - Implemented Stage 35 Slice 1 tooling: generic interface and trait signatures,
   canonical requirement origins, checked implementations, declaration-context
   completion, and parsed adaptation navigation. References preserve coalesced
