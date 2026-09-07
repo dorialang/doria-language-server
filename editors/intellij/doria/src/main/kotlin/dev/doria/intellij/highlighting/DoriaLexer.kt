@@ -448,7 +448,7 @@ class DoriaLexer : LexerBase() {
 
             "use" -> useTokenType()
 
-            "uses" -> usesTokenType()
+            "uses" -> DoriaTokenTypes.TRAIT_USES_KEYWORD
 
             "as" -> if (isImportUseLine()) DoriaTokenTypes.IMPORT_ALIAS_KEYWORD else DoriaTokenTypes.KEYWORD
 
@@ -463,7 +463,7 @@ class DoriaLexer : LexerBase() {
     }
 
     private fun contextualIdentifierTokenType(text: String): IElementType = when {
-        isTraitUsesLine() && text.first().isUpperCase() -> DoriaTokenTypes.TRAIT_NAME
+        currentLine().trimStart().startsWith("uses ") && text.first().isUpperCase() -> DoriaTokenTypes.TRAIT_NAME
 
         isNamespaceDeclarationLine() && text != "namespace" -> DoriaTokenTypes.NAMESPACE_PATH
 
@@ -516,11 +516,6 @@ class DoriaLexer : LexerBase() {
         isLegacyTraitUseLine() -> DoriaTokenTypes.INVALID
         isLegacyClosureUseLine() -> DoriaTokenTypes.INVALID
         isImportUseLine() -> DoriaTokenTypes.IMPORT_USE_KEYWORD
-        else -> DoriaTokenTypes.KEYWORD
-    }
-
-    private fun usesTokenType(): IElementType = when {
-        isTraitUsesLine() -> DoriaTokenTypes.TRAIT_USES_KEYWORD
         else -> DoriaTokenTypes.KEYWORD
     }
 
@@ -581,9 +576,6 @@ class DoriaLexer : LexerBase() {
 
         return cursor >= endOffset || !isIdentifierPart(buffer[cursor])
     }
-
-    private fun isTraitUsesLine(): Boolean =
-        TRAIT_USES_LINE.matches(currentLine())
 
     private fun isLegacyTraitUseLine(): Boolean =
         LEGACY_TRAIT_USE_LINE.matches(currentLine())
@@ -1128,8 +1120,6 @@ class DoriaLexer : LexerBase() {
             "Bytes",
         )
 
-        private val TRAIT_USES_LINE =
-            Regex("^\\s+uses\\s+[A-Z][A-Za-z0-9_]*(?:\\s*,\\s*[A-Z][A-Za-z0-9_]*)*\\s*;?\\s*(?://.*)?$")
 
         private val LEGACY_TRAIT_USE_LINE =
             Regex("^\\s+use\\s+[A-Z][A-Za-z0-9_]*(?:\\s*,\\s*[A-Z][A-Za-z0-9_]*)*\\s*;?\\s*(?://.*)?$")

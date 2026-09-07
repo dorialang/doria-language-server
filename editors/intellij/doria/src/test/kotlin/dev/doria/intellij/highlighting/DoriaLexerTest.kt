@@ -6,6 +6,16 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 class DoriaLexerTest : TestCase() {
+    fun testStage35ContractFixtureKeepsGraphSemanticsInCompiler() {
+        val fixture = Files.readString(Path.of("..", "..", "fixtures", "stage35-contracts.doria"))
+        val tokens = lex(fixture)
+        assertEquals(DoriaTokenTypes.TRAIT_USES_KEYWORD, tokens.first { it.text == "uses" }.type)
+        for (token in tokens.filter { it.text in setOf("interface", "trait", "extends", "implements", "as", "insteadof") }) {
+            assertEquals(DoriaTokenTypes.KEYWORD, token.type)
+        }
+        assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
+    }
+
     fun testIndexedForeachFixturesKeepRolesInCompilerSemantics() {
         val accepted = Files.readString(
             Path.of("..", "..", "fixtures", "indexed-foreach.doria"),

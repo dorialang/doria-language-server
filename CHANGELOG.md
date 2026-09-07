@@ -6,6 +6,14 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Implemented Stage 35 Slice 1 tooling: generic interface and trait signatures,
+  canonical requirement origins, checked implementations, declaration-context
+  completion, and parsed adaptation navigation. References preserve coalesced
+  origins; rename refuses incomplete contract families. Cross-package indexing
+  retains the compiler's actual analysis graph, including dependency sources.
+  VS Code and IntelliJ present `uses` and `insteadof` without checking composition.
+  Interface values remain Slice 2 work, core operations Slice 3, and composition Slice 4.
+
 - Added tooling for the post-Stage-34 indexed-foreach and scalar-display
   correction. The server projects compiler-owned foreach semantic facts into
   distinct Zero-Based Sequence Index and Dictionary Key hovers, preserves value
@@ -28,8 +36,8 @@ This project follows the Doria toolchain CalVer.
   hover and navigation; conservative family-wide references and rename; and
   semantic tokens. Generated and dependency sources remain readonly, incomplete
   graphs refuse rename, and VS Code and IntelliJ recognize `open`, `override`,
-  `extends`, and `parent` as presentation only. Interfaces and traits remain the
-  next Stage 35 boundary.
+  `extends`, and `parent` as presentation only. Stage 35 Slice 1 subsequently
+  added interface and trait declaration checking without runtime erasure.
 - Completed Native Testing Foundation Slice 3 and the foundation tooling closure.
   The server now consumes compiler-owned typed matcher candidates for Test-module
   imports and expectation completion, renders collection and checked-Error hover
@@ -61,7 +69,7 @@ This project follows the Doria toolchain CalVer.
   to both official editor integrations. The Native Testing Foundation followed
   that work and is now complete. Stage 34 subsequently completed single class
   inheritance tooling; Stage 35 interfaces and traits authority is accepted
-  under Decision 0134, and Slice 1 is next.
+  under Decision 0134, Slice 1 is complete, and Slice 2 is next.
 
 - Added compiler-resolved go-to-definition and conservative rename for local
   bindings and cross-file methods, properties, class constants, and enum cases,

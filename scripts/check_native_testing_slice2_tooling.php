@@ -151,7 +151,7 @@ foreach ([
 ] as $fact) {
     slice2_require(str_contains($docs, $fact), "Slice-2 tooling documentation is missing {$fact}.");
 }
-foreach (['Slice 2 is next', 'Expectations are not yet available', 'expectations remain Slice 2 work'] as $stale) {
+foreach (['Native Testing Foundation Slice 2 is next', 'Expectations are not yet available', 'expectations remain Slice 2 work'] as $stale) {
     slice2_require(!str_contains($docs, $stale), "stale Slice-1 tooling claim remains: {$stale}.");
 }
 

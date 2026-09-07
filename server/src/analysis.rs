@@ -178,7 +178,7 @@ fn documentation_targets(program: &Program) -> Vec<DocumentationTarget> {
             Item::Trait(trait_decl) => {
                 targets.push(DocumentationTarget {
                     start: trait_decl.span.start,
-                    tags: Vec::new(),
+                    tags: template_tags(&trait_decl.type_params),
                 });
                 member_documentation_targets(&trait_decl.members, &mut targets);
             }
@@ -186,10 +186,18 @@ fn documentation_targets(program: &Program) -> Vec<DocumentationTarget> {
                 start: enum_decl.span.start,
                 tags: template_tags(&enum_decl.type_params),
             }),
-            Item::Interface(interface) => targets.push(DocumentationTarget {
-                start: interface.span.start,
-                tags: Vec::new(),
-            }),
+            Item::Interface(interface) => {
+                targets.push(DocumentationTarget {
+                    start: interface.span.start,
+                    tags: template_tags(&interface.type_params),
+                });
+                targets.extend(
+                    interface
+                        .requirements
+                        .iter()
+                        .map(function_documentation_target),
+                );
+            }
             Item::Constant(constant) => targets.push(DocumentationTarget {
                 start: constant.span.start,
                 tags: constant
@@ -222,6 +230,7 @@ fn member_documentation_targets(members: &[ClassMember], targets: &mut Vec<Docum
                     .map(|ty| vec![format!("@var {ty}")])
                     .unwrap_or_default(),
             }),
+            ClassMember::Uses(_) => {}
         }
     }
 }
@@ -325,6 +334,7 @@ pub(crate) struct AnalysisSnapshot {
     source_id: SourceId,
     compilation_context: CompilationContext,
     global_symbols: GlobalSymbolFacts,
+    contracts: doriac::semantics::contracts::ContractFacts,
     directive_semantic_tokens: Vec<(Span, u32)>,
     attribute_semantic_tokens: Vec<(Span, u32)>,
     assertion_semantic_tokens: Vec<SemanticTokenSpan>,
@@ -637,6 +647,10 @@ impl AnalysisSnapshot {
 
     pub(crate) fn source_id(&self) -> SourceId {
         self.source_id
+    }
+
+    pub(crate) fn contracts(&self) -> &doriac::semantics::contracts::ContractFacts {
+        &self.contracts
     }
 
     pub(crate) fn global_symbols(&self) -> &GlobalSymbolFacts {
@@ -1549,6 +1563,8 @@ fn class_like_reference_role(role: GlobalReferenceRole) -> bool {
             | GlobalReferenceRole::StaticQualifier
             | GlobalReferenceRole::Extends
             | GlobalReferenceRole::Implements
+            | GlobalReferenceRole::Uses
+            | GlobalReferenceRole::TraitAdaptation
             | GlobalReferenceRole::Throws
             | GlobalReferenceRole::Catch
             | GlobalReferenceRole::TypeTest
@@ -1787,6 +1803,7 @@ struct SnapshotBuilder<'a> {
     symbols: Vec<Symbol>,
     occurrences: Vec<Occurrence>,
     classes: HashMap<String, usize>,
+    contract_types: HashMap<String, usize>,
     error_classes: HashSet<String>,
     enums: HashMap<String, usize>,
     enum_cases: HashMap<(String, String), usize>,
@@ -1840,6 +1857,7 @@ impl<'a> SnapshotBuilder<'a> {
             symbols: Vec::new(),
             occurrences: Vec::new(),
             classes: HashMap::new(),
+            contract_types: HashMap::new(),
             error_classes: HashSet::new(),
             enums: HashMap::new(),
             enum_cases: HashMap::new(),
@@ -1932,6 +1950,10 @@ impl<'a> SnapshotBuilder<'a> {
             .collect();
         AnalysisSnapshot {
             diagnostics: self.diagnostics,
+            contracts: self
+                .semantic_info
+                .map(|info| info.contracts.clone())
+                .unwrap_or_default(),
             source_id: self.source_id,
             compilation_context: CompilationContext::default(),
             global_symbols: GlobalSymbolFacts::default(),
@@ -2453,15 +2475,53 @@ impl<'a> SnapshotBuilder<'a> {
     }
 
     fn collect_declarations(&mut self, program: &Program) {
+        self.hierarchy_semantic_tokens
+            .extend(self.tokens.iter().filter_map(|token| {
+                matches!(token.kind, TokenKind::Uses | TokenKind::Insteadof).then_some((
+                    token.span,
+                    SEMANTIC_TOKEN_KEYWORD,
+                    0,
+                ))
+            }));
         for item in &program.items {
             match item {
                 Item::Class(class) => self.collect_class(class),
                 Item::Enum(enum_decl) => self.collect_enum(enum_decl),
                 Item::Trait(trait_decl) => {
+                    self.collect_contract_declaration(
+                        "trait",
+                        &trait_decl.name,
+                        trait_decl.name_span,
+                        &trait_decl.type_params,
+                        &[],
+                    );
                     for member in &trait_decl.members {
-                        if let ClassMember::Method(method) = member {
-                            self.collect_method(&trait_decl.name, method);
+                        match member {
+                            ClassMember::Method(method) => {
+                                self.collect_method(&trait_decl.name, method)
+                            }
+                            ClassMember::Property(property) => self.collect_authored_property(
+                                &trait_decl.name,
+                                property,
+                                phpdoc_before(self.text, property.span.start),
+                            ),
+                            ClassMember::Constant(constant) => {
+                                self.collect_authored_constant(&trait_decl.name, constant)
+                            }
+                            _ => {}
                         }
+                    }
+                }
+                Item::Interface(interface) => {
+                    self.collect_contract_declaration(
+                        "interface",
+                        &interface.name,
+                        interface.name_span,
+                        &interface.type_params,
+                        &interface.parents,
+                    );
+                    for requirement in &interface.requirements {
+                        self.collect_method(&interface.name, requirement);
                     }
                 }
                 Item::Function(function) => {
@@ -2485,6 +2545,39 @@ impl<'a> SnapshotBuilder<'a> {
                 _ => {}
             }
         }
+    }
+
+    fn collect_contract_declaration(
+        &mut self,
+        kind: &str,
+        name: &str,
+        span: Span,
+        parameters: &[doriac::ast::TypeParamDecl],
+        parents: &[TypeRef],
+    ) {
+        let mut signature = format!("{kind} {name}{}", type_parameter_signature(parameters));
+        if !parents.is_empty() {
+            signature.push_str(&format!(
+                " extends {}",
+                parents
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        let documentation = if kind == "interface" {
+            "Nominal interface declaration. Trait-free concrete conformance is checked; interface value execution requires Stage 35 Slice 2."
+        } else {
+            "Compile-time trait declaration. Composer-dependent members and trait composition require Stage 35 Slice 4."
+        };
+        let symbol = self.add_declaration_symbol(
+            span,
+            signature,
+            Some(documentation.to_string()),
+            SymbolKind::Plain,
+        );
+        self.contract_types.insert(name.to_string(), symbol);
     }
 
     fn collect_semantic_only_declarations(&mut self) {
@@ -2686,7 +2779,7 @@ impl<'a> SnapshotBuilder<'a> {
         let conforms_to_error = class
             .implements
             .iter()
-            .any(|interface| interface == "Error");
+            .any(|interface| interface.name == "Error");
         let mut documentation = phpdoc_before(self.text, class.span.start);
         if let Some(hierarchy) = self
             .semantic_info
@@ -2746,6 +2839,7 @@ impl<'a> SnapshotBuilder<'a> {
 
         for member in &class.members {
             match member {
+                ClassMember::Uses(_) => {}
                 ClassMember::Method(method) => {
                     self.collect_method(&class.name, method);
                     self.class_members
@@ -2764,40 +2858,12 @@ impl<'a> SnapshotBuilder<'a> {
                         });
                 }
                 ClassMember::Property(property) => {
-                    let selection_span =
-                        find_variable_span(self.tokens, property.span, &property.name)
-                            .unwrap_or(property.span);
                     let documentation = if conforms_to_error && property.name == "message" {
                         Some("Required externally accessible readonly message for the compiler-known `Error` contract.".to_string())
                     } else {
                         phpdoc_before(self.text, property.span.start)
                     };
-                    let property_symbol = self.add_declaration_symbol(
-                        selection_span,
-                        format!("{} ${}", property.ty, property.name),
-                        documentation.clone(),
-                        SymbolKind::Variable,
-                    );
-                    self.class_property_symbols
-                        .insert((class.name.clone(), property.name.clone()), property_symbol);
-                    if property.is_static {
-                        self.class_static_property_symbols
-                            .insert((class.name.clone(), property.name.clone()), property_symbol);
-                    }
-                    self.record_member_occurrence(
-                        &class.name,
-                        &property.name,
-                        MemberKind::Property,
-                        selection_span,
-                        true,
-                    );
-                    if let Some(occurrence) = self
-                        .member_occurrences
-                        .last_mut()
-                        .filter(|occurrence| occurrence.span == selection_span)
-                    {
-                        occurrence.exact_declaration = Some(property.span);
-                    }
+                    self.collect_authored_property(&class.name, property, documentation.clone());
                     self.class_members
                         .entry(class.name.clone())
                         .or_default()
@@ -2835,21 +2901,7 @@ impl<'a> SnapshotBuilder<'a> {
                     }
                 }
                 ClassMember::Constant(constant) => {
-                    let constant_symbol = self.add_declaration_symbol(
-                        constant.name_span,
-                        format!("{}::{}", class.name, constant.name),
-                        phpdoc_before(self.text, constant.span.start),
-                        SymbolKind::Plain,
-                    );
-                    self.class_constant_symbols
-                        .insert((class.name.clone(), constant.name.clone()), constant_symbol);
-                    self.record_member_occurrence(
-                        &class.name,
-                        &constant.name,
-                        MemberKind::Constant,
-                        constant.name_span,
-                        true,
-                    );
+                    self.collect_authored_constant(&class.name, constant);
                     if let Some(owner) = self.member_owner(&class.name, class.name_span, true) {
                         self.hierarchy_members.push(HierarchyMember {
                             owner,
@@ -2874,6 +2926,60 @@ impl<'a> SnapshotBuilder<'a> {
         }
     }
 
+    fn collect_authored_constant(&mut self, owner: &str, constant: &doriac::ast::ConstDecl) {
+        let symbol = self.add_declaration_symbol(
+            constant.name_span,
+            format!("{owner}::{}", constant.name),
+            phpdoc_before(self.text, constant.span.start),
+            SymbolKind::Plain,
+        );
+        self.class_constant_symbols
+            .insert((owner.to_string(), constant.name.clone()), symbol);
+        self.record_member_occurrence(
+            owner,
+            &constant.name,
+            MemberKind::Constant,
+            constant.name_span,
+            true,
+        );
+    }
+
+    fn collect_authored_property(
+        &mut self,
+        owner: &str,
+        property: &doriac::ast::PropertyDecl,
+        documentation: Option<String>,
+    ) {
+        let selection_span =
+            find_variable_span(self.tokens, property.span, &property.name).unwrap_or(property.span);
+        let symbol = self.add_declaration_symbol(
+            selection_span,
+            format!("{} ${}", property.ty, property.name),
+            documentation,
+            SymbolKind::Variable,
+        );
+        self.class_property_symbols
+            .insert((owner.to_string(), property.name.clone()), symbol);
+        if property.is_static {
+            self.class_static_property_symbols
+                .insert((owner.to_string(), property.name.clone()), symbol);
+        }
+        self.record_member_occurrence(
+            owner,
+            &property.name,
+            MemberKind::Property,
+            selection_span,
+            true,
+        );
+        if let Some(occurrence) = self
+            .member_occurrences
+            .last_mut()
+            .filter(|occurrence| occurrence.span == selection_span)
+        {
+            occurrence.exact_declaration = Some(property.span);
+        }
+    }
+
     fn collect_method(&mut self, class_name: &str, method: &FunctionDecl) {
         let selection_span =
             self.declaration_name_span(method.span, &method.name, TokenKind::Function);
@@ -2888,6 +2994,12 @@ impl<'a> SnapshotBuilder<'a> {
         self.collect_constructor_parameter_roles(class_name, method);
         let mut documentation = phpdoc_before(self.text, method.span.start);
         self.append_callable_effect_documentation(&mut documentation, method.span);
+        if method.body.as_block().is_none() {
+            append_documentation(
+                &mut documentation,
+                "Declared requirement, not an executable method body.",
+            );
+        }
         if let Some(hierarchy) = self
             .semantic_info
             .and_then(|info| info.method_hierarchy.get(&method.span))
@@ -2932,7 +3044,7 @@ impl<'a> SnapshotBuilder<'a> {
                     .virtual_root
                     .is_some()
                     .then(|| override_stub(method)),
-                body_span: Some(method.body.span),
+                body_span: method.body.as_block().map(|body| body.span),
             });
         }
     }
@@ -3426,7 +3538,7 @@ impl<'a> SnapshotBuilder<'a> {
                     if class
                         .implements
                         .iter()
-                        .any(|interface| interface == "Error")
+                        .any(|interface| interface.name == "Error")
                     {
                         if let Some(span) = find_identifier_span(self.tokens, class.span, "Error") {
                             self.add_error_type_reference(span);
@@ -3472,10 +3584,14 @@ impl<'a> SnapshotBuilder<'a> {
                         }
                     }
                 }
+                Item::Interface(interface) => {
+                    for requirement in &interface.requirements {
+                        self.visit_function_body(requirement, Some(&interface.name), None);
+                    }
+                }
                 Item::Function(function) => self.visit_function_body(function, None, None),
                 Item::Constant(constant) => self.visit_expr(&constant.initializer, None, None),
                 Item::Statement(statement) => self.visit_stmt(statement, None, None),
-                _ => {}
             }
         }
         self.pop_local_scope();
@@ -3488,7 +3604,7 @@ impl<'a> SnapshotBuilder<'a> {
         parent_class: Option<&str>,
     ) {
         let block = &function.body;
-        self.push_local_scope(block.span.end);
+        self.push_local_scope(block.span().end);
         if let Some(throws) = &function.throws {
             self.add_reference_symbol(
                 throws.keyword_span,
@@ -3503,14 +3619,14 @@ impl<'a> SnapshotBuilder<'a> {
         let callable = self.callable_declarations.get(&function.span).copied();
         for (index, parameter) in function.params.iter().enumerate() {
             let parameter_symbol =
-                self.declare_parameter(parameter, block.span.start, current_class);
+                self.declare_parameter(parameter, block.span().start, current_class);
             if let Some(callable) = callable {
                 if let Some(slot) = self.symbols[callable].parameter_symbols.get_mut(index) {
                     *slot = Some(parameter_symbol);
                 }
             }
         }
-        for statement in &block.statements {
+        for statement in block.statements() {
             self.visit_stmt(statement, current_class, parent_class);
         }
         self.pop_local_scope();
@@ -4711,6 +4827,7 @@ impl<'a> SnapshotBuilder<'a> {
             .enums
             .get(&ty.name)
             .or_else(|| self.classes.get(&ty.name))
+            .or_else(|| self.contract_types.get(&ty.name))
             .copied()
         {
             self.record_reference(type_span, symbol);
@@ -6324,7 +6441,15 @@ fn class_signature(class: &ClassDecl) -> String {
         signature.push_str(&format!(" extends {parent}"));
     }
     if !class.implements.is_empty() {
-        signature.push_str(&format!(" implements {}", class.implements.join(", ")));
+        signature.push_str(&format!(
+            " implements {}",
+            class
+                .implements
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
     signature
 }

@@ -115,8 +115,12 @@ override, and parent-member completion; hierarchy hover; exact and inherited
 definition; virtual-family references; and conservative family-wide rename. It
 does not parse an inheritance graph or reproduce override checking. Renames are
 refused when a family is incomplete or requires edits to generated,
-dependency-cache, or otherwise readonly sources. Interfaces and traits remain
-outside this graph until Stage 35.
+dependency-cache, or otherwise readonly sources. Stage 35 Slice 1 extends compiler
+facts with canonical requirements, conformance and authored trait origins.
+Requirement references navigate to all coalesced origins and checked concrete
+implementations. Rename refuses incomplete multi-declaration families rather
+than changing only part of a contract. Trait members are not injected into
+composers; interface erasure and composition remain pending Slices 2 and 4.
 
 The post-Stage-34 constructor-parameter-role correction extends that projection,
 not the editor's semantic authority. Compiler-owned `constructor_parameters` and
@@ -140,8 +144,8 @@ requires every foreach binding to be explicitly typed; inferred compiler facts
 support diagnostics and insertion fixes but never make omitted source types
 valid. Scalar interpolation
 and `%s` are compiler-owned string materialization, so tooling adds no primitive
-`toString` or scalar cast. The corrective beat is complete, Stage 35 remains
-next, and property hooks remain future work.
+`toString` or scalar cast. The corrective beat and Stage 35 Slice 1 are complete;
+interface runtime execution and property hooks remain future work.
 
 ### Editor clients
 

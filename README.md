@@ -65,7 +65,7 @@ inherited-member facts into open-parent, override, and `parent::` completion;
 hierarchy-aware hover and navigation; conservative virtual-family references and
 rename; and semantic tokens. It does not parse or validate inheritance itself,
 and it refuses rename whenever the complete family would cross an incomplete,
-generated, dependency-cache, or otherwise readonly graph boundary. Stage 35 interfaces and traits authority is accepted under Decision 0134; Slice 1 is next. Ordinary
+generated, dependency-cache, or otherwise readonly graph boundary. Stage 35 interfaces and traits authority is accepted under Decision 0134; Slice 1 is complete and Slice 2 is next. Ordinary
 analysis remains target-neutral, and highlighting remains presentation only.
 
 The post-Stage-34 constructor-parameter-role correction is also implemented.
@@ -87,8 +87,8 @@ diagnostics and Machine Applicable insertion fixes, not accepted implicit
 declarations. The server does not implement a second foreach checker:
 unsupported first bindings, ranges, fixes, and UTF-16 ranges remain compiler
 diagnostics. Interpolation and `%s` materialize strings;
-the tooling invents no primitive `toString` or scalar-cast API. Stage 35 remains
-next, and property hooks remain future work.
+the tooling invents no primitive `toString` or scalar-cast API. Stage 35 Slice 1
+is complete; interface runtime execution and property hooks remain future work.
 
 Project-aware tooling asks Baton asynchronously for its strict schema-1 project
 document and gives each package-rooted dependency closure from the supplied

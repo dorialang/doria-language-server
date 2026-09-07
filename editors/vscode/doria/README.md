@@ -44,7 +44,8 @@ infer tests from paths, or expose generated callables. Stage 34 single class
 inheritance is complete. The grammar presents `open`, `override`, `extends`, and
 `parent`; compiler-backed semantic tokens and `doria-lsp` own their meaning,
 hierarchy completion, navigation, and conservative rename. Interfaces and traits
-remain deferred to Stage 35, which is next. Attribute colors remain theme-dependent presentation,
+have checked declarations and conformance in Stage 35 Slice 1; erased values
+and trait composition remain pending. Attribute colors remain theme-dependent presentation,
 while `doria-lsp` supplies compiler-owned schema completion, typed metadata
 hover, semantic tokens, navigation, references, rename, and diagnostics. The
 extension does not implement attribute semantics, runtime reflection, testing
@@ -65,7 +66,7 @@ variables and implements no foreach checker. Decision 0133 keeps every binding
 explicitly typed; inferred compiler facts only support diagnostics and insertion
 fixes for omissions. Interpolation and `%s` do not cause
 the extension to invent primitive `toString` or scalar-cast completion. The
-corrective beat is complete; Stage 35 authority is accepted and Slice 1 is next,
+corrective beat is complete; Stage 35 Slice 1 is complete and Slice 2 is next,
 while property hooks remain future work.
 
 Compiler-backed hover separates required source `throws` effects from the exact

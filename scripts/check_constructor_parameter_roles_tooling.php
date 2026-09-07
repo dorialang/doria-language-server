@@ -120,9 +120,5 @@ foreach ([
 ] as $fact) {
     constructor_role_require(str_contains($docs, $fact), "constructor-role tooling documentation is missing {$fact}.");
 }
-constructor_role_require(
-    !str_contains($server, 'fn stage35_'),
-    'Stage 35 implementation must remain absent during this corrective beat.',
-);
 
 fwrite(STDOUT, "Constructor parameter roles tooling guard passed.\n");

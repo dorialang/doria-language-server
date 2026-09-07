@@ -115,7 +115,8 @@ semantics, infer them from paths, or expose generated callables. Stage 34 single
 class inheritance is complete. The lexer presents `open`, `override`, `extends`,
 and `parent`; compiler-backed semantic tokens and `doria-lsp` own their meaning,
 hierarchy completion, navigation, and conservative rename. Interfaces and traits
-remain deferred to Stage 35, which is next. Attribute colors remain presentation-only, while
+have checked declarations and conformance in Stage 35 Slice 1; erased values
+and trait composition remain pending. Attribute colors remain presentation-only, while
 `doria-lsp` supplies compiler-owned schema completion, typed metadata hover,
 semantic tokens, navigation, references, rename, and diagnostics. The plugin
 does not parse attribute or testing semantics, provide runtime reflection, or
@@ -136,7 +137,7 @@ variables and implements no foreach checker. Decision 0133 keeps every binding
 explicitly typed; inferred compiler facts only support diagnostics and insertion
 fixes for omissions. Interpolation and `%s` do not cause
 the plugin to invent primitive `toString` or scalar-cast completion. The
-corrective beat is complete; Stage 35 authority is accepted and Slice 1 is next,
+corrective beat is complete; Stage 35 Slice 1 is complete and Slice 2 is next,
 while property hooks remain future work.
 
 Compiler-backed hover separates required source `throws` effects from the exact
