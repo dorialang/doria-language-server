@@ -4,12 +4,12 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/dorialang/doria-language-server"
 version = "2026.3.1-canary"
 
 [workspace.dependencies]
-doriac = { git = "https://github.com/dorialang/doria", rev = "74480e752e96b55e3c1aa6606a405e5b485b707c", default-features = false }
+doriac = { git = "https://github.com/dorialang/doria", rev = "ef150707deb683f8d1b1d424edfe43e7b4d9cf77", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

@@ -137,7 +137,6 @@ $plannedKeywords = [
     'override',
     'get',
     'set',
-    'insteadof',
     'spawn',
     'scope',
 ];
@@ -1065,7 +1064,7 @@ function check_intellij_lexer(): void
         'IntelliJ preprocessor check must require # to be the first non-whitespace character on the line'
     );
     require_check(
-        str_contains($lexerText, 'TRAIT_USES_LINE') && str_contains($lexerText, 'DoriaTokenTypes.TRAIT_USES_KEYWORD'),
+        str_contains($lexerText, '"uses" -> DoriaTokenTypes.TRAIT_USES_KEYWORD'),
         'IntelliJ lexer must recognize trait-composition uses'
     );
     require_check(
@@ -2076,7 +2075,7 @@ function check_stage30f_callable_alignment(): void
             str_contains($readmeText, 'Stage 34 single class inheritance is complete') &&
             str_contains($readmeText, 'Stage 35') &&
             str_contains($readmeText, 'interfaces and traits authority is accepted under Decision 0134') &&
-            str_contains($readmeText, 'Slice 1 is next') &&
+            str_contains($readmeText, 'Slice 1 is complete and Slice 2 is next') &&
             str_contains($readmeText, '`map`, `filter`, and `reduce` only for resolved `List<T>` receivers') &&
             !str_contains($readmeText, 'Stage 30 remains incomplete') &&
             !str_contains($readmeText, 'Stage 30h is next') &&

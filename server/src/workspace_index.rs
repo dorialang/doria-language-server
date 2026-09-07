@@ -127,7 +127,7 @@ struct IndexedHierarchyMember {
 
 #[derive(Debug, Clone)]
 struct DocumentSummary {
-    graph: String,
+    graphs: Vec<String>,
     package: PackageIdentity,
     namespace: Option<String>,
     declarations: Vec<(GlobalSymbolId, String, GlobalSymbolKind)>,
@@ -152,9 +152,12 @@ pub(crate) struct OpenDocumentIndex {
     hierarchy_members: Vec<IndexedHierarchyMember>,
     test_symbols: Vec<IndexedTestSymbol>,
     documents: HashMap<String, DocumentSummary>,
+    contracts: HashMap<String, doriac::semantics::contracts::ContractFacts>,
+    source_uris: HashMap<(String, doriac::source::SourceId), String>,
 }
 
 impl OpenDocumentIndex {
+    #[cfg(test)]
     pub(crate) fn rebuild<'a>(
         documents: impl Iterator<Item = (String, &'a str, &'a AnalysisSnapshot)>,
     ) -> Self {
@@ -162,6 +165,11 @@ impl OpenDocumentIndex {
         for (graph, uri, snapshot) in documents {
             index.add_document(&graph, uri, snapshot);
         }
+        index.finish()
+    }
+
+    pub(crate) fn finish(mut self) -> Self {
+        let index = &mut self;
         index.occurrences.sort_by(|left, right| {
             (&left.uri, left.span.start, left.span.end).cmp(&(
                 &right.uri,
@@ -197,14 +205,31 @@ impl OpenDocumentIndex {
                 right.span.start,
             ))
         });
-        index
+        self
     }
 
-    fn add_document(&mut self, graph: &str, uri: &str, snapshot: &AnalysisSnapshot) {
+    pub(crate) fn graph_for(&self, uri: &str) -> Option<&str> {
+        self.documents.get(uri)?.graphs.first().map(String::as_str)
+    }
+
+    pub(crate) fn add_document(&mut self, graph: &str, uri: &str, snapshot: &AnalysisSnapshot) {
+        // SourceIds and contract origins belong to an analysis graph, not a URI.
+        self.contracts
+            .entry(graph.to_string())
+            .or_insert_with(|| snapshot.contracts().clone());
+        self.source_uris
+            .insert((graph.to_string(), snapshot.source_id()), uri.to_string());
+        self.add_graph_members(graph, uri, snapshot);
+        if let Some(document) = self.documents.get_mut(uri) {
+            if !document.graphs.iter().any(|known| known == graph) {
+                document.graphs.push(graph.to_string());
+            }
+            return;
+        }
         let facts = snapshot.global_symbols();
         let package = snapshot.compilation_context().package.clone();
         let mut summary = DocumentSummary {
-            graph: graph.to_string(),
+            graphs: vec![graph.to_string()],
             package: package.clone(),
             namespace: facts.namespace.clone(),
             declarations: Vec::new(),
@@ -368,6 +393,14 @@ impl OpenDocumentIndex {
                     spelling: occurrence.spelling,
                 }),
         );
+        if !facts.unresolved.is_empty() {
+            self.incomplete_packages.insert(package);
+        }
+
+        self.documents.insert(uri.to_string(), summary);
+    }
+
+    fn add_graph_members(&mut self, graph: &str, uri: &str, snapshot: &AnalysisSnapshot) {
         self.member_occurrences
             .extend(
                 snapshot
@@ -404,12 +437,6 @@ impl OpenDocumentIndex {
                     member,
                 }
             }));
-
-        if !facts.unresolved.is_empty() {
-            self.incomplete_packages.insert(package);
-        }
-
-        self.documents.insert(uri.to_string(), summary);
     }
 
     pub(crate) fn target_at(&self, uri: &str, offset: usize) -> Option<SymbolTarget> {
@@ -509,14 +536,18 @@ impl OpenDocumentIndex {
         occurrence: &IndexedMemberOccurrence,
         target: &MemberTarget,
     ) -> bool {
-        if occurrence.graph != target.graph {
-            return false;
-        }
         if let Some(root) = target.virtual_root {
-            return occurrence.occurrence.virtual_root == Some(root);
+            return occurrence.occurrence.virtual_root.is_some_and(|candidate| {
+                self.same_declaration(&occurrence.graph, candidate, &target.graph, root)
+            });
         }
         if let Some(declaration) = target.exact_declaration {
-            return occurrence.occurrence.exact_declaration == Some(declaration)
+            return occurrence
+                .occurrence
+                .exact_declaration
+                .is_some_and(|candidate| {
+                    self.same_declaration(&occurrence.graph, candidate, &target.graph, declaration)
+                })
                 || (!occurrence.occurrence.declaration
                     && self.resolved_member_identity(
                         &occurrence.graph,
@@ -525,6 +556,25 @@ impl OpenDocumentIndex {
         }
         self.resolved_member_identity(&occurrence.graph, &occurrence.occurrence.identity)
             == target.identity
+    }
+
+    fn same_declaration(
+        &self,
+        left_graph: &str,
+        left: Span,
+        right_graph: &str,
+        right: Span,
+    ) -> bool {
+        left.start == right.start
+            && left.end == right.end
+            && self
+                .source_uris
+                .get(&(left_graph.to_string(), left.source))
+                .is_some_and(|uri| {
+                    self.source_uris
+                        .get(&(right_graph.to_string(), right.source))
+                        == Some(uri)
+                })
     }
 
     pub(crate) fn references(
@@ -547,18 +597,19 @@ impl OpenDocumentIndex {
                 .collect();
         }
         if let SymbolTarget::Member(target) = target {
-            return self
-                .member_occurrences
-                .iter()
-                .filter(|candidate| {
-                    self.member_occurrence_matches_target(candidate, target)
-                        && (include_declaration || !candidate.occurrence.declaration)
-                })
-                .map(|candidate| IndexedLocation {
-                    uri: candidate.uri.clone(),
-                    span: candidate.occurrence.span,
-                })
-                .collect();
+            return unique_locations(
+                self.member_occurrences
+                    .iter()
+                    .filter(|candidate| {
+                        self.member_occurrence_matches_target(candidate, target)
+                            && (include_declaration || !candidate.occurrence.declaration)
+                    })
+                    .map(|candidate| IndexedLocation {
+                        uri: candidate.uri.clone(),
+                        span: candidate.occurrence.span,
+                    })
+                    .collect(),
+            );
         }
         self.occurrences
             .iter()
@@ -582,6 +633,350 @@ impl OpenDocumentIndex {
             .collect()
     }
 
+    fn contract_location(&self, graph: &str, declaration: Span) -> Option<IndexedLocation> {
+        if let Some(member) = self.member_occurrences.iter().find(|member| {
+            member.graph == graph
+                && member.occurrence.declaration
+                && member.occurrence.exact_declaration == Some(declaration)
+        }) {
+            return Some(IndexedLocation {
+                uri: member.uri.clone(),
+                span: member.occurrence.span,
+            });
+        }
+        let uri = self
+            .source_uris
+            .get(&(graph.to_string(), declaration.source))?;
+        let occurrence = self.occurrences.iter().find(|occurrence| {
+            occurrence.uri == *uri
+                && occurrence.role == IndexedRole::Declaration
+                && occurrence.span.start >= declaration.start
+                && occurrence.span.end <= declaration.end
+        })?;
+        Some(indexed_location(occurrence))
+    }
+
+    pub(crate) fn contract_definitions(
+        &self,
+        uri: &str,
+        offset: usize,
+    ) -> Option<Vec<IndexedLocation>> {
+        let mut locations = None;
+        for graph in &self.documents.get(uri)?.graphs {
+            if let Some(found) = self.contract_definitions_in_graph(graph, uri, offset) {
+                locations.get_or_insert_with(Vec::new).extend(found);
+            }
+        }
+        locations.map(unique_locations)
+    }
+
+    fn contract_definitions_in_graph(
+        &self,
+        graph: &String,
+        uri: &str,
+        offset: usize,
+    ) -> Option<Vec<IndexedLocation>> {
+        let reference = self
+            .contracts
+            .get(graph)?
+            .member_references
+            .iter()
+            .find(|reference| {
+                self.source_uris
+                    .get(&(graph.clone(), reference.span.source))
+                    .is_some_and(|source| source == uri)
+                    && span_contains_offset(reference.span, offset)
+            })?;
+        Some(
+            reference
+                .origins
+                .iter()
+                .filter_map(|origin| self.contract_location(graph, *origin))
+                .collect(),
+        )
+    }
+
+    pub(crate) fn contract_references(
+        &self,
+        uri: &str,
+        offset: usize,
+        include_declaration: bool,
+    ) -> Option<Vec<IndexedLocation>> {
+        let mut locations = None;
+        for graph in &self.documents.get(uri)?.graphs {
+            if let Some(found) =
+                self.contract_references_in_graph(graph, uri, offset, include_declaration)
+            {
+                locations.get_or_insert_with(Vec::new).extend(found);
+            }
+        }
+        locations.map(unique_locations)
+    }
+
+    fn contract_references_in_graph(
+        &self,
+        graph: &String,
+        uri: &str,
+        offset: usize,
+        include_declaration: bool,
+    ) -> Option<Vec<IndexedLocation>> {
+        let facts = self.contracts.get(graph)?;
+        let mut declarations = facts
+            .member_references
+            .iter()
+            .filter(|reference| {
+                self.source_uris
+                    .get(&(graph.clone(), reference.span.source))
+                    .is_some_and(|source| source == uri)
+                    && span_contains_offset(reference.span, offset)
+            })
+            .flat_map(|reference| reference.origins.iter().copied())
+            .collect::<HashSet<_>>();
+        if let Some(selected) = self
+            .member_occurrences
+            .iter()
+            .find(|member| {
+                member.graph == *graph
+                    && member.uri == uri
+                    && span_contains_offset(member.occurrence.span, offset)
+            })
+            .and_then(|member| member.occurrence.exact_declaration)
+        {
+            declarations.insert(selected);
+        }
+        let mut is_contract = false;
+        loop {
+            let before = declarations.len();
+            for requirement in facts
+                .interfaces
+                .iter()
+                .flat_map(|interface| &interface.requirements)
+            {
+                if requirement
+                    .origins
+                    .iter()
+                    .any(|origin| declarations.contains(&origin.declaration))
+                {
+                    is_contract = true;
+                    declarations
+                        .extend(requirement.origins.iter().map(|origin| origin.declaration));
+                }
+            }
+            for implementation in facts
+                .conformances
+                .iter()
+                .filter(|fact| {
+                    fact.status == doriac::semantics::contracts::ConformanceStatus::Checked
+                })
+                .flat_map(|fact| &fact.implementations)
+            {
+                if implementation
+                    .implementation
+                    .is_some_and(|span| declarations.contains(&span))
+                    || implementation
+                        .requirement_origins
+                        .iter()
+                        .any(|origin| declarations.contains(&origin.declaration))
+                {
+                    is_contract = true;
+                    declarations.extend(implementation.implementation);
+                    declarations.extend(
+                        implementation
+                            .requirement_origins
+                            .iter()
+                            .map(|origin| origin.declaration),
+                    );
+                }
+            }
+            if before == declarations.len() {
+                break;
+            }
+        }
+        if !is_contract && !self.contract_rename_requires_family_in_graph(graph, uri, offset) {
+            return None;
+        }
+        let mut locations = self
+            .member_occurrences
+            .iter()
+            .filter(|member| {
+                member.graph == *graph
+                    && member
+                        .occurrence
+                        .exact_declaration
+                        .is_some_and(|span| declarations.contains(&span))
+                    && (include_declaration || !member.occurrence.declaration)
+            })
+            .map(|member| IndexedLocation {
+                uri: member.uri.clone(),
+                span: member.occurrence.span,
+            })
+            .collect::<Vec<_>>();
+        locations.extend(
+            facts
+                .member_references
+                .iter()
+                .filter(|reference| {
+                    reference
+                        .origins
+                        .iter()
+                        .any(|span| declarations.contains(span))
+                })
+                .filter_map(|reference| {
+                    Some(IndexedLocation {
+                        uri: self
+                            .source_uris
+                            .get(&(graph.clone(), reference.span.source))?
+                            .clone(),
+                        span: reference.span,
+                    })
+                }),
+        );
+        Some(locations)
+    }
+
+    pub(crate) fn contract_implementations(
+        &self,
+        uri: &str,
+        offset: usize,
+    ) -> Vec<IndexedLocation> {
+        let Some(document) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        unique_locations(
+            document
+                .graphs
+                .iter()
+                .flat_map(|graph| self.contract_implementations_in_graph(graph, uri, offset))
+                .collect(),
+        )
+    }
+
+    fn contract_implementations_in_graph(
+        &self,
+        graph: &String,
+        uri: &str,
+        offset: usize,
+    ) -> Vec<IndexedLocation> {
+        let Some(facts) = self.contracts.get(graph) else {
+            return Vec::new();
+        };
+        let matches = |span: Span| {
+            self.source_uris
+                .get(&(graph.clone(), span.source))
+                .is_some_and(|source| source == uri)
+                && span_contains_offset(span, offset)
+        };
+        let mut origins = facts
+            .member_references
+            .iter()
+            .filter(|reference| matches(reference.span))
+            .flat_map(|reference| reference.origins.iter().copied())
+            .collect::<HashSet<_>>();
+        origins.extend(
+            self.member_occurrences
+                .iter()
+                .filter(|member| {
+                    member.graph == *graph
+                        && member.uri == uri
+                        && span_contains_offset(member.occurrence.span, offset)
+                })
+                .filter_map(|member| member.occurrence.exact_declaration),
+        );
+        let interface = facts
+            .interfaces
+            .iter()
+            .find(|interface| matches(interface.name_span));
+        let mut locations = Vec::new();
+        for conformance in &facts.conformances {
+            if conformance.status != doriac::semantics::contracts::ConformanceStatus::Checked {
+                continue;
+            }
+            if interface.is_some_and(|interface| interface.name == conformance.interface.name) {
+                if let doriac::types::ResolvedType::Class(class) = &conformance.implementing_type {
+                    locations.extend(
+                        self.occurrences
+                            .iter()
+                            .filter(|occurrence| {
+                                occurrence.role == IndexedRole::Declaration
+                                    && occurrence.symbol.qualified_name == class.name
+                                    && self
+                                        .documents
+                                        .get(&occurrence.uri)
+                                        .is_some_and(|document| document.graphs.contains(graph))
+                            })
+                            .map(indexed_location),
+                    );
+                }
+                continue;
+            }
+            for implementation in &conformance.implementations {
+                if implementation
+                    .requirement_origins
+                    .iter()
+                    .any(|origin| origins.contains(&origin.declaration))
+                {
+                    if let Some(location) = implementation
+                        .implementation
+                        .and_then(|span| self.contract_location(graph, span))
+                    {
+                        locations.push(location);
+                    }
+                }
+            }
+        }
+        locations
+    }
+
+    pub(crate) fn contract_rename_requires_family(&self, uri: &str, offset: usize) -> bool {
+        let Some(document) = self.documents.get(uri) else {
+            return false;
+        };
+        document
+            .graphs
+            .iter()
+            .any(|graph| self.contract_rename_requires_family_in_graph(graph, uri, offset))
+    }
+
+    fn contract_rename_requires_family_in_graph(
+        &self,
+        graph: &String,
+        uri: &str,
+        offset: usize,
+    ) -> bool {
+        let Some(facts) = self.contracts.get(graph) else {
+            return false;
+        };
+        let selected = self
+            .member_occurrences
+            .iter()
+            .find(|member| {
+                member.graph == *graph
+                    && member.uri == uri
+                    && span_contains_offset(member.occurrence.span, offset)
+            })
+            .and_then(|member| member.occurrence.exact_declaration);
+        self.contract_definitions_in_graph(graph, uri, offset)
+            .is_some()
+            || selected.is_some_and(|selected| {
+                facts
+                    .interfaces
+                    .iter()
+                    .flat_map(|interface| &interface.requirements)
+                    .flat_map(|requirement| &requirement.origins)
+                    .any(|origin| origin.declaration == selected)
+                    || facts
+                        .conformances
+                        .iter()
+                        .flat_map(|conformance| &conformance.implementations)
+                        .any(|implementation| implementation.implementation == Some(selected))
+                    || facts.traits.iter().any(|declaration| {
+                        declaration.declaration.source == selected.source
+                            && selected.start >= declaration.declaration.start
+                            && selected.end <= declaration.declaration.end
+                    })
+            })
+    }
+
     pub(crate) fn definition(&self, uri: &str, offset: usize) -> Option<IndexedLocation> {
         if let Some(SymbolTarget::Member(target)) = self.target_at(uri, offset) {
             if let Some(declaration) = target.exact_declaration {
@@ -590,6 +985,7 @@ impl OpenDocumentIndex {
                     .iter()
                     .find(|candidate| {
                         candidate.occurrence.declaration
+                            && candidate.graph == target.graph
                             && candidate.occurrence.exact_declaration == Some(declaration)
                     })
                     .map(|candidate| IndexedLocation {
@@ -723,7 +1119,11 @@ impl OpenDocumentIndex {
                         right.span.end,
                     ))
                 });
-                edits.dedup_by(|left, right| left.uri == right.uri && left.span == right.span);
+                edits.dedup_by(|left, right| {
+                    left.uri == right.uri
+                        && left.span.start == right.span.start
+                        && left.span.end == right.span.end
+                });
                 (!edits.is_empty()).then_some(edits)
             }
             SymbolTarget::AttributeParameter(identity) => {
@@ -753,7 +1153,11 @@ impl OpenDocumentIndex {
                         right.span.end,
                     ))
                 });
-                edits.dedup_by(|left, right| left.uri == right.uri && left.span == right.span);
+                edits.dedup_by(|left, right| {
+                    left.uri == right.uri
+                        && left.span.start == right.span.start
+                        && left.span.end == right.span.end
+                });
                 (!edits.is_empty()).then_some(edits)
             }
             SymbolTarget::Member(target) => {
@@ -809,7 +1213,11 @@ impl OpenDocumentIndex {
                         right.span.end,
                     ))
                 });
-                edits.dedup_by(|left, right| left.uri == right.uri && left.span == right.span);
+                edits.dedup_by(|left, right| {
+                    left.uri == right.uri
+                        && left.span.start == right.span.start
+                        && left.span.end == right.span.end
+                });
                 (!edits.is_empty()).then_some(edits)
             }
         }
@@ -961,22 +1369,54 @@ impl OpenDocumentIndex {
     }
 
     pub(crate) fn completions(&self, uri: &str) -> Vec<IndexedCompletion> {
+        self.completions_matching(uri, true, |_, _| true)
+    }
+
+    pub(crate) fn contract_completions(
+        &self,
+        uri: &str,
+        kind: GlobalSymbolKind,
+    ) -> Vec<IndexedCompletion> {
+        self.completions_matching(uri, false, |candidate, symbol| {
+            candidate == kind
+                || (kind == GlobalSymbolKind::Interface
+                    && candidate == GlobalSymbolKind::CompilerKnownType
+                    && doriac::compiler_known_contracts::interfaces()
+                        .any(|interface| interface.name == symbol.qualified_name))
+        })
+    }
+
+    fn completions_matching(
+        &self,
+        uri: &str,
+        include_unresolved: bool,
+        accepts: impl Fn(GlobalSymbolKind, &GlobalSymbolId) -> bool,
+    ) -> Vec<IndexedCompletion> {
         let Some(document) = self.documents.get(uri) else {
             return Vec::new();
         };
         let mut completions = HashMap::<String, IndexedCompletion>::new();
         for (symbol, source_name, kind) in &document.declarations {
+            if !accepts(*kind, symbol) {
+                continue;
+            }
             completions.insert(
                 source_name.clone(),
                 completion(source_name.clone(), *kind, &symbol.qualified_name),
             );
         }
         for (alias, source_target, target) in &document.imports {
+            if target.is_none() && !include_unresolved {
+                continue;
+            }
             let kind = target
                 .as_ref()
                 .and_then(|target| self.symbol_kinds.get(target))
                 .copied()
                 .unwrap_or(GlobalSymbolKind::Class);
+            if target.as_ref().is_some_and(|target| !accepts(kind, target)) {
+                continue;
+            }
             let detail = target.as_ref().map_or_else(
                 || format!("Unresolved import `{source_target}`"),
                 |target| format!("Imported {} `{}`", kind_name(kind), target.qualified_name),
@@ -994,6 +1434,9 @@ impl OpenDocumentIndex {
             );
         }
         for (name, symbol, kind) in &document.compiler_known {
+            if !accepts(*kind, symbol) {
+                continue;
+            }
             if *kind == GlobalSymbolKind::CompilerKnownAttribute
                 || doriac::compiler_known_test::is_future_member(&symbol.qualified_name)
             {
@@ -1008,6 +1451,9 @@ impl OpenDocumentIndex {
                 continue;
             }
             for (symbol, _, kind) in &summary.declarations {
+                if !accepts(*kind, symbol) {
+                    continue;
+                }
                 let label = if summary.namespace == document.namespace {
                     symbol
                         .qualified_name
@@ -1041,12 +1487,12 @@ impl OpenDocumentIndex {
         };
         let current = context.and_then(|context| {
             self.hierarchy_classes
-                .get(&document.graph)
+                .get(self.graph_for(uri)?)
                 .and_then(|classes| classes.get(&context.class))
         });
         let mut completions = self
-            .hierarchy_classes
-            .get(&document.graph)
+            .graph_for(uri)
+            .and_then(|graph| self.hierarchy_classes.get(graph))
             .into_iter()
             .flat_map(|classes| classes.values())
             .filter(|candidate| candidate.class.is_open)
@@ -1415,6 +1861,22 @@ impl OpenDocumentIndex {
     }
 }
 
+fn unique_locations(mut locations: Vec<IndexedLocation>) -> Vec<IndexedLocation> {
+    locations.sort_by(|left, right| {
+        (&left.uri, left.span.start, left.span.end).cmp(&(
+            &right.uri,
+            right.span.start,
+            right.span.end,
+        ))
+    });
+    locations.dedup_by(|left, right| {
+        left.uri == right.uri
+            && left.span.start == right.span.start
+            && left.span.end == right.span.end
+    });
+    locations
+}
+
 fn indexed_location(occurrence: &IndexedOccurrence) -> IndexedLocation {
     IndexedLocation {
         uri: occurrence.uri.clone(),
@@ -1434,6 +1896,8 @@ fn import_kind_matches_reference_role(kind: GlobalSymbolKind, role: GlobalRefere
         GlobalReferenceRole::Type
         | GlobalReferenceRole::Extends
         | GlobalReferenceRole::Implements
+        | GlobalReferenceRole::Uses
+        | GlobalReferenceRole::TraitAdaptation
         | GlobalReferenceRole::Throws
         | GlobalReferenceRole::Catch
         | GlobalReferenceRole::TypeTest

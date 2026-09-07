@@ -3,7 +3,7 @@ name = "zed_doria"
 version = "2026.3.1-canary"
 edition = "2021"
 publish = false
-license = "MIT"
+license = "Apache-2.0"
 
 [lib]
 crate-type = ["cdylib"]

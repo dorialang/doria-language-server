@@ -1,0 +1,33 @@
+// Slice 1 checks declarations. Composition below is a Slice 4 execution boundary.
+namespace Editor\Contracts;
+
+internal interface Reader<T>
+{
+    function read(T $value): int;
+}
+
+interface Repository<T> extends Reader<T>
+{
+    writable function save(take T $value): void;
+    function convert<U implements Displayable>(U $value): string;
+}
+
+trait Format<T>
+{
+    function render(T $value): string { return "formatted"; }
+    function required(): int;
+}
+
+trait Alternative<T>
+{
+    function render(T $value): string { return "alternative"; }
+}
+
+class Report
+{
+    uses Format<int>, Alternative<int> {
+        Format<int>::render insteadof Alternative<int>;
+        Alternative<int>::render as renderAlternative;
+        Format<int>::required as internal;
+    }
+}

@@ -1884,12 +1884,19 @@ fn two_clock_static_qualifiers_publish_semantic_not_parser_diagnostics() {
         "file:///trait.doria",
         "trait UsesLimit { function limit(): int { return self::MAX_DEPTH; } }",
     );
-    assert_eq!(trait_diagnostics.len(), 1);
-    assert_eq!(trait_diagnostics[0]["code"], "E0493");
-    assert!(trait_diagnostics[0]["message"]
+    assert!(trait_diagnostics.is_empty(), "{trait_diagnostics:#?}");
+
+    let composition = diagnostics_for_document(
+        "file:///composition.doria",
+        "trait UsesLimit { function limit(): int { return self::MAX_DEPTH; } } \
+         class Limit { const int MAX_DEPTH = 10; uses UsesLimit; }",
+    );
+    assert_eq!(composition.len(), 1, "{composition:#?}");
+    assert_eq!(composition[0]["code"], "E0493");
+    assert!(composition[0]["message"]
         .as_str()
         .expect("message")
-        .contains("Stage 35"));
+        .contains("Stage 35 Slice 4"));
 }
 
 #[test]

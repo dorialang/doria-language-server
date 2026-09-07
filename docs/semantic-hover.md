@@ -69,7 +69,10 @@ The server consumes `ListAlgorithmCallInfo`; it does not infer callback effects
 or reconstruct an algorithm type checker. Other collection families do not
 receive these algorithms. PHP remains a secondary compatibility backend with
 independent limitations. Stages 31 through 34 are complete. Stage 35 interfaces
-and traits are next. Semantically invalid closures
+and trait declarations, graphs, and conformance are implemented in Slice 1;
+interface values and erased calls remain pending Slice 2. Requirement hovers
+show authored receiver, parameter ownership, generics, and checked effects
+without presenting the requirement as an executable body. Semantically invalid closures
 receive no execution capability block.
 
 Stage 34 class and method hover consumes compiler-owned hierarchy metadata.

@@ -106,6 +106,7 @@ tasks.named('buildPlugin') {
     dependsOn cleanPluginDistributions
     dependsOn prepareDoriaLspBundle
     archiveFileName = "doria-intellij-plugin-${project.version}.zip"
+    from(new File(repositoryRoot, 'LICENSE'))
     from(generatedBundle) {
         into 'bin'
         filePermissions {
