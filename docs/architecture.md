@@ -68,6 +68,15 @@ workspace-folder events reanalyze the relevant open-source graph and republish
 affected URIs. This partial mode remains the bounded fallback when authoritative
 project discovery is unavailable.
 
+In that fallback, a source declaring `main` with no includes or unresolved/global
+references outside its own declarations and compiler-known symbols is a
+self-contained program. Its compiler-authored syntax and symbol facts select an
+isolated session and package identity, even inside an IDE workspace. Opening
+other independent programs cannot introduce duplicate declarations or cross-wire
+navigation and rename. Sources needing cross-file resolution retain the shared
+partial graph. Baton-supplied project membership takes precedence over this
+fallback classification.
+
 Stage 33 adds complete project authority without a second project parser. Baton
 runs asynchronously with offline project-discovery arguments and returns strict
 schema-1 JSON containing its source inventory and compiler tooling build plan.

@@ -232,8 +232,9 @@ hierarchy while hiding generated callables and refusing unsafe edits.
 The server submits Baton-supplied project sources to one compiler-owned complete
 graph per project, with unsaved open text overlaid by canonical path. When Baton
 is unavailable, currently open documents use the retained partial graph per
-synthetic workspace package. Namespace and imported-symbol hover supplements
-the resulting rich semantic facts with canonical qualified names, explicit
+synthetic workspace package; self-contained programs with `main` receive isolated
+packages based on compiler syntax and symbol facts. Namespace and imported-symbol
+hover supplements the resulting rich semantic facts with canonical qualified names, explicit
 aliases, edition-prelude provenance, or compiler-known provenance without
 exposing synthetic package IDs. Definition and references use canonical identity
 across supplied documents. Explicit alias rename is local to that file; canonical

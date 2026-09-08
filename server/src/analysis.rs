@@ -332,6 +332,7 @@ impl SemanticHover {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AnalysisSnapshot {
     diagnostics: Vec<Diagnostic>,
+    has_standalone_entry: bool,
     source_id: SourceId,
     compilation_context: CompilationContext,
     global_symbols: GlobalSymbolFacts,
@@ -637,6 +638,21 @@ impl AnalysisSnapshot {
 
     pub(crate) fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
+    }
+
+    pub(crate) fn is_self_contained_program(&self) -> bool {
+        self.has_standalone_entry
+            && self.global_symbols.unresolved.is_empty()
+            && self.global_symbols.references.iter().all(|reference| {
+                matches!(
+                    reference.symbol_id.owner,
+                    GlobalSymbolOwner::CompilerKnown(_)
+                ) || self
+                    .global_symbols
+                    .declarations
+                    .iter()
+                    .any(|declaration| declaration.id == reference.symbol_id)
+            })
     }
 
     pub(crate) fn extend_diagnostics(&mut self, diagnostics: Vec<Diagnostic>) {
@@ -1969,6 +1985,10 @@ impl<'a> SnapshotBuilder<'a> {
             .collect();
         AnalysisSnapshot {
             diagnostics: self.diagnostics,
+            has_standalone_entry: program.includes.is_empty()
+                && program.items.iter().any(|item| {
+                    matches!(item, Item::Function(function) if doriac::names::source_name_is(&function.name, "main"))
+                }),
             contracts: self
                 .semantic_info
                 .map(|info| info.contracts.clone())

@@ -2094,10 +2094,17 @@ impl Server {
                 continue;
             }
             let (group, package, relative_path) = self.graph_location(uri);
-            let group = if self.projects.contains_key(&group) {
-                format!("partial:{group}")
+            // An IDE workspace is not a compilation target. Keep independent
+            // programs out of the shared fallback package, including its index.
+            let (group, package) = if document.analysis.is_self_contained_program() {
+                (
+                    format!("standalone:{uri}"),
+                    tooling_package_name("standalone", uri),
+                )
+            } else if self.projects.contains_key(&group) {
+                (format!("partial:{group}"), package)
             } else {
-                group
+                (group, package)
             };
             groups
                 .entry(group)
@@ -7002,6 +7009,146 @@ function main(): void { echo helper(31); }
         let markdown = hover["contents"]["value"].as_str().unwrap();
         assert!(markdown.contains("internal function helper(int $value): int"));
         assert!(markdown.contains("Function `Acme\\helper`"));
+    }
+
+    #[test]
+    fn independent_open_programs_isolate_diagnostics_navigation_and_rename() {
+        for namespace in ["", "namespace Examples;"] {
+            let first_uri = "file:///workspace/first.doria";
+            let second_uri = "file:///workspace/second.doria";
+            let source = format!(
+                "{namespace}\nclass Name {{ function name(): string {{ return \"ready\"; }} }}\nfunction main(): void {{ let $name = new Name(); echo $name->name(); }}"
+            );
+            let mut server = stage31_server(&["file:///workspace"]);
+            for uri in [second_uri, first_uri] {
+                open_stage31_document(&mut server, uri, &source);
+            }
+            for uri in [first_uri, second_uri] {
+                assert!(
+                    server.documents[uri].analysis.diagnostics().is_empty(),
+                    "{uri}: {:?}",
+                    server.documents[uri].analysis.diagnostics()
+                );
+                let call = source.rfind("name()").unwrap();
+                let definition = server.definition(Some(&params_at(uri, &source, call)));
+                assert_eq!(definition["uri"], uri, "{definition}");
+                let declaration = source.find("Name {").unwrap();
+                let params = params_at(uri, &source, declaration);
+                let references = server.references(Some(&params));
+                assert_eq!(references.as_array().unwrap().len(), 2, "{references}");
+                assert!(references
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|item| item["uri"] == uri));
+                let mut rename = params;
+                rename["newName"] = json!("Label");
+                let edit = server.rename(Some(&rename));
+                assert_eq!(edit["changes"].as_object().unwrap().len(), 1, "{edit}");
+                assert_eq!(edit["changes"][uri].as_array().unwrap().len(), 2, "{edit}");
+            }
+
+            let invalid = format!("{source}\nclass Name {{}}");
+            let mut output = Vec::new();
+            server
+                .did_change(
+                    Some(&json!({
+                        "textDocument": { "uri": first_uri, "version": 2 },
+                        "contentChanges": [{ "text": invalid }],
+                    })),
+                    &mut output,
+                )
+                .unwrap();
+            assert!(!server.documents[first_uri]
+                .analysis
+                .diagnostics()
+                .is_empty());
+            assert!(server.documents[second_uri]
+                .analysis
+                .diagnostics()
+                .is_empty());
+            server
+                .did_close(
+                    Some(&json!({
+                        "textDocument": { "uri": first_uri },
+                    })),
+                    &mut output,
+                )
+                .unwrap();
+            assert!(server.documents[second_uri]
+                .analysis
+                .diagnostics()
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn standalone_programs_do_not_disrupt_cross_file_imports_or_includes() {
+        for include in ["", "include \"model.doria\";"] {
+            let model_uri = "file:///workspace/model.doria";
+            let consumer_uri = "file:///workspace/app.doria";
+            let other_uri = "file:///workspace/example.doria";
+            let model = "namespace Shared; class Model {}";
+            let consumer = format!(
+                "namespace App; {include} use Shared\\Model; function main(): void {{ let $model = new Model(); }}"
+            );
+            let other = "namespace App; class Model {} function main(): void {}";
+            let mut server = stage31_server(&["file:///workspace"]);
+            open_stage31_document(&mut server, other_uri, other);
+            open_stage31_document(&mut server, model_uri, model);
+            open_stage31_document(&mut server, consumer_uri, &consumer);
+            server.reanalyze_documents();
+            for uri in [model_uri, consumer_uri, other_uri] {
+                assert!(
+                    server.documents[uri].analysis.diagnostics().is_empty(),
+                    "{uri}: {:?}",
+                    server.documents[uri].analysis.diagnostics()
+                );
+            }
+            let reference = consumer.find("Shared\\Model").unwrap();
+            let definition =
+                server.definition(Some(&params_at(consumer_uri, &consumer, reference)));
+            assert_eq!(definition["uri"], model_uri, "{definition}");
+        }
+    }
+
+    #[test]
+    fn stage35_interface_examples_do_not_share_an_entrypoint_or_declarations() {
+        let first_uri = "file:///workspace/branch-results.doria";
+        let second_uri = "file:///workspace/views.doria";
+        let first = r#"interface Named { function name(): string; }
+class Name implements Named {
+    function __construct(string $text) {}
+    function name(): string { return $this->text; }
+    function __destruct() { try { echo "drop {$this->text};"; } catch (Error $error) {} }
+}
+function choose(bool $first): Named {
+    return match ($first) { true => new Name("match"), false => new Name("wrong") };
+}
+function chooseWhen(bool $first): Named {
+    return when ($first): Named { return new Name("when"); } else { return new Name("wrong"); };
+}
+function main(): void {
+    ?Named $empty = null;
+    Named $fallback = $empty ?? new Name("fallback");
+    Named $matched = choose(true);
+    Named $branched = chooseWhen(true);
+    echo $fallback->name() . ";";
+    echo $matched->name() . ";";
+    echo $branched->name() . ";";
+}
+"#;
+        let second = "class Name { function __construct(string $text) {} } function main(): void { let $name = new Name(\"view\"); echo $name->text; }";
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, first_uri, first);
+        open_stage31_document(&mut server, second_uri, second);
+        for uri in [first_uri, second_uri] {
+            assert!(
+                server.documents[uri].analysis.diagnostics().is_empty(),
+                "{uri}: {:?}",
+                server.documents[uri].analysis.diagnostics()
+            );
+        }
     }
 
     #[test]
