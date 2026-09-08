@@ -6,6 +6,23 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 class DoriaLexerTest : TestCase() {
+    fun testStage35InterfaceRuntimeFixtureKeepsExistingTokens() {
+        val fixture = Files.readString(Path.of("..", "..", "fixtures", "stage35-interface-runtime.doria"))
+        val tokens = lex(fixture)
+        for (name in listOf("SharedReference", "WeakReference", "WritableSharedReference", "WritableWeakReference", "ReadonlySharedReferenceAccess", "WritableSharedReferenceAccess")) {
+            val token = tokens.first { it.text == name }
+            assertEquals(DoriaTokenTypes.COLLECTION_TYPE, token.type)
+        }
+        for (token in tokens.filter { it.text in setOf("interface", "extends", "implements") }) {
+            assertEquals(DoriaTokenTypes.KEYWORD, token.type)
+        }
+        for (token in tokens.filter { it.text in setOf("shared", "writable") }) {
+            assertEquals(DoriaTokenTypes.MODIFIER, token.type)
+        }
+        assertEquals(DoriaTokenTypes.TYPE_TEST_OPERATOR, tokens.first { it.text == "is" }.type)
+        assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
+    }
+
     fun testStage35ContractFixtureKeepsGraphSemanticsInCompiler() {
         val fixture = Files.readString(Path.of("..", "..", "fixtures", "stage35-contracts.doria"))
         val tokens = lex(fixture)

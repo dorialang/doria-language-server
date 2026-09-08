@@ -1,0 +1,40 @@
+namespace Editor\Runtime;
+
+interface Readable { function read(): string; }
+interface Changeable extends Readable { writable function rename(string $name): void; }
+interface Failure extends Error { function code(): int; }
+
+class Report implements Changeable
+{
+    function __construct(writable string $name) {}
+    function read(): string { return $this->name; }
+    writable function rename(string $name): void { $this->name = $name; }
+}
+
+function display(Readable $view): void { echo $view->read(); }
+
+function main(): void
+{
+    Readable $owned = new Report("owned");
+    display($owned);
+    SharedReference<Readable> $owner = shared new Report("shared");
+    WeakReference<Readable> $weak = $owner->createWeakReference();
+    ?SharedReference<Readable> $again = $weak->acquire();
+    if ($again != null) { echo $again->read(); }
+
+    let $mutable = new WritableSharedReference<Changeable>(new Report("before"));
+    WritableWeakReference<Changeable> $observer = $mutable->createWeakReference();
+    {
+        ReadonlySharedReferenceAccess<Changeable> $read = $mutable->acquireReadonlyAccess();
+        echo $read->read();
+    }
+    {
+        writable WritableSharedReferenceAccess<Changeable> $write = $mutable->acquireWritableAccess();
+        $write->rename("after");
+        echo $write->read();
+    }
+    ?Readable $absent = null;
+    if ($absent != null) { display($absent); }
+    mixed $boxed = new Report("boxed");
+    if ($boxed is Readable) { display($boxed); }
+}

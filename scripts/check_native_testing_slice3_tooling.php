@@ -120,7 +120,7 @@ slice3Require(str_contains($intellij, 'testNativeTestingSlice3KeepsMatcherSemant
 foreach (['Native Testing Foundation are complete', 'Stage 34 single class inheritance is complete', 'Stage 35 interfaces and traits authority is accepted under Decision 0134'] as $fact) {
     slice3Require(str_contains($docs, $fact), "final foundation documentation is missing {$fact}.");
 }
-foreach (['Slice 3 is next', 'foundation remains in progress', 'wait for Slice 3', 'remains blocked until the foundation'] as $stale) {
+foreach (['Native Testing Foundation Slice 3 is next', 'Native Testing Foundation remains in progress', 'expectations wait for Slice 3', 'remains blocked until the foundation'] as $stale) {
     slice3Require(!str_contains($docs, $stale), "stale foundation status remains: {$stale}.");
 }
 

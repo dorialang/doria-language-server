@@ -68,6 +68,15 @@ workspace-folder events reanalyze the relevant open-source graph and republish
 affected URIs. This partial mode remains the bounded fallback when authoritative
 project discovery is unavailable.
 
+In that fallback, a source declaring `main` with no includes or unresolved/global
+references outside its own declarations and compiler-known symbols is a
+self-contained program. Its compiler-authored syntax and symbol facts select an
+isolated session and package identity, even inside an IDE workspace. Opening
+other independent programs cannot introduce duplicate declarations or cross-wire
+navigation and rename. Sources needing cross-file resolution retain the shared
+partial graph. Baton-supplied project membership takes precedence over this
+fallback classification.
+
 Stage 33 adds complete project authority without a second project parser. Baton
 runs asynchronously with offline project-discovery arguments and returns strict
 schema-1 JSON containing its source inventory and compiler tooling build plan.
@@ -120,7 +129,11 @@ facts with canonical requirements, conformance and authored trait origins.
 Requirement references navigate to all coalesced origins and checked concrete
 implementations. Rename refuses incomplete multi-declaration families rather
 than changing only part of a contract. Trait members are not injected into
-composers; interface erasure and composition remain pending Slices 2 and 4.
+composers. Slice 2 consumes the compiler's interface specialization and call facts
+for erased member completion, signatures, and shared payload views. The compiler
+also applies generic type substitutions for the server; no second requirement
+resolver, runtime descriptor index, or conformance checker lives here. Trait
+composition remains pending Slice 4.
 
 Each source is indexed in every compiler analysis graph that contains it, including
 dependencies shared by workspace members. Hierarchy completion uses that indexed
@@ -152,8 +165,9 @@ requires every foreach binding to be explicitly typed; inferred compiler facts
 support diagnostics and insertion fixes but never make omitted source types
 valid. Scalar interpolation
 and `%s` are compiler-owned string materialization, so tooling adds no primitive
-`toString` or scalar cast. The corrective beat and Stage 35 Slice 1 are complete;
-interface runtime execution and property hooks remain future work.
+`toString` or scalar cast. The corrective beat and Stage 35 Slices 1 and 2 are
+complete; core contracts/public iteration, trait composition, and property hooks
+remain separate future work.
 
 ### Editor clients
 

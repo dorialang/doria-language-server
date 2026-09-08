@@ -917,6 +917,13 @@ impl Server {
         }
         let indexed = self.document_index.hover(uri, offset);
         if let Some(locations) = self.document_index.contract_definitions(uri, offset) {
+            // Call-site compiler substitutions take precedence over authored generic origins.
+            if let Some(hover) = document.analysis.semantic_hover_at_offset(offset) {
+                return Some(json!({
+                    "contents": { "kind": "markdown", "value": hover.markdown },
+                    "range": span_to_range(&document.text, hover.span),
+                }));
+            }
             let descriptions = locations
                 .iter()
                 .filter_map(|location| {
@@ -2087,10 +2094,17 @@ impl Server {
                 continue;
             }
             let (group, package, relative_path) = self.graph_location(uri);
-            let group = if self.projects.contains_key(&group) {
-                format!("partial:{group}")
+            // An IDE workspace is not a compilation target. Keep independent
+            // programs out of the shared fallback package, including its index.
+            let (group, package) = if document.analysis.is_self_contained_program() {
+                (
+                    format!("standalone:{uri}"),
+                    tooling_package_name("standalone", uri),
+                )
+            } else if self.projects.contains_key(&group) {
+                (format!("partial:{group}"), package)
             } else {
-                group
+                (group, package)
             };
             groups
                 .entry(group)
@@ -2941,13 +2955,13 @@ fn completion_items() -> Value {
         "label": "Displayable",
         "kind": 8,
         "detail": "compiler-known Doria interface",
-        "documentation": "`interface Displayable` is the currently executable compiler-known display contract. It requires an explicit `implements Displayable` declaration and exactly `function toString(): string`, controlling interpolation, echo, concatenation, and `%s`. Decision 0134 accepts user-defined interfaces; their declarations and concrete conformance are checked in Stage 35 Slice 1, while interface values and erased calls remain pending Slice 2.",
+        "documentation": "`interface Displayable` requires exactly `function toString(): string`. Concrete, constrained, erased, inherited, and narrowed views use the same canonical display in interpolation, echo, string-anchored concatenation, and `%s`, with no implicit string assignment or argument conversion.",
     }));
     items.push(json!({
         "label": "Error",
         "kind": 8,
         "detail": "compiler-known Doria interface",
-        "documentation": "`interface Error` is the compiler-known checked-error contract. A conforming class explicitly declares `implements Error` and exposes an externally accessible readonly `string $message` property.",
+        "documentation": "`interface Error` is the compiler-known checked-error contract. Nominal conformance, including through an Error subinterface, requires an externally accessible readonly stored `string $message`. Subinterfaces participate in throws coverage, ordered catches, and typed toThrow inspectors while preserving concrete Error identity.",
     }));
     items.push(json!({
         "label": "toString",
@@ -3419,12 +3433,12 @@ fn scalar_runtime_type_description(name: &str) -> Option<&'static str> {
 
 fn shared_ownership_type_description(name: &str) -> Option<&'static str> {
     match name {
-        "SharedReference" => Some("`SharedReference<T>` is a non-thread-safe owning move value for a readonly shared class payload. Construct it with `shared new T(...)`; ownership is duplicated only by explicit `share()`. It never converts to the writable family, and readonly shared collection, scalar, string, and `mixed` payload execution remain unsupported."),
-        "WeakReference" => Some("`WeakReference<T>` is a non-thread-safe non-owning move value created from `SharedReference<T>`. `acquire()` returns `?SharedReference<T>` while the class payload is alive and `null` after final strong release; it never crosses ownership families."),
-        "WritableSharedReference" => Some("`WritableSharedReference<T>` is a non-thread-safe owning move value in the writable shared family. Ownership is duplicated only by explicit `share()`; payload access requires a lifetime-owning object obtained with `acquireReadonlyAccess()` or `acquireWritableAccess()`. It never converts to `SharedReference<T>`. Class, generic class, typed-array, List, Dictionary, Set, and Bytes payloads execute; scalar, string, and `mixed` composition remain deferred."),
-        "WritableWeakReference" => Some("`WritableWeakReference<T>` is the non-thread-safe non-owning move value for the writable family. `acquire()` returns `?WritableSharedReference<T>` while the payload is alive and never crosses into the readonly family."),
-        "ReadonlySharedReferenceAccess" => Some("`ReadonlySharedReferenceAccess<T>` is a non-thread-safe owned move value that keeps a writable-family payload alive for its full lifetime and forwards readonly properties, methods, indexing, and iteration. It cannot be shared, weakened, copied, or converted between families."),
-        "WritableSharedReferenceAccess" => Some("`WritableSharedReferenceAccess<T>` is a non-thread-safe owned move value that keeps exclusive writable payload access for its full lifetime. Its binding must be `writable` to mutate through it; it cannot be shared, weakened, copied, or converted between families."),
+        "SharedReference" => Some("`SharedReference<T>` is a non-thread-safe owning move value for a readonly shared class allocation, including an interface view. `SharedReference<I> $owner = shared new Concrete()` uses checked nominal conformance without wrapper covariance. Ownership is duplicated only by explicit `share()`. It never converts to the writable family; readonly shared collection, scalar, string, and `mixed` payload execution remain unsupported."),
+        "WeakReference" => Some("`WeakReference<T>` is a non-thread-safe non-owning move value created from `SharedReference<T>`. `acquire()` returns `?SharedReference<T>` while the payload is alive and `null` after final strong release, preserving an interface payload's exact view. It never crosses ownership families."),
+        "WritableSharedReference" => Some("`WritableSharedReference<T>` is a non-thread-safe owning move value in the writable shared family. Ownership is duplicated only by explicit `share()`; payload access requires a lifetime-owning object obtained with `acquireReadonlyAccess()` or `acquireWritableAccess()`. It never converts to `SharedReference<T>`. Class, interface, generic class, typed-array, List, Dictionary, Set, and Bytes payloads execute; scalar, string, and `mixed` composition remain deferred."),
+        "WritableWeakReference" => Some("`WritableWeakReference<T>` is the non-thread-safe non-owning move value for the writable family. `acquire()` returns `?WritableSharedReference<T>` while the payload is alive, preserving its interface view when T is an interface, and never crosses into the readonly family."),
+        "ReadonlySharedReferenceAccess" => Some("`ReadonlySharedReferenceAccess<T>` is a non-thread-safe owned move value holding a readonly lease and keeping a writable-family payload alive for its full lifetime. It forwards readonly class/interface requirements and supported collection access. Borrowed payload views cannot outlive the lease. It cannot be shared, weakened, copied, or converted between families."),
+        "WritableSharedReferenceAccess" => Some("`WritableSharedReferenceAccess<T>` is a non-thread-safe owned move value holding an exclusive writable lease, including for interface payloads. Its binding must be `writable` to mutate through it; borrowed payload views cannot outlive the lease. It cannot be shared, weakened, copied, or converted between families."),
         _ => None,
     }
 }
@@ -3785,13 +3799,13 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "Marks a constructor-only parameter. The binding is available in `__construct` and declares no property or object storage.",
         ),
         TokenKind::Extends => Some(
-            "Declares the single direct parent of a class. The parent must be visible and open.",
+            "Declares the single visible open parent of a class, or the parent contracts of an interface.",
         ),
         TokenKind::Interface => Some(
-            "Declares a nominal interface with checked generic requirements and parent contracts under Decision 0134. Stage 35 Slice 1 validates declarations and concrete conformance; interface values and erased calls remain pending Slice 2.",
+            "Declares a nominal interface with checked generic requirements and parent contracts. Owned and borrowed interface values support erased calls, narrowing, and shared payload views. Core-contract operations require Stage 35 Slice 3; trait composition requires Slice 4.",
         ),
         TokenKind::Implements => Some(
-            "Declares nominal conformance checked in Stage 35 Slice 1. Concrete method calls remain executable; interface values and erased calls remain pending Slice 2. Trait-dependent obligations remain deferred to Slice 4.",
+            "Declares checked nominal conformance. Concrete and specialized constrained calls remain direct; interface-erased calls use the requirement contract. Trait-dependent obligations remain deferred to Stage 35 Slice 4.",
         ),
         TokenKind::Function => Some(
             "Declares a named function or method, an anonymous block closure, or a structural function type according to context. Function types preserve readonly, writable, or once invocation; parameter ownership; and checked effects. The compiler checks structural callable compatibility.",
@@ -3900,8 +3914,8 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             Builtin::from_name(name).map(builtin_documentation)
         }
         TokenKind::Identifier(name) => match name.as_str() {
-            "Error" => Some("`interface Error` is the compiler-known checked-error contract. Conforming classes explicitly declare `implements Error` and expose an externally accessible readonly `string $message` property."),
-            "Displayable" => Some("`interface Displayable` is the currently executable compiler-known display contract. A class must explicitly declare `implements Displayable` and provide `function toString(): string`. It controls interpolation, echo, concatenation, and `%s`. Decision 0134 accepts user-defined interfaces; their declarations and concrete conformance are checked in Stage 35 Slice 1, while interface values and erased calls remain pending Slice 2."),
+            "Error" => Some("`interface Error` is the compiler-known checked-error contract. Nominal conformance, including through an Error subinterface, requires an externally accessible readonly stored `string $message`. Subinterfaces participate in throws coverage, ordered catches, and typed toThrow inspectors while preserving concrete Error identity."),
+            "Displayable" => Some("`interface Displayable` requires exactly `function toString(): string`. Concrete, constrained, erased, inherited, and narrowed views use the same canonical display in interpolation, echo, string-anchored concatenation, and `%s`, with no implicit string assignment or argument conversion."),
             "toString" => Some("`function toString(): string` is the exact externally accessible readonly instance method required by `Displayable`."),
             "List" => Some("`List<T>` is the growable, insertion-ordered sequence: `add`, `insertAt`, `removeAt`, `pop`, `contains`, `first`/`last`, and the `count`/`isEmpty` properties (decision 0100). An owned move type."),
             "Dictionary" => Some("`Dictionary<K, V>` is the insertion-ordered map: `get` (`?V`), `set`, `remove` (`?V`), `has`, the `keys`/`values` projections, and `count`/`isEmpty` (decision 0100). Keys require `Hashable`. An owned move type."),
@@ -4867,10 +4881,12 @@ function main(): void
             .expect("Displayable completion should have documentation");
         assert!(documentation.contains("interface Displayable"));
         assert!(documentation.contains("function toString(): string"));
-        assert!(documentation.contains("interpolation, echo, concatenation, and `%s`"));
-        assert!(documentation.contains("currently executable"));
-        assert!(documentation.contains("Decision 0134"));
-        assert!(documentation.contains("Stage 35 Slice 1"));
+        assert!(
+            documentation.contains("interpolation, echo, string-anchored concatenation, and `%s`")
+        );
+        assert!(documentation.contains("erased"));
+        assert!(documentation.contains("no implicit string"));
+        assert!(!documentation.contains("pending Slice 2"));
 
         let source = "class Label implements Displayable {}";
         let hover = hover_at_offset(
@@ -4883,9 +4899,9 @@ function main(): void
             .expect("hover contents should be markdown");
         assert!(text.contains("interface Displayable"));
         assert!(text.contains("function toString(): string"));
-        assert!(text.contains("currently executable"));
-        assert!(text.contains("Decision 0134"));
-        assert!(text.contains("Stage 35 Slice 1"));
+        assert!(text.contains("erased"));
+        assert!(text.contains("no implicit string"));
+        assert!(!text.contains("pending Slice 2"));
 
         let interface_source = "interface Label {}";
         let interface_hover = hover_at_offset(interface_source, 0)
@@ -4893,8 +4909,8 @@ function main(): void
         let interface_text = interface_hover["contents"]["value"]
             .as_str()
             .expect("interface hover contents should be markdown");
-        assert!(interface_text.contains("Decision 0134"));
-        assert!(interface_text.contains("Stage 35 Slice 1"));
+        assert!(interface_text.contains("Owned and borrowed interface values"));
+        assert!(interface_text.contains("Stage 35 Slice 3"));
 
         let trait_source = "trait Formats {}";
         let trait_hover = hover_at_offset(trait_source, 0)
@@ -4984,7 +5000,8 @@ function main(): void
         }
         let shared = hover_description(&TokenKind::Identifier("SharedReference".to_string()))
             .expect("SharedReference hover");
-        assert!(shared.contains("`shared new T(...)`"));
+        assert!(shared.contains("`SharedReference<I> $owner = shared new Concrete()`"));
+        assert!(shared.contains("without wrapper covariance"));
         assert!(shared.contains("readonly"));
 
         let weak = hover_description(&TokenKind::Identifier("WeakReference".to_string()))
@@ -6992,6 +7009,146 @@ function main(): void { echo helper(31); }
         let markdown = hover["contents"]["value"].as_str().unwrap();
         assert!(markdown.contains("internal function helper(int $value): int"));
         assert!(markdown.contains("Function `Acme\\helper`"));
+    }
+
+    #[test]
+    fn independent_open_programs_isolate_diagnostics_navigation_and_rename() {
+        for namespace in ["", "namespace Examples;"] {
+            let first_uri = "file:///workspace/first.doria";
+            let second_uri = "file:///workspace/second.doria";
+            let source = format!(
+                "{namespace}\nclass Name {{ function name(): string {{ return \"ready\"; }} }}\nfunction main(): void {{ let $name = new Name(); echo $name->name(); }}"
+            );
+            let mut server = stage31_server(&["file:///workspace"]);
+            for uri in [second_uri, first_uri] {
+                open_stage31_document(&mut server, uri, &source);
+            }
+            for uri in [first_uri, second_uri] {
+                assert!(
+                    server.documents[uri].analysis.diagnostics().is_empty(),
+                    "{uri}: {:?}",
+                    server.documents[uri].analysis.diagnostics()
+                );
+                let call = source.rfind("name()").unwrap();
+                let definition = server.definition(Some(&params_at(uri, &source, call)));
+                assert_eq!(definition["uri"], uri, "{definition}");
+                let declaration = source.find("Name {").unwrap();
+                let params = params_at(uri, &source, declaration);
+                let references = server.references(Some(&params));
+                assert_eq!(references.as_array().unwrap().len(), 2, "{references}");
+                assert!(references
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|item| item["uri"] == uri));
+                let mut rename = params;
+                rename["newName"] = json!("Label");
+                let edit = server.rename(Some(&rename));
+                assert_eq!(edit["changes"].as_object().unwrap().len(), 1, "{edit}");
+                assert_eq!(edit["changes"][uri].as_array().unwrap().len(), 2, "{edit}");
+            }
+
+            let invalid = format!("{source}\nclass Name {{}}");
+            let mut output = Vec::new();
+            server
+                .did_change(
+                    Some(&json!({
+                        "textDocument": { "uri": first_uri, "version": 2 },
+                        "contentChanges": [{ "text": invalid }],
+                    })),
+                    &mut output,
+                )
+                .unwrap();
+            assert!(!server.documents[first_uri]
+                .analysis
+                .diagnostics()
+                .is_empty());
+            assert!(server.documents[second_uri]
+                .analysis
+                .diagnostics()
+                .is_empty());
+            server
+                .did_close(
+                    Some(&json!({
+                        "textDocument": { "uri": first_uri },
+                    })),
+                    &mut output,
+                )
+                .unwrap();
+            assert!(server.documents[second_uri]
+                .analysis
+                .diagnostics()
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn standalone_programs_do_not_disrupt_cross_file_imports_or_includes() {
+        for include in ["", "include \"model.doria\";"] {
+            let model_uri = "file:///workspace/model.doria";
+            let consumer_uri = "file:///workspace/app.doria";
+            let other_uri = "file:///workspace/example.doria";
+            let model = "namespace Shared; class Model {}";
+            let consumer = format!(
+                "namespace App; {include} use Shared\\Model; function main(): void {{ let $model = new Model(); }}"
+            );
+            let other = "namespace App; class Model {} function main(): void {}";
+            let mut server = stage31_server(&["file:///workspace"]);
+            open_stage31_document(&mut server, other_uri, other);
+            open_stage31_document(&mut server, model_uri, model);
+            open_stage31_document(&mut server, consumer_uri, &consumer);
+            server.reanalyze_documents();
+            for uri in [model_uri, consumer_uri, other_uri] {
+                assert!(
+                    server.documents[uri].analysis.diagnostics().is_empty(),
+                    "{uri}: {:?}",
+                    server.documents[uri].analysis.diagnostics()
+                );
+            }
+            let reference = consumer.find("Shared\\Model").unwrap();
+            let definition =
+                server.definition(Some(&params_at(consumer_uri, &consumer, reference)));
+            assert_eq!(definition["uri"], model_uri, "{definition}");
+        }
+    }
+
+    #[test]
+    fn stage35_interface_examples_do_not_share_an_entrypoint_or_declarations() {
+        let first_uri = "file:///workspace/branch-results.doria";
+        let second_uri = "file:///workspace/views.doria";
+        let first = r#"interface Named { function name(): string; }
+class Name implements Named {
+    function __construct(string $text) {}
+    function name(): string { return $this->text; }
+    function __destruct() { try { echo "drop {$this->text};"; } catch (Error $error) {} }
+}
+function choose(bool $first): Named {
+    return match ($first) { true => new Name("match"), false => new Name("wrong") };
+}
+function chooseWhen(bool $first): Named {
+    return when ($first): Named { return new Name("when"); } else { return new Name("wrong"); };
+}
+function main(): void {
+    ?Named $empty = null;
+    Named $fallback = $empty ?? new Name("fallback");
+    Named $matched = choose(true);
+    Named $branched = chooseWhen(true);
+    echo $fallback->name() . ";";
+    echo $matched->name() . ";";
+    echo $branched->name() . ";";
+}
+"#;
+        let second = "class Name { function __construct(string $text) {} } function main(): void { let $name = new Name(\"view\"); echo $name->text; }";
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, first_uri, first);
+        open_stage31_document(&mut server, second_uri, second);
+        for uri in [first_uri, second_uri] {
+            assert!(
+                server.documents[uri].analysis.diagnostics().is_empty(),
+                "{uri}: {:?}",
+                server.documents[uri].analysis.diagnostics()
+            );
+        }
     }
 
     #[test]
@@ -9200,6 +9357,54 @@ describe("🧪 suite", function (): void {
     }
 
     #[test]
+    fn stage35_interface_call_hovers_preserve_specialization_through_the_server() {
+        let contract_uri = "file:///workspace/select.doria";
+        let consumer_uri = "file:///workspace/consumer.doria";
+        let contract = "namespace Api; /* unicode: 🧪 */ interface Select<T> { function choose<U>(T $value, U $other): U; }";
+        for (receiver, access, result) in [
+            ("Select<int>", "->", "string"),
+            ("?Select<int>", "?->", "?string"),
+            ("SharedReference<Select<int>>", "->", "string"),
+        ] {
+            for separate_files in [false, true] {
+                let consumer = format!(
+                    "function invoke({receiver} $view): {result} {{ return $view{access}choose(other: \"chosen\", value: 2); }}"
+                );
+                let mut server = stage31_server(&["file:///workspace"]);
+                let (uri, source) = if separate_files {
+                    open_stage31_document(&mut server, contract_uri, contract);
+                    (
+                        consumer_uri,
+                        format!("namespace App; use Api\\Select; {consumer}"),
+                    )
+                } else {
+                    (contract_uri, format!("{contract} {consumer}"))
+                };
+                open_stage31_document(&mut server, uri, &source);
+                assert!(
+                    server.documents[uri].analysis.diagnostics().is_empty(),
+                    "{:?}",
+                    server.documents[uri].analysis.diagnostics()
+                );
+                let call = source.rfind("choose").unwrap();
+                let params = params_at(uri, &source, call);
+                let hover = server.hover(Some(&params)).unwrap();
+                let markdown = hover["contents"]["value"].as_str().unwrap();
+                assert!(
+                    markdown.contains("int $value, string $other): string"),
+                    "{hover}"
+                );
+                assert!(!markdown.contains("T $value"), "{hover}");
+                assert!(!markdown.contains("U $other"), "{hover}");
+                assert!(markdown.contains("Declared requirement"), "{hover}");
+                assert_eq!(hover["range"]["start"], params["position"]);
+                let definitions = server.definition(Some(&params));
+                assert_eq!(definitions[0]["uri"], contract_uri, "{definitions}");
+            }
+        }
+    }
+
+    #[test]
     fn stage35_composition_navigation_does_not_inject_members() {
         let uri = "file:///workspace/traits.doria";
         let source = "trait Format { function render(): string { return \"text\"; } } class Report { uses Format { Format::render as draw; } }";
@@ -9215,6 +9420,52 @@ describe("🧪 suite", function (): void {
         let diagnostics = server.documents[uri].analysis.diagnostics();
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
         assert_eq!(diagnostics[0].code, "E0493");
+    }
+
+    #[test]
+    fn stage35_erased_calls_follow_unsaved_requirements_and_utf16_origins() {
+        let contract_uri = "file:///workspace/runtime-contract.doria";
+        let consumer_uri = "file:///workspace/runtime-consumer.doria";
+        let contract = "namespace Api; /* 🧪 */ interface Read { function read(int $value): int; }";
+        let consumer = "namespace App; use Api\\Read; function invoke(Read $view): int { return $view->read(value: 7); }";
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, contract_uri, contract);
+        open_stage31_document(&mut server, consumer_uri, consumer);
+        assert!(server.documents[consumer_uri]
+            .analysis
+            .diagnostics()
+            .is_empty());
+        let declaration = contract.find("read(").unwrap();
+        let call = consumer.find("read(").unwrap();
+        let definitions = server.definition(Some(&params_at(consumer_uri, consumer, call)));
+        assert_eq!(definitions[0]["uri"], contract_uri, "{definitions}");
+        assert_eq!(
+            definitions[0]["range"]["start"],
+            params_at(contract_uri, contract, declaration)["position"]
+        );
+        let signature = server.documents[consumer_uri]
+            .analysis
+            .signature_help_at_offset(consumer.find("7)").unwrap())
+            .unwrap();
+        assert!(signature.label.contains("int $value"), "{signature:?}");
+        let changed = contract.replace("$value", "$renamed");
+        open_stage31_document(&mut server, contract_uri, &changed);
+        assert!(!server.documents[consumer_uri]
+            .analysis
+            .diagnostics()
+            .is_empty());
+        let signature = server.documents[consumer_uri]
+            .analysis
+            .signature_help_at_offset(consumer.find("7)").unwrap())
+            .unwrap();
+        assert!(signature.label.contains("$renamed"), "{signature:?}");
+        open_stage31_document(&mut server, contract_uri, contract);
+        assert!(server.documents[consumer_uri]
+            .analysis
+            .diagnostics()
+            .is_empty());
+        let symbols = server.workspace_symbols(Some(&json!({ "query": "__doria" })));
+        assert_eq!(symbols, json!([]));
     }
 
     #[test]
@@ -9733,6 +9984,7 @@ class Child extends Base
     }
 }
 function read<T implements Lib\ValueSource>(T $source): int { return $source->value(); }
+function erased(Lib\ValueSource $view): int { return $view->value(); }
 "#;
         let base_source = r#"namespace Lib;
 interface ValueSource { function value(): int; }
@@ -9946,6 +10198,17 @@ open class Base implements ValueSource
             );
             let parent = source.find("parent::value").unwrap() + "parent::".len();
             assert!(request_completion_labels(&server, uri, source, parent).contains("value"));
+            let erased = source.find("$view->value").unwrap() + "$view->".len();
+            let definitions = server.definition(Some(&params_at(uri, source, erased)));
+            assert_eq!(definitions[0]["uri"], base_uri, "{definitions}");
+            let labels = request_completion_labels(&server, uri, source, erased);
+            assert!(labels.contains("value"), "{labels:?}");
+            assert!(!labels.contains("label"), "{labels:?}");
+            let signature = server.documents[uri]
+                .analysis
+                .signature_help_at_offset(erased + "value(".len())
+                .unwrap();
+            assert!(signature.label.contains("value(): int"), "{signature:?}");
         }
         let implementations =
             server.implementation(Some(&params_at(&base_uri, base_source, requirement)));

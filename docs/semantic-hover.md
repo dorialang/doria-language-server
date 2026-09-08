@@ -70,10 +70,18 @@ or reconstruct an algorithm type checker. Other collection families do not
 receive these algorithms. PHP remains a secondary compatibility backend with
 independent limitations. Stages 31 through 34 are complete. Stage 35 interfaces
 and trait declarations, graphs, and conformance are implemented in Slice 1;
-interface values and erased calls remain pending Slice 2. Requirement hovers
+Slice 2 implements interface values, erased calls, and shared interface payloads. Requirement hovers
 show authored receiver, parameter ownership, generics, and checked effects
 without presenting the requirement as an executable body. Semantically invalid closures
 receive no execution capability block.
+
+Interface member completion reads the compiler's specialized requirement graph,
+including inherited requirements and Error messages. It never selects arbitrary
+members of a known implementer. Erased-call signature help preserves requirement
+parameter names, ownership modes, generic substitutions, and checked effects;
+implementation-only defaults do not appear. Shared owner/access completions
+preserve wrapper precedence and readonly/writable forwarding. Core operations
+and public iteration remain Slice 3; trait composition remains Slice 4.
 
 Stage 34 class and method hover consumes compiler-owned hierarchy metadata.
 Class hover shows the canonical declaration, direct parent, hierarchy depth,
@@ -224,8 +232,9 @@ hierarchy while hiding generated callables and refusing unsafe edits.
 The server submits Baton-supplied project sources to one compiler-owned complete
 graph per project, with unsaved open text overlaid by canonical path. When Baton
 is unavailable, currently open documents use the retained partial graph per
-synthetic workspace package. Namespace and imported-symbol hover supplements
-the resulting rich semantic facts with canonical qualified names, explicit
+synthetic workspace package; self-contained programs with `main` receive isolated
+packages based on compiler syntax and symbol facts. Namespace and imported-symbol
+hover supplements the resulting rich semantic facts with canonical qualified names, explicit
 aliases, edition-prelude provenance, or compiler-known provenance without
 exposing synthetic package IDs. Definition and references use canonical identity
 across supplied documents. Explicit alias rename is local to that file; canonical
