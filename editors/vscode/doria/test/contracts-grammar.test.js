@@ -18,3 +18,15 @@ test("presents generic composition and adaptations without checking conformance"
   assert.match(fixture, /Format<int>::render insteadof Alternative<int>;/);
   assert.match(fixture, /function required\(\): int;/);
 });
+
+test("interface runtime fixture uses existing shared, narrowing, and call syntax", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "..", "..", "fixtures", "stage35-interface-runtime.doria"), "utf8");
+  const patterns = Object.values(grammar.repository).flatMap(entry => entry.patterns || []);
+  for (const name of ["SharedReference", "WeakReference", "WritableSharedReference", "WritableWeakReference", "ReadonlySharedReferenceAccess", "WritableSharedReferenceAccess"]) {
+    assert.ok(source.includes(`${name}<`));
+    assert.ok(patterns.some(pattern => pattern.match && new RegExp(pattern.match).test(name)), name);
+  }
+  assert.match(source, /if \(\$boxed is Readable\)/);
+  assert.match(source, /\$write->rename\("after"\)/);
+  assert.match(source, /interface Failure extends Error/);
+});

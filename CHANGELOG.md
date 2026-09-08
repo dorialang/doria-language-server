@@ -6,6 +6,13 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Added Stage 35 Slice 2 interface-runtime tooling. Erased and narrowed members,
+  generic signatures, named arguments, effects, and authored definitions use
+  compiler contract facts. Error subinterfaces expose their stored message;
+  shared owners and access leases preserve their distinct member capabilities.
+  Unsaved and cross-package tests cover contract navigation and UTF-16 ranges;
+  both editors share an executable six-family interface fixture.
+
 - Fixed Baton-project parent and override completion, contract navigation across
   shared workspace dependencies, and ordinary type completion inside generic
   interface and trait arguments. Shared declarations and edits are deduplicated
@@ -17,7 +24,8 @@ This project follows the Doria toolchain CalVer.
   origins; rename refuses incomplete contract families. Cross-package indexing
   retains the compiler's actual analysis graph, including dependency sources.
   VS Code and IntelliJ present `uses` and `insteadof` without checking composition.
-  Interface values remain Slice 2 work, core operations Slice 3, and composition Slice 4.
+  Slice 2 subsequently added interface runtime tooling; core operations remain
+  Slice 3 and composition Slice 4.
 
 - Added tooling for the post-Stage-34 indexed-foreach and scalar-display
   correction. The server projects compiler-owned foreach semantic facts into
@@ -74,7 +82,8 @@ This project follows the Doria toolchain CalVer.
   to both official editor integrations. The Native Testing Foundation followed
   that work and is now complete. Stage 34 subsequently completed single class
   inheritance tooling; Stage 35 interfaces and traits authority is accepted
-  under Decision 0134, Slice 1 is complete, and Slice 2 is next.
+  under Decision 0134. Slices 1 and 2 subsequently completed declaration and
+  runtime tooling; Slice 3 core contracts and public iteration are next.
 
 - Added compiler-resolved go-to-definition and conservative rename for local
   bindings and cross-file methods, properties, class constants, and enum cases,

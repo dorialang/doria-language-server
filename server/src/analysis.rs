@@ -22,6 +22,7 @@ use doriac::ownership::{
     CaptureAcquisitionKind, ClosureBorrowRoot, ClosureEscapeClassification, ClosureValueProvenance,
     InvocationConsumption,
 };
+use doriac::semantics::contracts::{ContractFacts, InterfaceSpecializationFacts, RequirementFacts};
 use doriac::semantics::{
     CallableTarget, ConstructorParameterSemanticRole, EnumSemanticInfo, ForeachIterationKind,
     ForeachValueAccess, ListAlgorithmCallInfo, ListAlgorithmKind, ListCallbackAccess, SemanticInfo,
@@ -541,6 +542,7 @@ struct CallSignatureContext {
     span: Span,
     arguments: Vec<CallArgumentContext>,
     symbol: usize,
+    signature: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1179,6 +1181,11 @@ impl AnalysisSnapshot {
                 context,
             );
         }
+        if let Some(completions) =
+            interface_member_completions(&self.contracts, receiver, context.writable_payload_access)
+        {
+            return completions;
+        }
         if let Some(completions) = list_algorithm_completions(receiver) {
             return completions;
         }
@@ -1217,10 +1224,13 @@ impl AnalysisSnapshot {
             return completions;
         }
         let writable = *kind == WritableSharedReferenceAccess;
-        let ResolvedType::Class(class) = payload.as_ref() else {
-            return completions;
-        };
-        completions.extend(self.class_member_completions(&class.name, writable, context));
+        if let ResolvedType::Class(class) = payload.as_ref() {
+            completions.extend(self.class_member_completions(&class.name, writable, context));
+        } else if let Some(members) =
+            interface_member_completions(&self.contracts, payload, writable)
+        {
+            completions.extend(members);
+        }
         let mut labels = HashSet::new();
         completions.retain(|completion| labels.insert(completion.label.clone()));
         completions
@@ -1319,7 +1329,10 @@ impl AnalysisSnapshot {
             .map(|argument| argument.parameter)
             .unwrap_or(context.arguments.len());
         Some(SignatureHelp {
-            label: symbol.signature.clone(),
+            label: context
+                .signature
+                .clone()
+                .unwrap_or_else(|| symbol.signature.clone()),
             active_parameter,
         })
     }
@@ -1349,7 +1362,10 @@ impl AnalysisSnapshot {
                 .map(|(_, name)| SemanticCompletion {
                     label: format!("{name}:"),
                     kind: 5,
-                    detail: format!("Named argument for {}", symbol.signature),
+                    detail: format!(
+                        "Named argument for {}",
+                        context.signature.as_ref().unwrap_or(&symbol.signature)
+                    ),
                     documentation: None,
                 })
                 .collect(),
@@ -2567,7 +2583,7 @@ impl<'a> SnapshotBuilder<'a> {
             ));
         }
         let documentation = if kind == "interface" {
-            "Nominal interface declaration. Trait-free concrete conformance is checked; interface value execution requires Stage 35 Slice 2."
+            "Nominal interface declaration. Checked requirements govern owned and borrowed interface values, erased calls, narrowing, and shared payload views. Core-contract operations and trait composition remain separate implementation boundaries."
         } else {
             "Compile-time trait declaration. Composer-dependent members and trait composition require Stage 35 Slice 4."
         };
@@ -3508,7 +3524,86 @@ impl<'a> SnapshotBuilder<'a> {
                 })
                 .collect(),
             symbol,
+            signature: None,
         });
+    }
+
+    fn record_interface_call(
+        &mut self,
+        span: Span,
+        member_span: Span,
+        args: &[doriac::ast::Argument],
+    ) -> bool {
+        let Some(info) = self.semantic_info else {
+            return false;
+        };
+        let Some(CallableTarget::InterfaceMethod {
+            interface,
+            method_name,
+            requirement: declaration,
+        }) = info.call_target(span)
+        else {
+            return false;
+        };
+        let Some(requirement) = info
+            .contracts
+            .interface_specializations
+            .iter()
+            .find(|fact| fact.valid && &fact.specialization == interface)
+            .and_then(|fact| {
+                fact.requirements
+                    .iter()
+                    .find(|required| &required.name == method_name)
+            })
+        else {
+            return false;
+        };
+        let bindings = info
+            .generic_call_specializations
+            .get(&span)
+            .map(|specialization| {
+                requirement
+                    .generic_parameters
+                    .iter()
+                    .zip(&specialization.arguments)
+                    .map(|(parameter, argument)| {
+                        let doriac::semantics::GenericArgument::Type(ty) = argument;
+                        (parameter.name.clone(), ty.clone())
+                    })
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let signature = interface_requirement_signature(requirement, &bindings);
+        let documentation = interface_requirement_documentation(requirement);
+        let parameter_names = requirement
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.name.clone())
+            .collect();
+        let symbol = self
+            .callable_declarations
+            .get(declaration)
+            .copied()
+            .unwrap_or_else(|| {
+                let symbol = self.add_metadata_symbol(
+                    signature.clone(),
+                    Some(documentation.clone()),
+                    SymbolKind::Plain,
+                );
+                self.symbols[symbol].parameter_names = parameter_names;
+                symbol
+            });
+        self.semantic_hovers.push(SemanticHover::new(
+            member_span,
+            format!("```doria\n{signature}\n```\n\n{documentation}"),
+        ));
+        self.record_call_signature(span, args, symbol);
+        self.call_signatures
+            .last_mut()
+            .expect("recorded interface call")
+            .signature = Some(signature);
+        true
     }
 
     fn declaration_name_span(
@@ -4131,6 +4226,11 @@ impl<'a> SnapshotBuilder<'a> {
                     return;
                 }
 
+                if method_span
+                    .is_some_and(|method_span| self.record_interface_call(*span, method_span, args))
+                {
+                    return;
+                }
                 let target = self.semantic_info.and_then(|info| info.call_target(*span));
                 let resolved_class = match target {
                     Some(CallableTarget::Method {
@@ -4395,6 +4495,35 @@ impl<'a> SnapshotBuilder<'a> {
                     }
                     if let Some(symbol) = self.resolve_property(class_name, property) {
                         self.record_reference(property_span, symbol);
+                    }
+                }
+                if property == "message" {
+                    let payload = receiver
+                        .map(non_nullable_type)
+                        .map(|receiver| match receiver {
+                            ResolvedType::SharedHandle(kind, payload)
+                                if *kind == SharedHandleKind::SharedReference
+                                    || kind.is_access() =>
+                            {
+                                payload.as_ref()
+                            }
+                            receiver => receiver,
+                        });
+                    if let (Some(info), Some(payload), Some(property_span)) =
+                        (self.semantic_info, payload, property_span)
+                    {
+                        if interface_contract(&info.contracts, payload)
+                            .is_some_and(interface_has_message)
+                            && info.expression_type(*span).is_some()
+                        {
+                            self.add_reference_symbol(
+                                property_span,
+                                "string $message".to_string(),
+                                Some(ERROR_MESSAGE_DOCUMENTATION.to_string()),
+                                SymbolKind::Variable,
+                            );
+                            return;
+                        }
                     }
                 }
                 let is_string = self
@@ -4843,7 +4972,7 @@ impl<'a> SnapshotBuilder<'a> {
             span,
             "interface Error\n{\n    string $message;\n}".to_string(),
             Some(
-                "Compiler-known checked-error contract. Conforming classes explicitly declare `implements Error` and expose an externally accessible readonly `string $message` property."
+                "Compiler-known checked-error contract. Conforming classes explicitly implement Error or an Error subinterface and expose an externally accessible readonly stored `string $message` property."
                     .to_string(),
             ),
             SymbolKind::Plain,
@@ -5111,6 +5240,144 @@ fn is_readonly_shared_projection(expression: &Expr, semantic_info: Option<&Seman
 struct CompilerKnownMethodHover {
     signature: String,
     documentation: String,
+}
+
+fn interface_member_completions(
+    facts: &ContractFacts,
+    receiver: &ResolvedType,
+    writable: bool,
+) -> Option<Vec<SemanticCompletion>> {
+    if !matches!(receiver, ResolvedType::Interface(_) | ResolvedType::Error) {
+        return None;
+    }
+    let Some(fact) = interface_contract(facts, receiver) else {
+        return Some(Vec::new());
+    };
+    let mut completions = fact
+        .requirements
+        .iter()
+        .filter(|requirement| writable || !requirement.writable_receiver)
+        .map(|requirement| SemanticCompletion {
+            label: requirement.name.clone(),
+            kind: 2,
+            detail: interface_requirement_signature(requirement, &HashMap::new()),
+            documentation: Some(interface_requirement_documentation(requirement)),
+        })
+        .collect::<Vec<_>>();
+    if interface_has_message(fact) {
+        completions.push(SemanticCompletion {
+            label: "message".to_string(),
+            kind: 10,
+            detail: "string $message".to_string(),
+            documentation: Some(ERROR_MESSAGE_DOCUMENTATION.to_string()),
+        });
+    }
+    Some(completions)
+}
+
+const ERROR_MESSAGE_DOCUMENTATION: &str =
+    "Externally accessible readonly stored message required by Error and its subinterfaces.";
+
+fn interface_contract<'a>(
+    facts: &'a ContractFacts,
+    receiver: &ResolvedType,
+) -> Option<&'a InterfaceSpecializationFacts> {
+    facts.interface_specializations.iter().find(|fact| {
+        fact.valid
+            && match receiver {
+                ResolvedType::Interface(interface) => fact.specialization == *interface,
+                ResolvedType::Error => fact.specialization.name == "Error",
+                _ => false,
+            }
+    })
+}
+
+fn interface_has_message(fact: &InterfaceSpecializationFacts) -> bool {
+    fact.specialization.name == "Error"
+        || fact
+            .ancestors
+            .iter()
+            .any(|ancestor| ancestor.name == "Error")
+}
+
+fn interface_requirement_signature(
+    requirement: &RequirementFacts,
+    bindings: &HashMap<String, ResolvedType>,
+) -> String {
+    let display = |ty: &ResolvedType| {
+        display_resolved_type(&doriac::types::substitute_resolved_type(ty, bindings))
+    };
+    let parameters = requirement
+        .signature
+        .parameters
+        .iter()
+        .map(|parameter| {
+            let mode = if parameter.take {
+                "take "
+            } else if parameter.writable {
+                "writable "
+            } else {
+                ""
+            };
+            format!("{mode}{} ${}", display(&parameter.r#type), parameter.name)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let writable = if requirement.writable_receiver {
+        "writable "
+    } else {
+        ""
+    };
+    let effects = if requirement.checked_effects.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " throws {}",
+            requirement
+                .checked_effects
+                .iter()
+                .map(display)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    format!(
+        "{writable}function {}{}({parameters}): {}{effects}",
+        requirement.name,
+        type_parameter_signature(&requirement.generic_parameters),
+        display(&requirement.signature.return_type)
+    )
+}
+
+fn interface_requirement_documentation(requirement: &RequirementFacts) -> String {
+    let mut documentation = "Declared requirement. Erased calls use this contract, not implementation-only defaults. Checked dispatch preserves automatic I/O and TestAssertion transport without adding authored throws.".to_string();
+    if let Some(borrow) = requirement.return_borrow {
+        let source = match borrow.source {
+            doriac::symbols::BorrowSource::Receiver => "the receiver".to_string(),
+            doriac::symbols::BorrowSource::Parameter(index) => requirement
+                .signature
+                .parameters
+                .get(index)
+                .map(|parameter| format!("`${}`", parameter.name))
+                .unwrap_or_else(|| "the declared parameter".to_string()),
+        };
+        documentation.push_str(&format!(
+            "\n\nReturns a {} borrow rooted in {source}.",
+            if borrow.writable {
+                "writable"
+            } else {
+                "readonly"
+            }
+        ));
+    } else if matches!(
+        requirement.signature.return_type,
+        ResolvedType::InterfaceSelf(_)
+    ) {
+        documentation.push_str(
+            "\n\nReturns a new owned value of the same exact dynamic implementing class.",
+        );
+    }
+    documentation
 }
 
 fn list_algorithm_completions(receiver: &ResolvedType) -> Option<Vec<SemanticCompletion>> {
@@ -8263,6 +8530,200 @@ function main(): void
         assert!(labels.contains("value"));
         assert!(!labels.contains("create"));
         assert!(!labels.contains("instances"));
+    }
+
+    #[test]
+    fn stage35_interface_runtime_fixture_has_no_false_diagnostics() {
+        let source = include_str!("../../editors/fixtures/stage35-interface-runtime.doria");
+        let snapshot = AnalysisSnapshot::analyze("interface-runtime.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        for (expression, included, excluded) in [
+            ("$again->read", "read", "rename"),
+            ("$read->read", "read", "rename"),
+            ("$write->rename", "rename", "share"),
+            ("$owner->createWeakReference", "referencedValue", "rename"),
+            ("$weak->acquire", "acquire", "read"),
+            (
+                "$mutable->createWeakReference",
+                "acquireWritableAccess",
+                "read",
+            ),
+        ] {
+            let offset = source.find(expression).unwrap() + expression.find("->").unwrap() + 2;
+            let members = snapshot.member_completions_at_offset(offset).unwrap();
+            assert!(
+                members.iter().any(|member| member.label == included),
+                "{expression}: {members:?}"
+            );
+            assert!(
+                !members.iter().any(|member| member.label == excluded),
+                "{expression}: {members:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stage35_erased_and_narrowed_completions_use_only_the_requirement_view() {
+        let source = r#"
+interface Read<T> { function read(T $value): T; }
+interface Change extends Read<int> { writable function write(int $value): void; }
+class Box implements Change {
+    function read(int $value = 1): int { return $value; }
+    writable function write(int $value): void {}
+    function implementationOnly(): void {}
+}
+function invoke(Read<int> $view): int { return $view->read(7); }
+function narrow(writable Read<int> $view): void {
+    if ($view is Change) { $view->write(2); }
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("interface-views.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        let call = source.find("$view->read").unwrap() + "$view->".len();
+        let members = snapshot.member_completions_at_offset(call).unwrap();
+        assert_eq!(
+            members
+                .iter()
+                .map(|member| member.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["read"]
+        );
+        assert!(members[0].detail.contains("int $value"), "{members:?}");
+        assert!(!members[0].detail.contains('='));
+        let signature = snapshot
+            .signature_help_at_offset(call + "read(".len())
+            .unwrap();
+        assert!(
+            signature.label.contains("read(int $value): int"),
+            "{signature:?}"
+        );
+        let narrowed = source.find("$view->write").unwrap() + "$view->".len();
+        let members = snapshot.member_completions_at_offset(narrowed).unwrap();
+        assert!(members
+            .iter()
+            .any(|member| member.label == "write" && member.detail.starts_with("writable")));
+        assert!(!members
+            .iter()
+            .any(|member| member.label == "implementationOnly"));
+    }
+
+    #[test]
+    fn stage35_interface_properties_and_results_preserve_the_declared_view() {
+        let source = r#"
+interface View { function read(): int; }
+class Value implements View {
+    function read(): int { return 1; }
+    function implementationOnly(): void {}
+}
+class Holder { function __construct(take View $view) {} }
+function make(): View { return new Value(); }
+function inspect(Holder $holder): void {
+    echo $holder->view->read();
+    let $result = make();
+    echo $result->read();
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("interface-storage.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        let property = source.find("$holder->view").unwrap() + "$holder->".len();
+        let hover = snapshot.hover_at_offset(property).unwrap();
+        assert!(hover.markdown.contains("View $view"), "{}", hover.markdown);
+        for expression in ["$holder->view->read", "$result->read"] {
+            let offset = source.find(expression).unwrap() + expression.rfind("read").unwrap();
+            let members = snapshot.member_completions_at_offset(offset).unwrap();
+            assert_eq!(
+                members
+                    .iter()
+                    .map(|member| member.label.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["read"]
+            );
+            let hover = snapshot.hover_at_offset(offset).unwrap();
+            assert!(hover.markdown.contains("read(): int"), "{}", hover.markdown);
+        }
+    }
+
+    #[test]
+    fn stage35_generic_erased_signatures_use_compiler_substitutions() {
+        let source = "interface Select<T> { function choose<U>(T $value, U $other): U; } function call(Select<int> $view): string { return $view->choose(other: \"chosen\", value: 2); }";
+        let snapshot = AnalysisSnapshot::analyze("interface-generic.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        let call = source.rfind("choose").unwrap();
+        let hover = snapshot.hover_at_offset(call).unwrap();
+        assert!(
+            hover.markdown.contains("int $value, string $other"),
+            "{}",
+            hover.markdown
+        );
+        assert!(hover.markdown.contains("): string"), "{}", hover.markdown);
+        let signature = snapshot
+            .signature_help_at_offset(source.find("\"chosen\"").unwrap())
+            .unwrap();
+        assert_eq!(signature.active_parameter, 1);
+    }
+
+    #[test]
+    fn stage35_error_subinterface_members_and_effects_are_projected() {
+        let source = "interface Failure extends Error { function code(): int; } interface Work { function run(): void throws Failure; } function call(Work $job): void { try { $job->run(); } catch (Failure $error) { echo $error->code(); echo $error->message; } }";
+        let snapshot = AnalysisSnapshot::analyze("interface-effects.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        let error = source.find("$error->code").unwrap() + "$error->".len();
+        let members = snapshot.member_completions_at_offset(error).unwrap();
+        assert!(members.iter().any(|member| member.label == "message"));
+        assert!(members.iter().any(|member| member.label == "code"));
+        let message = snapshot
+            .hover_at_offset(source.find("message").unwrap())
+            .unwrap();
+        assert!(
+            message.markdown.contains("string $message"),
+            "{}",
+            message.markdown
+        );
+        assert!(
+            message.markdown.contains("readonly stored"),
+            "{}",
+            message.markdown
+        );
+        let call = source.find("$job->run").unwrap() + "$job->".len();
+        let hover = snapshot.hover_at_offset(call).unwrap();
+        assert!(
+            hover.markdown.contains("throws Failure"),
+            "{}",
+            hover.markdown
+        );
+    }
+
+    #[test]
+    fn stage35_interface_writability_and_later_boundaries_remain_diagnostics() {
+        for (source, code) in [
+            ("interface Change { writable function write(): void; } function bad(Change $view): void { $view->write(); }", "E0203"),
+            ("interface CloneView extends Cloneable {} function bad(CloneView $view): void { $view->clone(); }", "E0759"),
+            ("trait Format { function read(): int { return 1; } } class Box { uses Format; }", "E0493"),
+        ] {
+            let snapshot = AnalysisSnapshot::analyze("interface-boundary.doria", source);
+            assert!(snapshot.diagnostics().iter().any(|diagnostic| diagnostic.code == code), "{source}: {:?}", snapshot.diagnostics());
+            assert!(!snapshot.diagnostics().iter().any(|diagnostic| diagnostic.code == "E0758"));
+        }
     }
 
     #[test]

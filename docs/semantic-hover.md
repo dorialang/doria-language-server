@@ -70,10 +70,18 @@ or reconstruct an algorithm type checker. Other collection families do not
 receive these algorithms. PHP remains a secondary compatibility backend with
 independent limitations. Stages 31 through 34 are complete. Stage 35 interfaces
 and trait declarations, graphs, and conformance are implemented in Slice 1;
-interface values and erased calls remain pending Slice 2. Requirement hovers
+Slice 2 implements interface values, erased calls, and shared interface payloads. Requirement hovers
 show authored receiver, parameter ownership, generics, and checked effects
 without presenting the requirement as an executable body. Semantically invalid closures
 receive no execution capability block.
+
+Interface member completion reads the compiler's specialized requirement graph,
+including inherited requirements and Error messages. It never selects arbitrary
+members of a known implementer. Erased-call signature help preserves requirement
+parameter names, ownership modes, generic substitutions, and checked effects;
+implementation-only defaults do not appear. Shared owner/access completions
+preserve wrapper precedence and readonly/writable forwarding. Core operations
+and public iteration remain Slice 3; trait composition remains Slice 4.
 
 Stage 34 class and method hover consumes compiler-owned hierarchy metadata.
 Class hover shows the canonical declaration, direct parent, hierarchy depth,

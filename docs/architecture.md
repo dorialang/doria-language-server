@@ -120,7 +120,11 @@ facts with canonical requirements, conformance and authored trait origins.
 Requirement references navigate to all coalesced origins and checked concrete
 implementations. Rename refuses incomplete multi-declaration families rather
 than changing only part of a contract. Trait members are not injected into
-composers; interface erasure and composition remain pending Slices 2 and 4.
+composers. Slice 2 consumes the compiler's interface specialization and call facts
+for erased member completion, signatures, and shared payload views. The compiler
+also applies generic type substitutions for the server; no second requirement
+resolver, runtime descriptor index, or conformance checker lives here. Trait
+composition remains pending Slice 4.
 
 Each source is indexed in every compiler analysis graph that contains it, including
 dependencies shared by workspace members. Hierarchy completion uses that indexed
@@ -152,8 +156,9 @@ requires every foreach binding to be explicitly typed; inferred compiler facts
 support diagnostics and insertion fixes but never make omitted source types
 valid. Scalar interpolation
 and `%s` are compiler-owned string materialization, so tooling adds no primitive
-`toString` or scalar cast. The corrective beat and Stage 35 Slice 1 are complete;
-interface runtime execution and property hooks remain future work.
+`toString` or scalar cast. The corrective beat and Stage 35 Slices 1 and 2 are
+complete; core contracts/public iteration, trait composition, and property hooks
+remain separate future work.
 
 ### Editor clients
 
