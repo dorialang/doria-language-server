@@ -917,6 +917,13 @@ impl Server {
         }
         let indexed = self.document_index.hover(uri, offset);
         if let Some(locations) = self.document_index.contract_definitions(uri, offset) {
+            // Call-site compiler substitutions take precedence over authored generic origins.
+            if let Some(hover) = document.analysis.semantic_hover_at_offset(offset) {
+                return Some(json!({
+                    "contents": { "kind": "markdown", "value": hover.markdown },
+                    "range": span_to_range(&document.text, hover.span),
+                }));
+            }
             let descriptions = locations
                 .iter()
                 .filter_map(|location| {
@@ -9200,6 +9207,54 @@ describe("🧪 suite", function (): void {
         let mut rename = params_at(uri, source, implementation);
         rename["newName"] = json!("draw");
         assert_eq!(server.rename(Some(&rename)), Value::Null);
+    }
+
+    #[test]
+    fn stage35_interface_call_hovers_preserve_specialization_through_the_server() {
+        let contract_uri = "file:///workspace/select.doria";
+        let consumer_uri = "file:///workspace/consumer.doria";
+        let contract = "namespace Api; /* unicode: 🧪 */ interface Select<T> { function choose<U>(T $value, U $other): U; }";
+        for (receiver, access, result) in [
+            ("Select<int>", "->", "string"),
+            ("?Select<int>", "?->", "?string"),
+            ("SharedReference<Select<int>>", "->", "string"),
+        ] {
+            for separate_files in [false, true] {
+                let consumer = format!(
+                    "function invoke({receiver} $view): {result} {{ return $view{access}choose(other: \"chosen\", value: 2); }}"
+                );
+                let mut server = stage31_server(&["file:///workspace"]);
+                let (uri, source) = if separate_files {
+                    open_stage31_document(&mut server, contract_uri, contract);
+                    (
+                        consumer_uri,
+                        format!("namespace App; use Api\\Select; {consumer}"),
+                    )
+                } else {
+                    (contract_uri, format!("{contract} {consumer}"))
+                };
+                open_stage31_document(&mut server, uri, &source);
+                assert!(
+                    server.documents[uri].analysis.diagnostics().is_empty(),
+                    "{:?}",
+                    server.documents[uri].analysis.diagnostics()
+                );
+                let call = source.rfind("choose").unwrap();
+                let params = params_at(uri, &source, call);
+                let hover = server.hover(Some(&params)).unwrap();
+                let markdown = hover["contents"]["value"].as_str().unwrap();
+                assert!(
+                    markdown.contains("int $value, string $other): string"),
+                    "{hover}"
+                );
+                assert!(!markdown.contains("T $value"), "{hover}");
+                assert!(!markdown.contains("U $other"), "{hover}");
+                assert!(markdown.contains("Declared requirement"), "{hover}");
+                assert_eq!(hover["range"]["start"], params["position"]);
+                let definitions = server.definition(Some(&params));
+                assert_eq!(definitions[0]["uri"], contract_uri, "{definitions}");
+            }
+        }
     }
 
     #[test]

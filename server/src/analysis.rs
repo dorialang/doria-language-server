@@ -1058,12 +1058,7 @@ impl AnalysisSnapshot {
                 }
                 Some(SemanticHover::new(occurrence.span, markdown))
             });
-        let semantic_hover = self
-            .semantic_hovers
-            .iter()
-            .filter(|hover| span_contains(hover.span, offset))
-            .min_by_key(|hover| hover.selection_key())
-            .cloned();
+        let semantic_hover = self.semantic_hover_at_offset(offset);
 
         match (occurrence_hover, semantic_hover) {
             (Some(occurrence), Some(semantic)) => {
@@ -1078,6 +1073,14 @@ impl AnalysisSnapshot {
             (Some(hover), None) | (None, Some(hover)) => Some(hover),
             (None, None) => None,
         }
+    }
+
+    pub(crate) fn semantic_hover_at_offset(&self, offset: usize) -> Option<SemanticHover> {
+        self.semantic_hovers
+            .iter()
+            .filter(|hover| span_contains(hover.span, offset))
+            .min_by_key(|hover| hover.selection_key())
+            .cloned()
     }
 
     pub(crate) fn member_completions_at_offset(
