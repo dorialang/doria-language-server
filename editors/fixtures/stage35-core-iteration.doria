@@ -1,0 +1,28 @@
+class Book implements Cloneable
+{
+    function __construct(string $title) {}
+    function clone(): self { return new Book($this->title); }
+}
+
+class BookCursor implements Iterator<Book>
+{
+    writable int $position = 0;
+
+    /** @param borrow List<Book> $source */
+    function __construct(borrow List<Book> $source) {}
+
+    function hasCurrent(): bool { return $this->position < $this->source->count; }
+    function getCurrent(): Book { return $this->source[$this->position]; }
+    writable function advance(): void { $this->position++; }
+}
+
+function main(): void
+{
+    List<Book> $books = [new Book("Doria"); 2];
+    let writable $cursor = new BookCursor($books);
+    while ($cursor->hasCurrent()) {
+        let $book = $cursor->getCurrent();
+        echo $book->title;
+        $cursor->advance();
+    }
+}

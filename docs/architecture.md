@@ -165,9 +165,10 @@ requires every foreach binding to be explicitly typed; inferred compiler facts
 support diagnostics and insertion fixes but never make omitted source types
 valid. Scalar interpolation
 and `%s` are compiler-owned string materialization, so tooling adds no primitive
-`toString` or scalar cast. The corrective beat and Stage 35 Slices 1 and 2 are
-complete; core contracts/public iteration, trait composition, and property hooks
-remain separate future work.
+`toString` or scalar cast. The corrective beat and Stage 35 Slices 1, 2, and 3 are
+complete, including core contracts and public iteration. Trait composition and
+property hooks remain separate future work. Retained-source and element-borrow
+hover uses compiler ownership facts; clients do not infer iterator lifetimes.
 
 ### Editor clients
 

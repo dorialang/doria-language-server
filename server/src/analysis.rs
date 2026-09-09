@@ -19,8 +19,8 @@ use doriac::names::{
     GlobalSymbolId, GlobalSymbolKind, GlobalSymbolOwner, SourceIdentity,
 };
 use doriac::ownership::{
-    CaptureAcquisitionKind, ClosureBorrowRoot, ClosureEscapeClassification, ClosureValueProvenance,
-    InvocationConsumption,
+    BorrowRoot, CaptureAcquisitionKind, ClosureEscapeClassification, InvocationConsumption,
+    ValueProvenance,
 };
 use doriac::semantics::contracts::{ContractFacts, InterfaceSpecializationFacts, RequirementFacts};
 use doriac::semantics::{
@@ -270,6 +270,9 @@ fn template_tags(parameters: &[doriac::ast::TypeParamDecl]) -> Vec<String> {
 
 fn documentation_parameter_signature(parameter: &Param) -> String {
     let mut parts = Vec::new();
+    if parameter.borrow_span.is_some() {
+        parts.push("borrow".to_string());
+    }
     match parameter.constructor_role {
         ConstructorParameterRole::Promoted {
             access: MemberAccess::Internal,
@@ -2571,6 +2574,7 @@ impl<'a> SnapshotBuilder<'a> {
                     );
                     let mut documentation = phpdoc_before(self.text, function.span.start);
                     self.append_callable_effect_documentation(&mut documentation, function.span);
+                    self.append_retained_source_documentation(&mut documentation, function);
                     let symbol = self.add_declaration_symbol(
                         selection_span,
                         function_signature(function, None),
@@ -2606,7 +2610,7 @@ impl<'a> SnapshotBuilder<'a> {
             ));
         }
         let documentation = if kind == "interface" {
-            "Nominal interface declaration. Checked requirements govern owned and borrowed interface values, erased calls, narrowing, and shared payload views. Core-contract operations and trait composition remain separate implementation boundaries."
+            "Nominal interface declaration. Checked requirements govern owned and borrowed interface values, erased calls, narrowing, and shared payload views. Core-contract operations and public iteration are implemented. Trait composition remains a later implementation boundary."
         } else {
             "Compile-time trait declaration. Composer-dependent members and trait composition require Stage 35 Slice 4."
         };
@@ -3033,6 +3037,7 @@ impl<'a> SnapshotBuilder<'a> {
         self.collect_constructor_parameter_roles(class_name, method);
         let mut documentation = phpdoc_before(self.text, method.span.start);
         self.append_callable_effect_documentation(&mut documentation, method.span);
+        self.append_retained_source_documentation(&mut documentation, method);
         if method.body.as_block().is_none() {
             append_documentation(
                 &mut documentation,
@@ -3243,6 +3248,40 @@ impl<'a> SnapshotBuilder<'a> {
                 override_stub: None,
                 body_span: None,
             });
+        }
+    }
+
+    fn append_retained_source_documentation(
+        &self,
+        documentation: &mut Option<String>,
+        function: &FunctionDecl,
+    ) {
+        let Some(plan) = self
+            .semantic_info
+            .and_then(|info| info.retained_callables.get(&function.span))
+        else {
+            return;
+        };
+        for (label, sources) in [
+            ("Returned Value", &plan.returns),
+            ("Constructed Cursor", &plan.constructs),
+        ] {
+            for retained in sources {
+                let source = match retained.source {
+                    doriac::symbols::BorrowSource::Receiver => "the receiver".to_string(),
+                    doriac::symbols::BorrowSource::Parameter(index) => function
+                        .params
+                        .get(index)
+                        .map(|parameter| format!("`${}`", parameter.name))
+                        .unwrap_or_else(|| "the checked parameter".to_string()),
+                };
+                let access = if retained.inherited {
+                    "the existing source loans carried by"
+                } else {
+                    "a readonly source loan from"
+                };
+                append_documentation(documentation, &format!("**{label}:** Retains {access} {source}. The source must outlive the result."));
+            }
         }
     }
 
@@ -5422,7 +5461,7 @@ fn list_algorithm_completions(receiver: &ResolvedType) -> Option<Vec<SemanticCom
             (
                 "filter",
                 format!("function filter(function({element}): bool): List<{element}>"),
-                "Returns a new List containing selected Copy elements in insertion order. The source List remains unchanged.",
+                "Returns a new List containing selected Copy-or-Cloneable elements in insertion order. The source List remains unchanged.",
             ),
             (
                 "reduce",
@@ -6385,10 +6424,10 @@ fn closure_invocation_summary(
     }
 }
 
-fn closure_provenance_summary(info: &SemanticInfo, provenance: &ClosureValueProvenance) -> String {
+fn closure_provenance_summary(info: &SemanticInfo, provenance: &ValueProvenance) -> String {
     match provenance {
-        ClosureValueProvenance::Owned => "Owned Closure".to_string(),
-        ClosureValueProvenance::BorrowBound(roots) => {
+        ValueProvenance::Owned => "Owned Closure".to_string(),
+        ValueProvenance::BorrowBound(roots) => {
             let roots = closure_root_names(info, roots);
             if roots.is_empty() {
                 "Borrow-Bound Closure".to_string()
@@ -6402,15 +6441,15 @@ fn closure_provenance_summary(info: &SemanticInfo, provenance: &ClosureValueProv
 fn closure_escape_summary(
     info: &SemanticInfo,
     escape: ClosureEscapeClassification,
-    provenance: &ClosureValueProvenance,
+    provenance: &ValueProvenance,
 ) -> String {
     match escape {
         ClosureEscapeClassification::Local => "Nonescaping".to_string(),
         ClosureEscapeClassification::Owned => "Owned callback".to_string(),
         ClosureEscapeClassification::ReturnedBorrow => {
             let roots = match provenance {
-                ClosureValueProvenance::BorrowBound(roots) => closure_root_names(info, roots),
-                ClosureValueProvenance::Owned => Vec::new(),
+                ValueProvenance::BorrowBound(roots) => closure_root_names(info, roots),
+                ValueProvenance::Owned => Vec::new(),
             };
             if roots.is_empty() {
                 "Returned closure with a compiler-checked borrow".to_string()
@@ -6421,14 +6460,14 @@ fn closure_escape_summary(
     }
 }
 
-fn closure_root_names(info: &SemanticInfo, roots: &[ClosureBorrowRoot]) -> Vec<String> {
+fn closure_root_names(info: &SemanticInfo, roots: &[BorrowRoot]) -> Vec<String> {
     let mut names = roots
         .iter()
         .map(|root| match root {
-            ClosureBorrowRoot::Binding(binding) => binding_source_name(info, *binding),
-            ClosureBorrowRoot::Receiver => "$this".to_string(),
-            ClosureBorrowRoot::EnclosingEnvironment(_) => "the enclosing closure".to_string(),
-            ClosureBorrowRoot::Temporary => "a temporary receiver".to_string(),
+            BorrowRoot::Binding(binding) => binding_source_name(info, *binding),
+            BorrowRoot::Receiver => "$this".to_string(),
+            BorrowRoot::EnclosingEnvironment(_) => "the enclosing closure".to_string(),
+            BorrowRoot::Temporary => "a temporary receiver".to_string(),
         })
         .collect::<Vec<_>>();
     names.sort();
@@ -6546,6 +6585,9 @@ fn override_stub(function: &FunctionDecl) -> String {
 
 fn parameter_signature(parameter: &Param) -> String {
     let mut parts = Vec::new();
+    if parameter.borrow_span.is_some() {
+        parts.push("borrow".to_string());
+    }
     match parameter.constructor_role {
         ConstructorParameterRole::Promoted {
             access: MemberAccess::Internal,
@@ -6580,6 +6622,9 @@ fn parameter_signature(parameter: &Param) -> String {
 
 fn parameter_signature_without_default(parameter: &Param) -> String {
     let mut parts = Vec::new();
+    if parameter.borrow_span.is_some() {
+        parts.push("borrow".to_string());
+    }
     if parameter.take {
         parts.push("take".to_string());
     }
@@ -6639,6 +6684,12 @@ fn promoted_property_documentation(
     parameter: &Param,
     access: MemberAccess,
 ) -> String {
+    if parameter.borrow_span.is_some() {
+        return format!(
+            "**Retained Readonly Source**\n\nDeclares `{class_name}::{}` as a source loan, not an owned field. The source stays with its owner and must outlive the cursor. It cannot be mutated while the loan is active.",
+            parameter.name,
+        );
+    }
     format!(
         "**Promoted Property**\n\n**Accessibility:** {}\n\n**Mutability:** {}\n\nDeclares `{class_name}::{}`",
         if access == MemberAccess::Internal {
@@ -6656,7 +6707,9 @@ fn promoted_property_documentation(
 }
 
 fn parameter_mode_documentation(parameter: &Param) -> &'static str {
-    if parameter.take {
+    if parameter.borrow_span.is_some() {
+        "Retained Readonly Source (`borrow`)"
+    } else if parameter.take {
         "Owned (`take`)"
     } else if parameter.writable {
         "Writable Borrow"
@@ -8208,7 +8261,7 @@ function main(): void
             ),
             (
                 "filter",
-                "Returns a new List containing selected Copy elements in insertion order. The source List remains unchanged.",
+                "Returns a new List containing selected Copy-or-Cloneable elements in insertion order. The source List remains unchanged.",
             ),
             (
                 "reduce",
@@ -8737,10 +8790,72 @@ function inspect(Holder $holder): void {
     }
 
     #[test]
+    fn stage35_retained_sources_and_core_execution_have_no_false_diagnostics() {
+        let source = include_str!("../../editors/fixtures/stage35-core-iteration.doria");
+        let snapshot = AnalysisSnapshot::analyze("iteration.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        let source_hover = snapshot
+            .hover_at_offset(source.find("$source) {}").unwrap())
+            .unwrap();
+        assert!(
+            source_hover.markdown.contains("Retained Readonly Source"),
+            "{}",
+            source_hover.markdown
+        );
+        assert!(
+            source_hover.markdown.contains("List<Book> $source"),
+            "{}",
+            source_hover.markdown
+        );
+        let signature = snapshot
+            .signature_help_at_offset(
+                source.find("new BookCursor($books)").unwrap() + "new BookCursor(".len(),
+            )
+            .unwrap();
+        assert!(
+            signature.label.contains("borrow List<Book>"),
+            "{}",
+            signature.label
+        );
+
+        let erased = "interface CloneView extends Cloneable {} function inspect(CloneView $value, Iterator<Book> $cursor): void { $value->clone(); let $book = $cursor->getCurrent(); echo $book->title; } class Book { function __construct(string $title) {} }";
+        let snapshot = AnalysisSnapshot::analyze("erased-core.doria", erased);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        for (needle, expected) in [
+            ("$value->clone", "same exact dynamic"),
+            ("$cursor->getCurrent", "readonly borrow"),
+        ] {
+            let offset = erased.find(needle).unwrap() + needle.find("->").unwrap() + 2;
+            let hover = snapshot.hover_at_offset(offset).unwrap();
+            assert!(hover.markdown.contains(expected), "{}", hover.markdown);
+        }
+    }
+
+    #[test]
+    fn stage35_iterator_diagnostics_preserve_source_and_element_loans() {
+        let cursor = "class Book { function __construct(string $title) {} } class Cursor implements Iterator<Book> { function __construct(borrow List<Book> $source) {} function hasCurrent(): bool { return true; } function getCurrent(): Book { return $this->source[0]; } writable function advance(): void {} }";
+        for (body, code) in [
+            ("let writable $source = [new Book(\"one\")]; let $cursor = new Cursor($source); $source->add(new Book(\"two\")); echo $cursor->getCurrent()->title;", "E0763"),
+            ("let $source = [new Book(\"one\")]; let writable $cursor = new Cursor($source); let $value = $cursor->getCurrent(); $cursor->advance(); echo $value->title;", "E0477"),
+        ] {
+            let snapshot = AnalysisSnapshot::analyze("loans.doria", &format!("{cursor} function main(): void {{ {body} }}"));
+            assert!(snapshot.diagnostics().iter().any(|diagnostic| diagnostic.code == code), "{body}: {:?}", snapshot.diagnostics());
+            assert!(!snapshot.diagnostics().iter().any(|diagnostic| diagnostic.code == "E0759"));
+        }
+    }
+
+    #[test]
     fn stage35_interface_writability_and_later_boundaries_remain_diagnostics() {
         for (source, code) in [
             ("interface Change { writable function write(): void; } function bad(Change $view): void { $view->write(); }", "E0203"),
-            ("interface CloneView extends Cloneable {} function bad(CloneView $view): void { $view->clone(); }", "E0759"),
             ("trait Format { function read(): int { return 1; } } class Box { uses Format; }", "E0493"),
         ] {
             let snapshot = AnalysisSnapshot::analyze("interface-boundary.doria", source);

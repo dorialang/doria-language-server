@@ -1067,7 +1067,7 @@ class DoriaLexer : LexerBase() {
             "instanceof",
         )
 
-        private val MODIFIERS = setOf("take", "writable", "readonly", "internal", "static", "shared")
+        private val MODIFIERS = setOf("take", "borrow", "writable", "readonly", "internal", "static", "shared")
 
         private val CONSTANT_REFERENCE_NAME = Regex("[A-Z][A-Z0-9_]+")
         private val ENUM_CASE_REFERENCE_NAME = Regex("[A-Z][A-Za-z0-9]*[a-z][A-Za-z0-9]*")
@@ -1169,7 +1169,7 @@ class DoriaLexer : LexerBase() {
             "extends",
             "implements",
         )
-        private val DOC_PARAMETER_MODIFIERS = setOf("internal", "take", "writable")
+        private val DOC_PARAMETER_MODIFIERS = setOf("internal", "take", "borrow", "writable")
 
         private val STRICT_COMPARISON_OPERATORS = setOf("===", "!==")
         private val THREE_CHAR_OPERATORS =

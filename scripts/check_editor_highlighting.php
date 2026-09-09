@@ -1529,7 +1529,7 @@ function check_documentation_comment_support(): void
     }
     require_check(
         str_contains($grammarText, 'storage.modifier.parameter.documentation.doria')
-            && str_contains($grammarText, 'internal|take|writable'),
+            && str_contains($grammarText, 'internal|take|borrow|writable'),
         'VS Code must highlight Doria parameter modifiers inside documentation tags',
     );
 
@@ -2013,7 +2013,7 @@ function check_stage30f_callable_alignment(): void
             str_contains($lspText, 'Doria function-type invocation modifier') &&
             str_contains($lspText, 'collect_semantic_hovers') &&
             str_contains($lspText, 'Semantically checked callable-value invocation') &&
-            str_contains($lspText, 'ClosureValueProvenance') &&
+            str_contains($lspText, 'ValueProvenance') &&
             str_contains($lspText, 'ClosureEscapeClassification') &&
             str_contains($lspText, 'ListAlgorithmCallInfo') &&
             str_contains($lspText, 'list_algorithm_calls') &&
@@ -2062,6 +2062,15 @@ function check_stage30f_callable_alignment(): void
         );
     }
 
+    foreach ([
+        'retained_callables',
+        'Retained Readonly Source',
+        'stage35_retained_sources_and_core_execution_have_no_false_diagnostics',
+        'stage35_iterator_diagnostics_preserve_source_and_element_loans',
+        'retained_iterator_loan_diagnostics_keep_utf16_ranges_and_no_ownership_fix',
+    ] as $coverage) {
+        require_check(str_contains($lspText . $lspTestText, $coverage), "Core iteration tooling coverage is missing {$coverage}");
+    }
     $readmeText = read_text($readme);
     require_check(
         str_contains($readmeText, 'Stage 30 is complete') &&
@@ -2075,7 +2084,7 @@ function check_stage30f_callable_alignment(): void
             str_contains($readmeText, 'Stage 34 single class inheritance is complete') &&
             str_contains($readmeText, 'Stage 35') &&
             str_contains($readmeText, 'interfaces and traits authority is accepted under Decision 0134') &&
-            str_contains($readmeText, 'Slices 1 and 2 are complete and Slice 3 is next') &&
+            str_contains($readmeText, 'Slices 1, 2, and 3 are complete and Slice 4 is next') &&
             str_contains($readmeText, '`map`, `filter`, and `reduce` only for resolved `List<T>` receivers') &&
             !str_contains($readmeText, 'Stage 30 remains incomplete') &&
             !str_contains($readmeText, 'Stage 30h is next') &&
