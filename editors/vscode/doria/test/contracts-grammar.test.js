@@ -26,6 +26,12 @@ test("presents generic composition and adaptations without checking conformance"
   assert.match("{", new RegExp(composition.end));
   assert.match(fixture, /Format<int>::render insteadof Alternative<int>;/);
   assert.match(fixture, /function required\(\): int;/);
+  assert.match(fixture, /uses NestedFormat<string>;/);
+  assert.match(fixture, /Alternative<int>::debug as internal;/);
+  assert.match(fixture, /Alternative<int>::trace as internal traceAlternative;/);
+  assert.match(fixture, /Format<int>::label as typeLabel;/);
+  assert.match(fixture, /\$report->renderAlternative\(2\)/);
+  assert.match(fixture, /Report::typeLabel\(\)/);
 });
 
 test("interface runtime fixture uses existing shared, narrowing, and call syntax", () => {

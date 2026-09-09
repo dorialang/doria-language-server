@@ -22,16 +22,20 @@ use doriac::ownership::{
     BorrowRoot, CaptureAcquisitionKind, ClosureEscapeClassification, InvocationConsumption,
     ValueProvenance,
 };
+use doriac::semantics::composition::{ClassMemberSurface, ClassMemberSurfaceEntry};
 use doriac::semantics::contracts::{ContractFacts, InterfaceSpecializationFacts, RequirementFacts};
 use doriac::semantics::{
-    CallableTarget, ConstructorParameterSemanticRole, EnumSemanticInfo, ForeachIterationKind,
-    ForeachValueAccess, ListAlgorithmCallInfo, ListAlgorithmKind, ListCallbackAccess, SemanticInfo,
+    CallableSignatureSemanticInfo, CallableTarget, ConstructorParameterSemanticRole,
+    EnumSemanticInfo, ForeachIterationKind, ForeachValueAccess, ListAlgorithmCallInfo,
+    ListAlgorithmKind, ListCallbackAccess, SemanticInfo,
 };
 use doriac::source::{SourceFile, SourceId, Span};
-use doriac::symbols::{BindingKind, BindingOwnership, ReceiverMode};
+use doriac::symbols::{
+    BindingKind, BindingOwnership, MemberKind as CompilerMemberKind, ReceiverMode,
+};
 use doriac::testing::{SourceSemanticContext, TestSemanticFacts};
 use doriac::types::{
-    FunctionInvocationMode, ResolvedType, SharedHandleKind, TypeRef, TypeRegistry,
+    ClassType, FunctionInvocationMode, ResolvedType, SharedHandleKind, TypeRef, TypeRegistry,
 };
 
 use crate::string_surface::{string_companion_method, string_property};
@@ -340,6 +344,13 @@ pub(crate) struct AnalysisSnapshot {
     compilation_context: CompilationContext,
     global_symbols: GlobalSymbolFacts,
     contracts: doriac::semantics::contracts::ContractFacts,
+    composition_origins: Vec<doriac::trait_composition::EffectiveMemberOrigin>,
+    composition_obligations: Vec<doriac::trait_composition::MethodObligation>,
+    class_member_surfaces: Vec<ClassMemberSurface>,
+    trait_adaptations: Vec<doriac::ast::TraitAdaptation>,
+    trait_adaptation_surfaces: Vec<doriac::semantics::composition::TraitAdaptationSurface>,
+    composition_rename: doriac::semantics::composition_rename::CompositionRenameFacts,
+    recovered_composition: Option<ComposedSourcePresentation>,
     directive_semantic_tokens: Vec<(Span, u32)>,
     attribute_semantic_tokens: Vec<(Span, u32)>,
     assertion_semantic_tokens: Vec<SemanticTokenSpan>,
@@ -422,7 +433,7 @@ pub(crate) enum AttributeParameterSpelling {
     Label,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct SemanticCompletion {
     pub(crate) label: String,
     pub(crate) kind: u32,
@@ -522,7 +533,17 @@ struct MemberReceiver {
 #[derive(Debug, Clone)]
 struct StaticReceiver {
     span: Span,
-    enum_name: String,
+    receiver: StaticReceiverKind,
+    current_class: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum StaticReceiverKind {
+    Enum(String),
+    Class {
+        receiver: ClassType<ResolvedType>,
+        parent: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -555,10 +576,204 @@ struct CallArgumentContext {
     parameter: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct SignatureHelp {
     pub(crate) label: String,
     pub(crate) active_parameter: usize,
+}
+
+// These are source-facing values, after graph-local expansion identity has been
+// resolved. Keeping only this projection avoids retaining whole compiler snapshots
+// for dependencies shared by several workspace members.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ComposedSourcePresentation {
+    hovers: Vec<SemanticHover>,
+    completions: Vec<(Span, Vec<SemanticCompletion>)>,
+    calls: Vec<PresentedCall>,
+}
+
+#[derive(Debug, Clone)]
+struct PresentedCall {
+    span: Span,
+    arguments: Vec<CallArgumentContext>,
+    label: String,
+    parameter_names: Vec<String>,
+}
+
+impl PresentedCall {
+    fn signature_help(&self, offset: usize) -> SignatureHelp {
+        SignatureHelp {
+            label: self.label.clone(),
+            active_parameter: self
+                .arguments
+                .iter()
+                .find(|argument| offset <= argument.span.end)
+                .map(|argument| argument.parameter)
+                .unwrap_or(self.arguments.len()),
+        }
+    }
+
+    fn named_arguments(&self, offset: usize) -> Vec<SemanticCompletion> {
+        let supplied = self
+            .arguments
+            .iter()
+            .filter(|argument| argument.span.start < offset)
+            .map(|argument| argument.parameter)
+            .collect::<HashSet<_>>();
+        self.parameter_names
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !supplied.contains(index))
+            .map(|(_, name)| SemanticCompletion {
+                label: format!("{name}:"),
+                kind: 5,
+                detail: format!("Named argument for {}", self.label),
+                documentation: None,
+            })
+            .collect()
+    }
+}
+
+impl ComposedSourcePresentation {
+    pub(crate) fn add(&mut self, snapshot: &AnalysisSnapshot) {
+        let contextual = |span: Span| span != span.authored();
+        // SourceId and ExpansionId must not survive this presentation boundary.
+        let display_span = |span: Span| Span::new(span.start, span.end);
+        for hover in snapshot
+            .semantic_hovers
+            .iter()
+            .filter(|hover| contextual(hover.span))
+        {
+            let Some(origin) = snapshot
+                .composition_origins
+                .iter()
+                .find(|origin| origin.id == hover.span.expansion)
+            else {
+                continue;
+            };
+            self.hovers.push(SemanticHover {
+                span: display_span(hover.span),
+                markdown: format!(
+                    "**Composed in `{}::{}` via `{}`**\n\n{}",
+                    origin.composing_class, origin.name, origin.trait_type, hover.markdown
+                ),
+                priority: hover.priority,
+            });
+        }
+        for context in snapshot
+            .member_receivers
+            .iter()
+            .filter(|context| contextual(context.span))
+        {
+            self.completions.push((
+                display_span(context.span),
+                snapshot.member_completions(context),
+            ));
+        }
+        for context in snapshot
+            .static_receivers
+            .iter()
+            .filter(|context| contextual(context.span))
+        {
+            self.completions.push((
+                display_span(context.span),
+                snapshot.static_receiver_completions(context, None),
+            ));
+        }
+        for context in snapshot
+            .call_signatures
+            .iter()
+            .filter(|context| contextual(context.span))
+        {
+            if let Some(mut call) = snapshot.present_call(context) {
+                call.span = display_span(call.span);
+                for argument in &mut call.arguments {
+                    argument.span = display_span(argument.span);
+                }
+                self.calls.push(call);
+            }
+        }
+        for adaptation in &snapshot.trait_adaptations {
+            if let Some(completions) =
+                snapshot.trait_adaptation_completions_at_offset(adaptation.method.span.start)
+            {
+                self.completions.push((
+                    Span::new(adaptation.separator_span.end, adaptation.method.span.end),
+                    completions,
+                ));
+            }
+        }
+    }
+
+    pub(crate) fn hover(&self, offset: usize) -> Option<SemanticHover> {
+        let selected = self
+            .hovers
+            .iter()
+            .filter(|hover| span_contains(hover.span, offset))
+            .min_by_key(|hover| hover.selection_key())?;
+        let mut sections = self
+            .hovers
+            .iter()
+            .filter(|hover| hover.span == selected.span && hover.priority == selected.priority)
+            .map(|hover| hover.markdown.clone())
+            .collect::<Vec<_>>();
+        sections.sort();
+        sections.dedup();
+        Some(SemanticHover {
+            markdown: sections.join("\n\n---\n\n"),
+            ..selected.clone()
+        })
+    }
+
+    pub(crate) fn completions(&self, offset: usize) -> Option<Vec<SemanticCompletion>> {
+        let span = self
+            .completions
+            .iter()
+            .map(|(span, _)| *span)
+            .filter(|span| span_contains(*span, offset))
+            .min_by_key(|span| span.end - span.start)?;
+        let mut items = self
+            .completions
+            .iter()
+            .filter(|(candidate, _)| *candidate == span)
+            .flat_map(|(_, items)| items.iter().cloned())
+            .collect::<Vec<_>>();
+        items.sort();
+        items.dedup();
+        Some(items)
+    }
+
+    fn calls_at(&self, offset: usize) -> Option<Vec<&PresentedCall>> {
+        let span = self
+            .calls
+            .iter()
+            .map(|call| call.span)
+            .filter(|span| span_contains(*span, offset))
+            .min_by_key(|span| span.end - span.start)?;
+        Some(self.calls.iter().filter(|call| call.span == span).collect())
+    }
+
+    pub(crate) fn signatures(&self, offset: usize) -> Option<Vec<SignatureHelp>> {
+        let mut items = self
+            .calls_at(offset)?
+            .iter()
+            .map(|call| call.signature_help(offset))
+            .collect::<Vec<_>>();
+        items.sort();
+        items.dedup();
+        Some(items)
+    }
+
+    pub(crate) fn named_arguments(&self, offset: usize) -> Option<Vec<SemanticCompletion>> {
+        let mut items = self
+            .calls_at(offset)?
+            .iter()
+            .flat_map(|call| call.named_arguments(offset))
+            .collect::<Vec<_>>();
+        items.sort();
+        items.dedup();
+        Some(items)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -568,6 +783,18 @@ pub(crate) struct LocalCompletion {
 }
 
 impl AnalysisSnapshot {
+    pub(crate) fn merge_recovered_compositions(snapshots: Vec<Self>) -> Option<Self> {
+        let mut presentation = ComposedSourcePresentation::default();
+        for snapshot in &snapshots {
+            presentation.add(snapshot);
+        }
+        let mut primary = snapshots.into_iter().next()?;
+        // Semantic identities stay in one graph. Only source-facing values from
+        // other package views are retained during temporary editor recovery.
+        primary.recovered_composition = Some(presentation);
+        Some(primary)
+    }
+
     pub(crate) fn analyze(path: &str, text: &str) -> Self {
         Self::analyze_with_context(path, text, CompilationContext::standalone(path))
     }
@@ -672,6 +899,22 @@ impl AnalysisSnapshot {
 
     pub(crate) fn contracts(&self) -> &doriac::semantics::contracts::ContractFacts {
         &self.contracts
+    }
+
+    pub(crate) fn composition_origins(
+        &self,
+    ) -> &[doriac::trait_composition::EffectiveMemberOrigin] {
+        &self.composition_origins
+    }
+
+    pub(crate) fn composition_rename(
+        &self,
+    ) -> &doriac::semantics::composition_rename::CompositionRenameFacts {
+        &self.composition_rename
+    }
+
+    pub(crate) fn composition_obligations(&self) -> &[doriac::trait_composition::MethodObligation] {
+        &self.composition_obligations
     }
 
     pub(crate) fn global_symbols(&self) -> &GlobalSymbolFacts {
@@ -980,11 +1223,12 @@ impl AnalysisSnapshot {
         ))
     }
 
+    #[cfg(test)]
     pub(crate) fn signature_help_for_incomplete_call(
         path: &str,
         text: &str,
         offset: usize,
-    ) -> Option<SignatureHelp> {
+    ) -> Option<Vec<SignatureHelp>> {
         Self::analyze(
             path,
             &Self::recover_incomplete_call_source(path, text, offset)?,
@@ -1095,23 +1339,71 @@ impl AnalysisSnapshot {
     }
 
     pub(crate) fn semantic_hover_at_offset(&self, offset: usize) -> Option<SemanticHover> {
-        self.semantic_hovers
+        let selected = self
+            .semantic_hovers
             .iter()
             .filter(|hover| span_contains(hover.span, offset))
-            .min_by_key(|hover| hover.selection_key())
-            .cloned()
+            .min_by_key(|hover| hover.selection_key())?;
+        let mut contextual = false;
+        let mut sections = self
+            .semantic_hovers
+            .iter()
+            .filter(|hover| {
+                hover.span.authored() == selected.span.authored()
+                    && hover.priority == selected.priority
+            })
+            .filter_map(|hover| {
+                if hover.span == hover.span.authored() {
+                    return Some(hover.markdown.clone());
+                }
+                contextual = true;
+                let origin = self
+                    .composition_origins
+                    .iter()
+                    .find(|origin| origin.id == hover.span.expansion)?;
+                Some(format!(
+                    "**Composed in `{}::{}` via `{}`**\n\n{}",
+                    origin.composing_class, origin.name, origin.trait_type, hover.markdown
+                ))
+            })
+            .collect::<Vec<_>>();
+        if !contextual {
+            return Some(selected.clone());
+        }
+        sections.sort();
+        sections.dedup();
+        (!sections.is_empty()).then(|| SemanticHover {
+            span: selected.span.authored(),
+            markdown: sections.join("\n\n---\n\n"),
+            priority: selected.priority,
+        })
     }
 
     pub(crate) fn member_completions_at_offset(
         &self,
         offset: usize,
     ) -> Option<Vec<SemanticCompletion>> {
+        if let Some(items) = self
+            .recovered_composition
+            .as_ref()
+            .and_then(|view| view.completions(offset))
+        {
+            return Some(items);
+        }
         let context = self
             .member_receivers
             .iter()
             .filter(|context| context.span.start <= offset && offset <= context.span.end)
             .min_by_key(|context| context.span.end.saturating_sub(context.span.start))?;
-        Some(self.member_completions(context))
+        let mut completions = self
+            .member_receivers
+            .iter()
+            .filter(|candidate| candidate.span.authored() == context.span.authored())
+            .flat_map(|candidate| self.member_completions(candidate))
+            .collect::<Vec<_>>();
+        completions.sort();
+        completions.dedup();
+        Some(completions)
     }
 
     pub(crate) fn assertion_completions_at_offset(
@@ -1197,11 +1489,7 @@ impl AnalysisSnapshot {
                 .unwrap_or_default();
         }
         if let ResolvedType::Class(class) = receiver {
-            return self.class_member_completions(
-                &class.name,
-                context.writable_payload_access,
-                context,
-            );
+            return self.class_member_completions(class, context.writable_payload_access, context);
         }
         if let Some(completions) =
             interface_member_completions(&self.contracts, receiver, context.writable_payload_access)
@@ -1247,7 +1535,7 @@ impl AnalysisSnapshot {
         }
         let writable = *kind == WritableSharedReferenceAccess;
         if let ResolvedType::Class(class) = payload.as_ref() {
-            completions.extend(self.class_member_completions(&class.name, writable, context));
+            completions.extend(self.class_member_completions(class, writable, context));
         } else if let Some(members) =
             interface_member_completions(&self.contracts, payload, writable)
         {
@@ -1258,31 +1546,179 @@ impl AnalysisSnapshot {
         completions
     }
 
+    fn trait_adaptation_completions_at_offset(
+        &self,
+        offset: usize,
+    ) -> Option<Vec<SemanticCompletion>> {
+        let adaptation = self.trait_adaptations.iter().find(|adaptation| {
+            adaptation.separator_span.end <= offset && offset <= adaptation.method.span.end
+        })?;
+        let mut completions = self
+            .trait_adaptation_surfaces
+            .iter()
+            .filter(|candidate| {
+                candidate
+                    .applicable_origins
+                    .contains(&adaptation.origin_span)
+            })
+            .map(|candidate| {
+                let prefix = format!(
+                    "{}{}{}",
+                    if candidate.access == MemberAccess::Internal {
+                        "internal "
+                    } else {
+                        ""
+                    },
+                    if candidate.is_static { "static " } else { "" },
+                    if candidate.writable { "writable " } else { "" }
+                );
+                let signature = semantic_callable_signature(
+                    &format!("{}::{}", candidate.trait_type, candidate.name),
+                    &candidate.generic_parameters,
+                    &candidate.signature,
+                    &candidate.checked_effects,
+                    &HashMap::new(),
+                );
+                let mut documentation = callable_details_documentation(
+                    Some(&candidate.signature),
+                    candidate.return_borrow,
+                    &candidate.automatic_effects,
+                );
+                append_documentation(
+                    &mut documentation,
+                    &format!("Composed in `{}`.", candidate.composing_class),
+                );
+                SemanticCompletion {
+                    label: candidate.name.clone(),
+                    kind: 2,
+                    detail: format!("{prefix}{signature}"),
+                    documentation,
+                }
+            })
+            .collect::<Vec<_>>();
+        completions.sort_by(|left, right| {
+            (&left.label, &left.detail, &left.documentation).cmp(&(
+                &right.label,
+                &right.detail,
+                &right.documentation,
+            ))
+        });
+        completions.dedup();
+        Some(completions)
+    }
+
     pub(crate) fn static_completions_at_offset(
         &self,
         offset: usize,
     ) -> Option<Vec<SemanticCompletion>> {
+        if let Some(items) = self
+            .recovered_composition
+            .as_ref()
+            .and_then(|view| view.completions(offset))
+        {
+            return Some(items);
+        }
+        if let Some(completions) = self.trait_adaptation_completions_at_offset(offset) {
+            return Some(completions);
+        }
         let context = self
             .static_receivers
             .iter()
             .filter(|context| context.span.start <= offset && offset <= context.span.end)
             .min_by_key(|context| context.span.end.saturating_sub(context.span.start))?;
-        Some(
-            self.enum_case_completions
-                .get(&context.enum_name)
+        let method = self
+            .hierarchy_context_at_offset(offset)
+            .and_then(|context| context.method);
+        let mut completions = self
+            .static_receivers
+            .iter()
+            .filter(|candidate| candidate.span.authored() == context.span.authored())
+            .flat_map(|candidate| self.static_receiver_completions(candidate, method))
+            .collect::<Vec<_>>();
+        completions.sort();
+        completions.dedup();
+        Some(completions)
+    }
+
+    fn static_receiver_completions(
+        &self,
+        context: &StaticReceiver,
+        method: Option<HierarchyMethodContext>,
+    ) -> Vec<SemanticCompletion> {
+        match &context.receiver {
+            StaticReceiverKind::Enum(name) => self
+                .enum_case_completions
+                .get(name)
                 .cloned()
                 .unwrap_or_default(),
-        )
+            StaticReceiverKind::Class { receiver, parent } => self
+                .class_member_surfaces
+                .iter()
+                .find(|surface| surface.receiver == *receiver)
+                .into_iter()
+                .filter(|surface| surface.valid)
+                .flat_map(|surface| &surface.members)
+                .filter(|member| {
+                    if member.name == "__destruct" {
+                        return false;
+                    }
+                    if member.name == "__construct" {
+                        return *parent
+                            && method.is_some_and(|method| method.constructor)
+                            && member.declaring_class == *receiver
+                            && member.access == MemberAccess::External;
+                    }
+                    (matches!(
+                        member.kind,
+                        CompilerMemberKind::StaticMethod
+                            | CompilerMemberKind::StaticProperty
+                            | CompilerMemberKind::Constant
+                    ) || (*parent
+                        && member.kind == CompilerMemberKind::InstanceMethod
+                        && method.is_some_and(|method| !method.is_static)))
+                        && (member.access == MemberAccess::External
+                            || context.current_class.as_deref()
+                                == Some(member.declaring_class.name.as_str()))
+                })
+                .map(|member| self.surface_member_completion(member))
+                .collect(),
+        }
     }
 
     fn class_member_completions(
         &self,
-        class_name: &str,
+        receiver: &ClassType<ResolvedType>,
         writable: bool,
         context: &MemberReceiver,
     ) -> Vec<SemanticCompletion> {
+        if let Some(surface) = self
+            .class_member_surfaces
+            .iter()
+            .find(|surface| surface.receiver == *receiver)
+        {
+            return surface
+                .members
+                .iter()
+                .filter(|member| {
+                    surface.valid
+                        && matches!(
+                            member.kind,
+                            CompilerMemberKind::InstanceMethod
+                                | CompilerMemberKind::InstanceProperty
+                                | CompilerMemberKind::PromotedProperty
+                        )
+                        && (member.kind != CompilerMemberKind::InstanceMethod
+                            || writable
+                            || !member.writable)
+                        && (member.access == MemberAccess::External
+                            || context.current_class.as_deref()
+                                == Some(member.declaring_class.name.as_str()))
+                })
+                .map(|member| self.surface_member_completion(member))
+                .collect();
+        }
         let mut completions = Vec::new();
-        let mut current = Some(class_name);
+        let mut current = Some(receiver.name.as_str());
         let mut visited = HashSet::new();
         while let Some(class_name) = current {
             if !visited.insert(class_name) {
@@ -1306,6 +1742,36 @@ impl AnalysisSnapshot {
         let mut labels = HashSet::new();
         completions.retain(|completion| labels.insert(completion.label.clone()));
         completions
+    }
+
+    fn surface_member_completion(&self, member: &ClassMemberSurfaceEntry) -> SemanticCompletion {
+        let mut completion = class_surface_member_completion(member, &HashMap::new());
+        if let Some(documentation) = self
+            .class_members
+            .get(&member.declaring_class.name)
+            .and_then(|members| {
+                members
+                    .iter()
+                    .find(|candidate| candidate.completion.label == member.name)
+            })
+            .and_then(|member| member.completion.documentation.as_ref())
+        {
+            append_documentation(&mut completion.documentation, documentation);
+        }
+        if let Some(origin) = self
+            .composition_origins
+            .iter()
+            .find(|origin| origin.id == member.declaration.expansion)
+        {
+            append_documentation(
+                &mut completion.documentation,
+                &format!(
+                    "Composed from `{}` into `{}`.",
+                    origin.trait_type, origin.composing_class
+                ),
+            );
+        }
+        completion
     }
 
     pub(crate) fn local_completions_at_offset(&self, offset: usize) -> Vec<LocalCompletion> {
@@ -1337,25 +1803,49 @@ impl AnalysisSnapshot {
         completions
     }
 
-    pub(crate) fn signature_help_at_offset(&self, offset: usize) -> Option<SignatureHelp> {
+    pub(crate) fn signature_help_at_offset(&self, offset: usize) -> Option<Vec<SignatureHelp>> {
+        if let Some(items) = self
+            .recovered_composition
+            .as_ref()
+            .and_then(|view| view.signatures(offset))
+        {
+            return Some(items);
+        }
+        let mut signatures = self
+            .call_contexts_at_offset(offset)?
+            .into_iter()
+            .filter_map(|context| self.present_call(context))
+            .map(|call| call.signature_help(offset))
+            .collect::<Vec<_>>();
+        signatures.sort();
+        signatures.dedup();
+        (!signatures.is_empty()).then_some(signatures)
+    }
+
+    fn call_contexts_at_offset(&self, offset: usize) -> Option<Vec<&CallSignatureContext>> {
         let context = self
             .call_signatures
             .iter()
             .filter(|context| context.span.start <= offset && offset <= context.span.end)
             .min_by_key(|context| context.span.end.saturating_sub(context.span.start))?;
+        Some(
+            self.call_signatures
+                .iter()
+                .filter(|candidate| candidate.span.authored() == context.span.authored())
+                .collect(),
+        )
+    }
+
+    fn present_call(&self, context: &CallSignatureContext) -> Option<PresentedCall> {
         let symbol = self.symbols.get(context.symbol)?;
-        let active_parameter = context
-            .arguments
-            .iter()
-            .find(|argument| offset <= argument.span.end)
-            .map(|argument| argument.parameter)
-            .unwrap_or(context.arguments.len());
-        Some(SignatureHelp {
+        Some(PresentedCall {
+            span: context.span,
+            arguments: context.arguments.clone(),
             label: context
                 .signature
                 .clone()
                 .unwrap_or_else(|| symbol.signature.clone()),
-            active_parameter,
+            parameter_names: symbol.parameter_names.clone(),
         })
     }
 
@@ -1363,35 +1853,22 @@ impl AnalysisSnapshot {
         &self,
         offset: usize,
     ) -> Option<Vec<SemanticCompletion>> {
-        let context = self
-            .call_signatures
-            .iter()
-            .filter(|context| context.span.start <= offset && offset <= context.span.end)
-            .min_by_key(|context| context.span.end.saturating_sub(context.span.start))?;
-        let symbol = self.symbols.get(context.symbol)?;
-        let supplied = context
-            .arguments
-            .iter()
-            .filter(|argument| argument.span.start < offset)
-            .map(|argument| argument.parameter)
-            .collect::<HashSet<_>>();
-        Some(
-            symbol
-                .parameter_names
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| !supplied.contains(index))
-                .map(|(_, name)| SemanticCompletion {
-                    label: format!("{name}:"),
-                    kind: 5,
-                    detail: format!(
-                        "Named argument for {}",
-                        context.signature.as_ref().unwrap_or(&symbol.signature)
-                    ),
-                    documentation: None,
-                })
-                .collect(),
-        )
+        if let Some(items) = self
+            .recovered_composition
+            .as_ref()
+            .and_then(|view| view.named_arguments(offset))
+        {
+            return Some(items);
+        }
+        let mut completions = Vec::new();
+        for context in self.call_contexts_at_offset(offset)? {
+            if let Some(call) = self.present_call(context) {
+                completions.extend(call.named_arguments(offset));
+            }
+        }
+        completions.sort();
+        completions.dedup();
+        Some(completions)
     }
 
     pub(crate) fn reference_spans_at_offset(
@@ -1937,6 +2414,7 @@ impl<'a> SnapshotBuilder<'a> {
         self.collect_declarations(program);
         self.collect_semantic_only_declarations();
         self.collect_references(program);
+        self.collect_composed_references();
         self.resolve_named_argument_references();
         self.collect_attribute_facts(program);
         self.collect_semantic_hovers();
@@ -1996,6 +2474,26 @@ impl<'a> SnapshotBuilder<'a> {
                 .semantic_info
                 .map(|info| info.contracts.clone())
                 .unwrap_or_default(),
+            composition_origins: self
+                .semantic_info
+                .map(|info| info.composition.origins.clone())
+                .unwrap_or_default(),
+            composition_obligations: self.semantic_info.map(|info| info.composition.obligations.clone()).unwrap_or_default(),
+            class_member_surfaces: self
+                .semantic_info
+                .map(|info| info.class_member_surfaces.clone())
+                .unwrap_or_default(),
+            trait_adaptations: program.items.iter().filter_map(|item| match item {
+                Item::Class(class) => Some(&class.members),
+                Item::Trait(declaration) => Some(&declaration.members),
+                _ => None,
+            }).flatten().filter_map(|member| match member {
+                ClassMember::Uses(uses) => Some(&uses.adaptations),
+                _ => None,
+            }).flatten().filter(|adaptation| adaptation.method.span.source == self.source_id).cloned().collect(),
+            trait_adaptation_surfaces: self.semantic_info.map(|info| info.trait_adaptation_surfaces.clone()).unwrap_or_default(),
+            composition_rename: self.semantic_info.map(|info| info.composition_rename.clone()).unwrap_or_default(),
+            recovered_composition: None,
             source_id: self.source_id,
             compilation_context: CompilationContext::default(),
             global_symbols: GlobalSymbolFacts::default(),
@@ -2357,7 +2855,7 @@ impl<'a> SnapshotBuilder<'a> {
                         && token.span.end <= declaration_span.end
                         && matches!(&token.kind, TokenKind::Variable(name) if name == declaration_name)
                 })
-                .map_or(declaration_span, |token| token.span);
+                .map_or(declaration_span, |token| token.span.in_expansion(declaration_span.expansion));
             hovers.push(SemanticHover::new(hover_span, markdown.clone()));
             let mut use_spans = info
                 .binding_resolution
@@ -2376,7 +2874,7 @@ impl<'a> SnapshotBuilder<'a> {
         }
 
         let mut closures = info.closures.values().collect::<Vec<_>>();
-        closures.sort_by_key(|closure| (closure.closure_id.start, closure.closure_id.end));
+        closures.sort_by_key(|closure| closure.closure_id);
         for closure in closures
             .into_iter()
             .filter(|closure| closure.closure_id.source == self.source_id)
@@ -2385,7 +2883,8 @@ impl<'a> SnapshotBuilder<'a> {
                 closure.closure_id.source,
                 closure.closure_id.start,
                 closure.closure_id.end,
-            );
+            )
+            .in_expansion(closure.closure_id.expansion);
             let target_capabilities = self.target_capabilities_for(closure_span);
             let ownership = info.closure_ownership.get(&closure.closure_id);
             let signature = display_function_type_with_effects(
@@ -2610,9 +3109,9 @@ impl<'a> SnapshotBuilder<'a> {
             ));
         }
         let documentation = if kind == "interface" {
-            "Nominal interface declaration. Checked requirements govern owned and borrowed interface values, erased calls, narrowing, and shared payload views. Core-contract operations and public iteration are implemented. Trait composition remains a later implementation boundary."
+            "Nominal interface declaration. Checked requirements govern owned and borrowed interface values, erased calls, narrowing, and shared payload views. Selected trait members can satisfy interface requirements; conformance is checked after composition."
         } else {
-            "Compile-time trait declaration. Composer-dependent members and trait composition require Stage 35 Slice 4."
+            "Compile-time trait declaration. Members are specialized in each composing class; aliases retain separate identities and requirements are checked against the selected implementation."
         };
         let symbol = self.add_declaration_symbol(
             span,
@@ -2985,6 +3484,13 @@ impl<'a> SnapshotBuilder<'a> {
             constant.name_span,
             true,
         );
+        if let Some(occurrence) = self
+            .member_occurrences
+            .last_mut()
+            .filter(|occurrence| occurrence.span == constant.name_span)
+        {
+            occurrence.exact_declaration = Some(constant.span);
+        }
     }
 
     fn collect_authored_property(
@@ -3280,7 +3786,12 @@ impl<'a> SnapshotBuilder<'a> {
                 } else {
                     "a readonly source loan from"
                 };
-                append_documentation(documentation, &format!("**{label}:** Retains {access} {source}. The source must outlive the result."));
+                append_documentation(
+                    documentation,
+                    &format!(
+                        "**{label}:** Retains {access} {source}. The source must outlive the result."
+                    ),
+                );
             }
         }
     }
@@ -3668,6 +4179,164 @@ impl<'a> SnapshotBuilder<'a> {
         true
     }
 
+    fn record_class_call(
+        &mut self,
+        span: Span,
+        member_span: Span,
+        args: &[doriac::ast::Argument],
+    ) -> bool {
+        let Some(info) = self.semantic_info else {
+            return false;
+        };
+        let Some(CallableTarget::Method {
+            class_type,
+            method_name,
+            ..
+        }) = info.call_target(span)
+        else {
+            return false;
+        };
+        let Some(member) = info
+            .class_member_surface(class_type)
+            .filter(|surface| surface.valid)
+            .and_then(|surface| {
+                surface
+                    .members
+                    .iter()
+                    .find(|member| &member.name == method_name)
+            })
+        else {
+            return false;
+        };
+        let Some(signature) = &member.signature else {
+            return false;
+        };
+        let bindings = info
+            .generic_call_specializations
+            .get(&span)
+            .map(|specialization| {
+                member
+                    .generic_parameters
+                    .iter()
+                    .zip(&specialization.arguments)
+                    .map(|(parameter, argument)| {
+                        let doriac::semantics::GenericArgument::Type(ty) = argument;
+                        (parameter.name.clone(), ty.clone())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut completion = class_surface_member_completion(member, &bindings);
+        if let Some(origin) = info.composition.origin(member.declaration) {
+            append_documentation(
+                &mut completion.documentation,
+                &format!(
+                    "Composed from `{}` into `{}`.",
+                    origin.trait_type, origin.composing_class
+                ),
+            );
+        }
+        let parameter_names = signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.name.clone())
+            .collect();
+        let symbol = self
+            .callable_declarations
+            .get(&member.declaration)
+            .copied()
+            .unwrap_or_else(|| {
+                let symbol =
+                    self.add_metadata_symbol(completion.detail.clone(), None, SymbolKind::Plain);
+                self.symbols[symbol].parameter_names = parameter_names;
+                symbol
+            });
+        let mut documentation = self.symbols[symbol].documentation.clone();
+        if let Some(extra) = completion.documentation {
+            if !documentation
+                .as_ref()
+                .is_some_and(|documentation| documentation.contains(&extra))
+            {
+                append_documentation(&mut documentation, &extra);
+            }
+        }
+        let mut markdown = format!("```doria\n{}\n```", completion.detail);
+        if let Some(documentation) = documentation {
+            markdown.push_str(&format!("\n\n{documentation}"));
+        }
+        if let Some(parent_hover) = self.semantic_hovers.iter_mut().find(|hover| {
+            hover.span == member_span
+                && info
+                    .method_call_targets
+                    .get(&span)
+                    .is_some_and(|target| target.direct_parent)
+        }) {
+            markdown.push_str(&format!("\n\n{}", parent_hover.markdown));
+            parent_hover.markdown = markdown;
+        } else {
+            self.semantic_hovers
+                .push(SemanticHover::new(member_span, markdown));
+        }
+        self.record_reference(member_span, symbol);
+        self.record_call_signature(span, args, symbol);
+        self.call_signatures
+            .last_mut()
+            .expect("recorded class call")
+            .signature = Some(completion.detail);
+        true
+    }
+
+    fn record_class_value_reference(
+        &mut self,
+        receiver: &ClassType<ResolvedType>,
+        name: &str,
+        access_span: Span,
+        member_span: Span,
+    ) -> bool {
+        let Some(info) = self.semantic_info else {
+            return false;
+        };
+        if info.expression_type(access_span).is_none() {
+            return false;
+        }
+        let Some(member) = info
+            .class_member_surface(receiver)
+            .filter(|surface| surface.valid)
+            .and_then(|surface| {
+                surface
+                    .members
+                    .iter()
+                    .find(|member| member.name == name && member.signature.is_none())
+            })
+        else {
+            return false;
+        };
+        let kind = if member.kind == CompilerMemberKind::Constant {
+            MemberKind::Constant
+        } else {
+            MemberKind::Property
+        };
+        let completion = class_surface_member_completion(member, &HashMap::new());
+        self.record_member_occurrence(&member.declaring_class.name, name, kind, member_span, false);
+        if let Some(occurrence) = self
+            .member_occurrences
+            .last_mut()
+            .filter(|occurrence| occurrence.span == member_span)
+        {
+            occurrence.exact_declaration = Some(member.declaration);
+        }
+        let mut markdown = format!("```doria\n{}\n```", completion.detail);
+        if let Some(origin) = info.composition.origin(member.declaration) {
+            markdown.push_str(&format!(
+                "\n\nComposed from `{}` into `{}`.",
+                origin.trait_type, origin.composing_class
+            ));
+        }
+        self.semantic_hovers
+            .push(SemanticHover::new(member_span, markdown));
+        true
+    }
+
     fn declaration_name_span(
         &self,
         declaration_span: Span,
@@ -3737,7 +4406,12 @@ impl<'a> SnapshotBuilder<'a> {
                 Item::Trait(trait_decl) => {
                     for member in &trait_decl.members {
                         if let ClassMember::Method(method) = member {
-                            self.visit_function_body(method, Some(&trait_decl.name), None);
+                            if !self.semantic_info.is_some_and(|info| info.composition.origins.iter().any(|origin|
+                                origin.authored_declaration == method.span
+                                    && info.composition.class(&origin.composing_class).is_some_and(|class|
+                                        class.members.iter().any(|member| matches!(member, ClassMember::Method(selected) if selected.span == origin.declaration))))) {
+                                self.visit_function_body(method, Some(&trait_decl.name), None);
+                            }
                         }
                     }
                 }
@@ -3752,6 +4426,52 @@ impl<'a> SnapshotBuilder<'a> {
             }
         }
         self.pop_local_scope();
+    }
+
+    fn collect_composed_references(&mut self) {
+        let Some(info) = self.semantic_info else {
+            return;
+        };
+        let mut classes = info
+            .composition
+            .origins
+            .iter()
+            .filter(|origin| origin.authored_declaration.source == self.source_id)
+            .map(|origin| origin.composing_class.as_str())
+            .collect::<Vec<_>>();
+        classes.sort();
+        classes.dedup();
+        for name in classes {
+            let Some(class) = info.composition.class(name) else {
+                continue;
+            };
+            let parent = class.parent.as_ref().map(AstTypeName::ast_type_name);
+            for member in &class.members {
+                match member {
+                    ClassMember::Method(method)
+                        if method.span.source == self.source_id
+                            && method.span != method.span.authored() =>
+                    {
+                        self.visit_function_body(method, Some(name), parent);
+                    }
+                    ClassMember::Property(property)
+                        if property.span.source == self.source_id
+                            && property.span != property.span.authored() =>
+                    {
+                        if let Some(initializer) = &property.initializer {
+                            self.visit_expr(initializer, Some(name), parent);
+                        }
+                    }
+                    ClassMember::Constant(constant)
+                        if constant.span.source == self.source_id
+                            && constant.span != constant.span.authored() =>
+                    {
+                        self.visit_expr(&constant.initializer, Some(name), parent);
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     fn visit_function_body(
@@ -4264,7 +4984,7 @@ impl<'a> SnapshotBuilder<'a> {
                     self.visit_expr(&argument.value, current_class, parent_class);
                 }
                 let method_span =
-                    self.member_name_span(Span::new(object.span().end, span.end), method);
+                    self.member_name_span(span.at(object.span().end, span.end), method);
                 self.record_member_receiver(method_span, object, current_class);
                 let builtin_hover = self.semantic_info.and_then(|info| {
                     if let Some(algorithm) = info.list_algorithm_calls.get(span) {
@@ -4327,6 +5047,11 @@ impl<'a> SnapshotBuilder<'a> {
                 {
                     self.record_method_call_occurrence(class_name, method, *span, method_span);
                 }
+                if method_span
+                    .is_some_and(|member_span| self.record_class_call(*span, member_span, args))
+                {
+                    return;
+                }
                 if let Some(class_name) = resolved_class.as_deref() {
                     if let Some(symbol) = self.resolve_method(class_name, method) {
                         if let Some(method_span) = method_span {
@@ -4374,6 +5099,12 @@ impl<'a> SnapshotBuilder<'a> {
                 span,
                 ..
             } => {
+                self.record_class_static_receiver(
+                    qualifier,
+                    *qualifier_span,
+                    *member_span,
+                    current_class,
+                );
                 if matches!(qualifier, StaticQualifier::Parent) {
                     self.hierarchy_semantic_tokens.push((
                         *qualifier_span,
@@ -4395,7 +5126,7 @@ impl<'a> SnapshotBuilder<'a> {
                 if matches!(qualifier, StaticQualifier::Class(class) if class == "String") {
                     if let (Some(member), Some(method_span)) = (
                         string_companion_method(method),
-                        self.member_name_span(Span::new(qualifier_span.end, span.end), method),
+                        self.member_name_span(span.at(qualifier_span.end, span.end), method),
                     ) {
                         self.add_reference_symbol(
                             method_span,
@@ -4429,7 +5160,7 @@ impl<'a> SnapshotBuilder<'a> {
                         StaticQualifier::InvalidStatic => None,
                     };
                     if let (Some(method_span), Some(class_name)) = (
-                        self.member_name_span(Span::new(qualifier_span.end, span.end), method),
+                        self.member_name_span(span.at(qualifier_span.end, span.end), method),
                         class_name,
                     ) {
                         self.record_missing_callable(
@@ -4445,15 +5176,20 @@ impl<'a> SnapshotBuilder<'a> {
                     }
                 }
                 let method_span =
-                    self.member_name_span(Span::new(qualifier_span.end, span.end), method);
+                    self.member_name_span(span.at(qualifier_span.end, span.end), method);
                 if let (Some(class_name), Some(method_span)) = (class_name.as_deref(), method_span)
                 {
                     self.record_method_call_occurrence(class_name, method, *span, method_span);
                 }
+                if method_span
+                    .is_some_and(|member_span| self.record_class_call(*span, member_span, args))
+                {
+                    return;
+                }
                 if let Some(class_name) = class_name.as_deref() {
                     if let Some(symbol) = self.resolve_method(class_name, method) {
                         if let Some(method_span) =
-                            self.member_name_span(Span::new(qualifier_span.end, span.end), method)
+                            self.member_name_span(span.at(qualifier_span.end, span.end), method)
                         {
                             self.record_reference(method_span, symbol);
                         }
@@ -4489,7 +5225,7 @@ impl<'a> SnapshotBuilder<'a> {
             } => {
                 self.visit_expr(object, current_class, parent_class);
                 let property_span =
-                    self.member_name_span(Span::new(object.span().end, span.end), property);
+                    self.member_name_span(span.at(object.span().end, span.end), property);
                 self.record_member_receiver(property_span, object, current_class);
                 let receiver = self
                     .semantic_info
@@ -4540,9 +5276,13 @@ impl<'a> SnapshotBuilder<'a> {
                     }
                     return;
                 }
-                if let (Some(class_name), Some(property_span)) =
-                    (receiver.and_then(member_receiver_class_name), property_span)
+                if let (Some(class), Some(property_span)) =
+                    (receiver.and_then(member_receiver_class_type), property_span)
                 {
+                    if self.record_class_value_reference(class, property, *span, property_span) {
+                        return;
+                    }
+                    let class_name = class.name.as_str();
                     if self
                         .semantic_info
                         .is_some_and(|info| info.expression_type(*span).is_some())
@@ -4637,8 +5377,15 @@ impl<'a> SnapshotBuilder<'a> {
                 qualifier_span,
                 member,
                 member_span,
+                span,
                 ..
             } => {
+                self.record_class_static_receiver(
+                    qualifier,
+                    *qualifier_span,
+                    *member_span,
+                    current_class,
+                );
                 if matches!(qualifier, StaticQualifier::Parent) {
                     self.hierarchy_semantic_tokens.push((
                         *qualifier_span,
@@ -4652,6 +5399,16 @@ impl<'a> SnapshotBuilder<'a> {
                     member,
                     *member_span,
                 ) {
+                    if let Some(receiver) = self
+                        .semantic_info
+                        .and_then(|info| info.static_receiver_types.get(qualifier_span))
+                        .cloned()
+                    {
+                        if self.record_class_value_reference(&receiver, member, *span, *member_span)
+                        {
+                            return;
+                        }
+                    }
                     let owner = match qualifier {
                         StaticQualifier::Class(name) => Some(name.as_str()),
                         StaticQualifier::SelfType => current_class,
@@ -4877,7 +5634,8 @@ impl<'a> SnapshotBuilder<'a> {
                         self.source_id,
                         reference.source_span.start,
                         reference.source_span.start + doriac::compiler_known_test::NAMESPACE.len(),
-                    ),
+                    )
+                    .in_expansion(reference.source_span.expansion),
                     compiler_test_module_hover().to_string(),
                 ));
             }
@@ -5129,7 +5887,8 @@ impl<'a> SnapshotBuilder<'a> {
         self.record_reference(qualifier_span, enum_symbol);
         self.static_receivers.push(StaticReceiver {
             span: member_span,
-            enum_name: enum_name.clone(),
+            receiver: StaticReceiverKind::Enum(enum_name.clone()),
+            current_class: None,
         });
         if let Some(case_symbol) = self
             .enum_cases
@@ -5140,6 +5899,31 @@ impl<'a> SnapshotBuilder<'a> {
         }
         self.record_member_occurrence(enum_name, member, MemberKind::EnumCase, member_span, false);
         true
+    }
+
+    fn record_class_static_receiver(
+        &mut self,
+        qualifier: &StaticQualifier,
+        qualifier_span: Span,
+        member_span: Span,
+        current_class: Option<&str>,
+    ) {
+        if let Some(receiver) = self
+            .semantic_info
+            .and_then(|info| info.static_receiver_types.get(&qualifier_span))
+        {
+            let current_class = current_class
+                .and_then(|name| self.member_owner(name, member_span, true))
+                .map(|owner| owner.qualified_name);
+            self.static_receivers.push(StaticReceiver {
+                span: member_span,
+                receiver: StaticReceiverKind::Class {
+                    receiver: receiver.clone(),
+                    parent: matches!(qualifier, StaticQualifier::Parent),
+                },
+                current_class,
+            });
+        }
     }
 
     fn member_name_span(&self, search_span: Span, name: &str) -> Option<Span> {
@@ -5165,7 +5949,9 @@ impl<'a> SnapshotBuilder<'a> {
         self.member_receivers.push(MemberReceiver {
             span,
             receiver,
-            current_class: current_class.map(ToOwned::to_owned),
+            current_class: current_class
+                .and_then(|name| self.member_owner(name, span, true))
+                .map(|owner| owner.qualified_name),
             writable_payload_access: !is_readonly_shared_projection(object, self.semantic_info),
         });
     }
@@ -5366,16 +6152,41 @@ fn interface_requirement_signature(
     requirement: &RequirementFacts,
     bindings: &HashMap<String, ResolvedType>,
 ) -> String {
+    format!(
+        "{}{}",
+        if requirement.writable_receiver {
+            "writable "
+        } else {
+            ""
+        },
+        semantic_callable_signature(
+            &requirement.name,
+            &requirement.generic_parameters,
+            &requirement.signature,
+            &requirement.checked_effects,
+            bindings
+        )
+    )
+}
+
+fn semantic_callable_signature(
+    name: &str,
+    generic_parameters: &[doriac::ast::TypeParamDecl],
+    signature: &CallableSignatureSemanticInfo,
+    checked_effects: &[ResolvedType],
+    bindings: &HashMap<String, ResolvedType>,
+) -> String {
     let display = |ty: &ResolvedType| {
         display_resolved_type(&doriac::types::substitute_resolved_type(ty, bindings))
     };
-    let parameters = requirement
-        .signature
+    let parameters = signature
         .parameters
         .iter()
         .map(|parameter| {
             let mode = if parameter.take {
                 "take "
+            } else if parameter.borrow {
+                "borrow "
             } else if parameter.writable {
                 "writable "
             } else {
@@ -5385,18 +6196,12 @@ fn interface_requirement_signature(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    let writable = if requirement.writable_receiver {
-        "writable "
-    } else {
-        ""
-    };
-    let effects = if requirement.checked_effects.is_empty() {
+    let effects = if checked_effects.is_empty() {
         String::new()
     } else {
         format!(
             " throws {}",
-            requirement
-                .checked_effects
+            checked_effects
                 .iter()
                 .map(display)
                 .collect::<Vec<_>>()
@@ -5404,20 +6209,129 @@ fn interface_requirement_signature(
         )
     };
     format!(
-        "{writable}function {}{}({parameters}): {}{effects}",
-        requirement.name,
-        type_parameter_signature(&requirement.generic_parameters),
-        display(&requirement.signature.return_type)
+        "function {name}{}({parameters}): {}{effects}",
+        type_parameter_signature(generic_parameters),
+        display(&signature.return_type)
     )
+}
+
+fn class_surface_member_completion(
+    member: &ClassMemberSurfaceEntry,
+    bindings: &HashMap<String, ResolvedType>,
+) -> SemanticCompletion {
+    let mut modifiers = Vec::new();
+    if member.access == MemberAccess::Internal {
+        modifiers.push("internal");
+    }
+    if member.is_open {
+        modifiers.push("open");
+    }
+    if member.is_override {
+        modifiers.push("override");
+    }
+    if matches!(
+        member.kind,
+        CompilerMemberKind::StaticMethod | CompilerMemberKind::StaticProperty
+    ) {
+        modifiers.push("static");
+    }
+    if member.writable {
+        modifiers.push("writable");
+    }
+    let prefix = if modifiers.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", modifiers.join(" "))
+    };
+    let (kind, signature) = if let Some(signature) = &member.signature {
+        let owner = display_resolved_type(&ResolvedType::Class(member.declaring_class.clone()));
+        (
+            2,
+            semantic_callable_signature(
+                &format!("{owner}::{}", member.name),
+                &member.generic_parameters,
+                signature,
+                &member.checked_effects,
+                bindings,
+            ),
+        )
+    } else {
+        let ty = member
+            .ty
+            .as_ref()
+            .map(display_resolved_type)
+            .unwrap_or_default();
+        if member.kind == CompilerMemberKind::Constant {
+            (21, format!("const {ty} {}", member.name))
+        } else {
+            (10, format!("{ty} ${}", member.name))
+        }
+    };
+    SemanticCompletion {
+        label: member.name.clone(),
+        kind,
+        detail: format!("{prefix}{signature}"),
+        documentation: callable_details_documentation(
+            member.signature.as_ref(),
+            member.return_borrow,
+            &member.automatic_effects,
+        ),
+    }
+}
+
+fn callable_details_documentation(
+    signature: Option<&CallableSignatureSemanticInfo>,
+    return_borrow: Option<doriac::symbols::ReturnBorrow>,
+    automatic_effects: &[ResolvedType],
+) -> Option<String> {
+    let mut documentation = signature
+        .map(|signature| {
+            let mut documentation = callable_return_documentation(signature, return_borrow);
+            let defaults = signature
+                .parameters
+                .iter()
+                .filter(|parameter| parameter.has_default)
+                .map(|parameter| format!("`${}`", parameter.name))
+                .collect::<Vec<_>>();
+            if !defaults.is_empty() {
+                documentation.push_str(&format!(
+                    "\n\nDefault arguments available for {}.",
+                    defaults.join(", ")
+                ));
+            }
+            documentation.trim().to_string()
+        })
+        .filter(|documentation| !documentation.is_empty());
+    let profile = doriac::CheckedEffectProfile::classify(automatic_effects.iter().cloned());
+    for effects in [
+        ambient_effect_documentation(&profile.ambient),
+        test_assertion_effect_documentation(&profile.test_assertion),
+    ] {
+        if !effects.is_empty() {
+            append_documentation(&mut documentation, effects.trim());
+        }
+    }
+    documentation
 }
 
 fn interface_requirement_documentation(requirement: &RequirementFacts) -> String {
     let mut documentation = "Declared requirement. Erased calls use this contract, not implementation-only defaults. Checked dispatch preserves automatic I/O and TestAssertion transport without adding authored throws.".to_string();
-    if let Some(borrow) = requirement.return_borrow {
+    documentation.push_str(&callable_return_documentation(
+        &requirement.signature,
+        requirement.return_borrow,
+    ));
+    documentation
+}
+
+fn callable_return_documentation(
+    signature: &CallableSignatureSemanticInfo,
+    borrow: Option<doriac::symbols::ReturnBorrow>,
+) -> String {
+    let mut documentation = String::new();
+    if let Some(borrow) = borrow {
         let source = match borrow.source {
             doriac::symbols::BorrowSource::Receiver => "the receiver".to_string(),
-            doriac::symbols::BorrowSource::Parameter(index) => requirement
-                .signature
+            doriac::symbols::BorrowSource::Parameter(index) => signature
                 .parameters
                 .get(index)
                 .map(|parameter| format!("`${}`", parameter.name))
@@ -5431,10 +6345,7 @@ fn interface_requirement_documentation(requirement: &RequirementFacts) -> String
                 "readonly"
             }
         ));
-    } else if matches!(
-        requirement.signature.return_type,
-        ResolvedType::InterfaceSelf(_)
-    ) {
+    } else if matches!(signature.return_type, ResolvedType::InterfaceSelf(_)) {
         documentation.push_str(
             "\n\nReturns a new owned value of the same exact dynamic implementing class.",
         );
@@ -5895,11 +6806,7 @@ fn foreach_binding_hovers(
         .values()
         .filter(|declaration| declaration.kind == kind)
         .filter_map(|declaration| declaration.span.map(|span| (declaration, span)))
-        .filter(|(_, span)| {
-            span.source == source_id
-                && binding_span.start <= span.start
-                && span.end <= binding_span.end
-        })
+        .filter(|(_, span)| binding_span.contains(*span))
         .min_by_key(|(declaration, span)| (span.start, span.end, declaration.id))
         .map(|(declaration, _)| declaration)
     else {
@@ -5933,15 +6840,19 @@ fn foreach_binding_hovers(
 }
 
 fn member_receiver_class_name(ty: &ResolvedType) -> Option<&str> {
+    member_receiver_class_type(ty).map(|class| class.name.as_str())
+}
+
+fn member_receiver_class_type(ty: &ResolvedType) -> Option<&ClassType<ResolvedType>> {
     match non_nullable_type(ty) {
-        ResolvedType::Class(class) => Some(&class.name),
+        ResolvedType::Class(class) => Some(class),
         ResolvedType::SharedHandle(
             SharedHandleKind::SharedReference
             | SharedHandleKind::ReadonlySharedReferenceAccess
             | SharedHandleKind::WritableSharedReferenceAccess,
             payload,
         ) => match non_nullable_type(payload) {
-            ResolvedType::Class(class) => Some(&class.name),
+            ResolvedType::Class(class) => Some(class),
             _ => None,
         },
         _ => None,
@@ -6323,7 +7234,9 @@ fn behavioral_test_hover(
     display_name: &str,
     context: Option<&SourceSemanticContext>,
 ) -> String {
-    let mut hover = format!("**{kind}:** `{display_name}`\n\nCompiler-owned test metadata preserves the authored source range and suite hierarchy.");
+    let mut hover = format!(
+        "**{kind}:** `{display_name}`\n\nCompiler-owned test metadata preserves the authored source range and suite hierarchy."
+    );
     if context.is_some_and(|context| context.origin == doriac::build_plan::SourceOrigin::Generated)
     {
         hover.push_str("\n\n**Provenance:** Generated development source. Navigation is available, but editor writes and rename are disabled.");
@@ -6661,8 +7574,7 @@ fn constructor_parameter_documentation(
                 .iter()
                 .flat_map(|class| &class.properties)
                 .find(|property| {
-                    property.declaring_class == *declaring_class
-                        && property.name == *property_name
+                    property.declaring_class == *declaring_class && property.name == *property_name
                 })
                 .map_or("Compiler-resolved", |property| {
                     if property.writable {
@@ -6725,7 +7637,9 @@ fn type_parameter_signature(parameters: &[doriac::ast::TypeParamDecl]) -> String
     let parameters = parameters
         .iter()
         .map(|parameter| {
-            let mut rendered = parameter.name.clone();
+            let mut rendered =
+                doriac::trait_composition::authored_type_parameter_name(&parameter.name)
+                    .to_string();
             if !parameter.constraints.is_empty() {
                 rendered.push_str(" implements ");
                 rendered.push_str(
@@ -6754,7 +7668,9 @@ fn type_parameter_override_signature(parameters: &[doriac::ast::TypeParamDecl]) 
     let parameters = parameters
         .iter()
         .map(|parameter| {
-            let mut rendered = parameter.name.clone();
+            let mut rendered =
+                doriac::trait_composition::authored_type_parameter_name(&parameter.name)
+                    .to_string();
             if !parameter.constraints.is_empty() {
                 rendered.push_str(" implements ");
                 rendered.push_str(
@@ -6812,8 +7728,16 @@ fn class_hierarchy_documentation(
     format!(
         "**Direct Parent:** `{parent}`\n\n**Known Hierarchy Role:** {role}\n\n**Hierarchy Depth:** {}\n\n**Subclassing:** {}\n\n**Runtime Representation:** {}",
         hierarchy.ancestors.len(),
-        if hierarchy.is_open { "Permitted" } else { "Closed" },
-        if hierarchy.is_open { "Open Class" } else { "Closed Class" },
+        if hierarchy.is_open {
+            "Permitted"
+        } else {
+            "Closed"
+        },
+        if hierarchy.is_open {
+            "Open Class"
+        } else {
+            "Closed Class"
+        },
     )
 }
 
@@ -6938,13 +7862,13 @@ fn tokens_in_span(tokens: &[Token], span: Span) -> impl Iterator<Item = &Token> 
 fn find_identifier_span(tokens: &[Token], span: Span, name: &str) -> Option<Span> {
     tokens_in_span(tokens, span)
         .find(|token| identifier_is(token, name))
-        .map(|token| token.span)
+        .map(|token| token.span.in_expansion(span.expansion))
 }
 
 fn find_variable_span(tokens: &[Token], span: Span, name: &str) -> Option<Span> {
     tokens_in_span(tokens, span)
         .find(|token| matches!(&token.kind, TokenKind::Variable(variable) if variable == name))
-        .map(|token| token.span)
+        .map(|token| token.span.in_expansion(span.expansion))
 }
 
 fn identifier_is(token: &Token, name: &str) -> bool {
@@ -6960,7 +7884,10 @@ fn span_contains(span: Span, offset: usize) -> bool {
 }
 
 fn spans_overlap(left: Span, right: Span) -> bool {
-    left.start < right.end && right.start < left.end
+    left.source == right.source
+        && left.expansion == right.expansion
+        && left.start < right.end
+        && right.start < left.end
 }
 
 fn diagnostic_overlaps_span(diagnostic: &Diagnostic, span: Span) -> bool {
@@ -6973,6 +7900,129 @@ fn diagnostic_overlaps_span(diagnostic: &Diagnostic, span: Span) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composed_completions_use_the_selected_specialized_member_surface() {
+        let source = include_str!("../../editors/fixtures/stage35-contracts.doria");
+        let snapshot = AnalysisSnapshot::analyze("contracts.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        for (call, parameter_type, has_alias) in [
+            ("$report->render(1)", "int", true),
+            ("$text->render(\"value\")", "string", false),
+        ] {
+            let offset = source.find(call).unwrap() + call.find("render").unwrap();
+            let members = snapshot.member_completions_at_offset(offset).unwrap();
+            let renders = members
+                .iter()
+                .filter(|member| member.label == "render")
+                .collect::<Vec<_>>();
+            assert_eq!(renders.len(), 1, "{members:?}");
+            assert!(
+                renders[0]
+                    .detail
+                    .contains(&format!("{parameter_type} $value")),
+                "{renders:?}"
+            );
+            assert_eq!(
+                has_alias,
+                members
+                    .iter()
+                    .any(|member| member.label == "renderAlternative"),
+                "{members:?}"
+            );
+            assert!(
+                members.iter().any(|member| member.label == "count"),
+                "{members:?}"
+            );
+            for hidden in ["debug", "traceAlternative", "typeLabel", "LABEL"] {
+                assert!(
+                    !members.iter().any(|member| member.label == hidden),
+                    "{members:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn composed_source_hovers_are_contextual_and_order_independent() {
+        let source = "trait Values<T> { function value(T $value): T { return $value; } function again(T $value): T { return $this->value($value); } static function staticValue(T $value): T { return $value; } static function againStatic(T $value): T { return self::staticValue($value); } } class First { uses Values<int>; } class Second { uses Values<string>; }";
+        let mut snapshot = AnalysisSnapshot::analyze("contexts.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        let offset = source.find("->value").unwrap() + 2;
+        let first = snapshot.semantic_hover_at_offset(offset).unwrap();
+        for expected in [
+            "First::again",
+            "Second::again",
+            "int $value): int",
+            "string $value): string",
+        ] {
+            assert!(first.markdown.contains(expected), "{first:?}");
+        }
+        assert_eq!(first.span.start, offset);
+        assert_eq!(first.span, first.span.authored());
+        let argument = offset + "value(".len();
+        let signatures = snapshot.signature_help_at_offset(argument).unwrap();
+        assert_eq!(signatures.len(), 2, "{signatures:?}");
+        let completions = snapshot.member_completions_at_offset(offset).unwrap();
+        let static_offset = source.find("self::staticValue").unwrap() + "self::".len();
+        let static_completions = snapshot
+            .static_completions_at_offset(static_offset)
+            .unwrap();
+        for ty in ["int", "string"] {
+            let signature = format!("{ty} $value): {ty}");
+            assert!(
+                signatures
+                    .iter()
+                    .any(|item| item.label.contains(&signature)),
+                "{signatures:?}"
+            );
+            assert!(
+                completions
+                    .iter()
+                    .any(|item| item.label == "value" && item.detail.contains(&signature)),
+                "{completions:?}"
+            );
+            assert!(
+                static_completions
+                    .iter()
+                    .any(|item| item.label == "staticValue" && item.detail.contains(&signature)),
+                "{static_completions:?}"
+            );
+        }
+        snapshot.semantic_hovers.reverse();
+        snapshot.call_signatures.reverse();
+        snapshot.member_receivers.reverse();
+        snapshot.static_receivers.reverse();
+        snapshot
+            .semantic_hovers
+            .push(snapshot.semantic_hovers[0].clone());
+        assert_eq!(
+            first.markdown,
+            snapshot.semantic_hover_at_offset(offset).unwrap().markdown
+        );
+        assert_eq!(
+            signatures,
+            snapshot.signature_help_at_offset(argument).unwrap()
+        );
+        assert_eq!(
+            completions,
+            snapshot.member_completions_at_offset(offset).unwrap()
+        );
+        assert_eq!(
+            static_completions,
+            snapshot
+                .static_completions_at_offset(static_offset)
+                .unwrap()
+        );
+    }
 
     fn hover(source: &str, needle: &str, occurrence: usize) -> SemanticHover {
         let offset = source
@@ -8678,7 +9728,7 @@ function narrow(writable Read<int> $view): void {
             .signature_help_at_offset(call + "read(".len())
             .unwrap();
         assert!(
-            signature.label.contains("read(int $value): int"),
+            signature[0].label.contains("read(int $value): int"),
             "{signature:?}"
         );
         let narrowed = source.find("$view->write").unwrap() + "$view->".len();
@@ -8751,7 +9801,7 @@ function inspect(Holder $holder): void {
         let signature = snapshot
             .signature_help_at_offset(source.find("\"chosen\"").unwrap())
             .unwrap();
-        assert_eq!(signature.active_parameter, 1);
+        assert_eq!(signature[0].active_parameter, 1);
     }
 
     #[test]
@@ -8817,9 +9867,9 @@ function inspect(Holder $holder): void {
             )
             .unwrap();
         assert!(
-            signature.label.contains("borrow List<Book>"),
+            signature[0].label.contains("borrow List<Book>"),
             "{}",
-            signature.label
+            signature[0].label
         );
 
         let erased = "interface CloneView extends Cloneable {} function inspect(CloneView $value, Iterator<Book> $cursor): void { $value->clone(); let $book = $cursor->getCurrent(); echo $book->title; } class Book { function __construct(string $title) {} }";
@@ -8843,24 +9893,63 @@ function inspect(Holder $holder): void {
     fn stage35_iterator_diagnostics_preserve_source_and_element_loans() {
         let cursor = "class Book { function __construct(string $title) {} } class Cursor implements Iterator<Book> { function __construct(borrow List<Book> $source) {} function hasCurrent(): bool { return true; } function getCurrent(): Book { return $this->source[0]; } writable function advance(): void {} }";
         for (body, code) in [
-            ("let writable $source = [new Book(\"one\")]; let $cursor = new Cursor($source); $source->add(new Book(\"two\")); echo $cursor->getCurrent()->title;", "E0763"),
-            ("let $source = [new Book(\"one\")]; let writable $cursor = new Cursor($source); let $value = $cursor->getCurrent(); $cursor->advance(); echo $value->title;", "E0477"),
+            (
+                "let writable $source = [new Book(\"one\")]; let $cursor = new Cursor($source); $source->add(new Book(\"two\")); echo $cursor->getCurrent()->title;",
+                "E0763",
+            ),
+            (
+                "let $source = [new Book(\"one\")]; let writable $cursor = new Cursor($source); let $value = $cursor->getCurrent(); $cursor->advance(); echo $value->title;",
+                "E0477",
+            ),
         ] {
-            let snapshot = AnalysisSnapshot::analyze("loans.doria", &format!("{cursor} function main(): void {{ {body} }}"));
-            assert!(snapshot.diagnostics().iter().any(|diagnostic| diagnostic.code == code), "{body}: {:?}", snapshot.diagnostics());
-            assert!(!snapshot.diagnostics().iter().any(|diagnostic| diagnostic.code == "E0759"));
+            let snapshot = AnalysisSnapshot::analyze(
+                "loans.doria",
+                &format!("{cursor} function main(): void {{ {body} }}"),
+            );
+            assert!(
+                snapshot
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == code),
+                "{body}: {:?}",
+                snapshot.diagnostics()
+            );
+            assert!(
+                !snapshot
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "E0759")
+            );
         }
     }
 
     #[test]
-    fn stage35_interface_writability_and_later_boundaries_remain_diagnostics() {
+    fn stage35_interface_writability_and_composition_conflicts_remain_diagnostics() {
         for (source, code) in [
-            ("interface Change { writable function write(): void; } function bad(Change $view): void { $view->write(); }", "E0203"),
-            ("trait Format { function read(): int { return 1; } } class Box { uses Format; }", "E0493"),
+            (
+                "interface Change { writable function write(): void; } function bad(Change $view): void { $view->write(); }",
+                "E0203",
+            ),
+            (
+                "trait First { function read(): int { return 1; } } trait Second { function read(): int { return 2; } } class Box { uses First, Second; }",
+                "E0757",
+            ),
         ] {
             let snapshot = AnalysisSnapshot::analyze("interface-boundary.doria", source);
-            assert!(snapshot.diagnostics().iter().any(|diagnostic| diagnostic.code == code), "{source}: {:?}", snapshot.diagnostics());
-            assert!(!snapshot.diagnostics().iter().any(|diagnostic| diagnostic.code == "E0758"));
+            assert!(
+                snapshot
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == code),
+                "{source}: {:?}",
+                snapshot.diagnostics()
+            );
+            assert!(
+                !snapshot
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "E0758")
+            );
         }
     }
 
@@ -9066,9 +10155,11 @@ function inspect(take FirstError $failure): void throws Error
                 "function Worker::__construct(int $id) throws FirstError",
             ),
         ] {
-            assert!(hover(source, needle, occurrence)
-                .markdown
-                .contains(expected));
+            assert!(
+                hover(source, needle, occurrence)
+                    .markdown
+                    .contains(expected)
+            );
         }
         let throw_offset = source.find("throw $failure").expect("throw statement");
         assert!(snapshot
@@ -9152,10 +10243,10 @@ function inspect(take FirstError $failure): void throws Error
             let offset = call_start + call.find(argument).expect("argument in call");
             assert_eq!(
                 snapshot.signature_help_at_offset(offset),
-                Some(SignatureHelp {
+                Some(vec![SignatureHelp {
                     label: label.to_string(),
                     active_parameter,
-                })
+                }])
             );
         }
 
@@ -9597,10 +10688,10 @@ function main(): void
                     &source,
                     offset,
                 ),
-                Some(SignatureHelp {
+                Some(vec![SignatureHelp {
                     label: "function lookup(int $id, string $name): void".to_string(),
                     active_parameter,
-                })
+                }])
             );
         }
 

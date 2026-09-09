@@ -1891,12 +1891,7 @@ fn two_clock_static_qualifiers_publish_semantic_not_parser_diagnostics() {
         "trait UsesLimit { function limit(): int { return self::MAX_DEPTH; } } \
          class Limit { const int MAX_DEPTH = 10; uses UsesLimit; }",
     );
-    assert_eq!(composition.len(), 1, "{composition:#?}");
-    assert_eq!(composition[0]["code"], "E0493");
-    assert!(composition[0]["message"]
-        .as_str()
-        .expect("message")
-        .contains("Stage 35 Slice 4"));
+    assert!(composition.is_empty(), "{composition:#?}");
 }
 
 #[test]

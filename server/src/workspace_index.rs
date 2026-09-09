@@ -3,11 +3,14 @@ use std::collections::{HashMap, HashSet};
 use doriac::ast::MemberAccess;
 use doriac::attributes::{AttributeClassIdentity, AttributeClassSchema, AttributeSchemaParameter};
 use doriac::names::{GlobalReferenceRole, GlobalSymbolId, GlobalSymbolKind, PackageIdentity};
+use doriac::semantics::composition_rename::{CompositionRenameFacts, MemberRenameTarget};
 use doriac::source::Span;
+use doriac::trait_composition::EffectiveMemberOrigin;
 
 use crate::analysis::{
-    AnalysisSnapshot, AttributeParameterIdentity, AttributeParameterSpelling, HierarchyClass,
-    HierarchyContext, HierarchyMember, MemberIdentity, MemberKind, MemberOccurrence,
+    AnalysisSnapshot, AttributeParameterIdentity, AttributeParameterSpelling,
+    ComposedSourcePresentation, HierarchyClass, HierarchyContext, HierarchyMember, MemberIdentity,
+    MemberKind, MemberOccurrence,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -153,6 +156,11 @@ pub(crate) struct OpenDocumentIndex {
     test_symbols: Vec<IndexedTestSymbol>,
     documents: HashMap<String, DocumentSummary>,
     contracts: HashMap<String, doriac::semantics::contracts::ContractFacts>,
+    composition_origins: HashMap<String, Vec<EffectiveMemberOrigin>>,
+    composition_obligations: HashMap<String, Vec<doriac::trait_composition::MethodObligation>>,
+    composition_rename: HashMap<String, CompositionRenameFacts>,
+    composed_presentations: HashMap<String, ComposedSourcePresentation>,
+    diagnostic_groups: HashMap<String, Vec<Vec<doriac::diagnostics::Diagnostic>>>,
     source_uris: HashMap<(String, doriac::source::SourceId), String>,
 }
 
@@ -212,11 +220,39 @@ impl OpenDocumentIndex {
         self.documents.get(uri)?.graphs.first().map(String::as_str)
     }
 
+    pub(crate) fn composed_presentation(&self, uri: &str) -> Option<&ComposedSourcePresentation> {
+        self.composed_presentations.get(uri)
+    }
+
+    pub(crate) fn diagnostic_groups(
+        &self,
+        uri: &str,
+    ) -> Option<&[Vec<doriac::diagnostics::Diagnostic>]> {
+        self.diagnostic_groups.get(uri).map(Vec::as_slice)
+    }
+
     pub(crate) fn add_document(&mut self, graph: &str, uri: &str, snapshot: &AnalysisSnapshot) {
+        self.composed_presentations
+            .entry(uri.to_string())
+            .or_default()
+            .add(snapshot);
+        self.diagnostic_groups
+            .entry(uri.to_string())
+            .or_default()
+            .push(snapshot.diagnostics().to_vec());
         // SourceIds and contract origins belong to an analysis graph, not a URI.
         self.contracts
             .entry(graph.to_string())
             .or_insert_with(|| snapshot.contracts().clone());
+        self.composition_origins
+            .entry(graph.to_string())
+            .or_insert_with(|| snapshot.composition_origins().to_vec());
+        self.composition_obligations
+            .entry(graph.to_string())
+            .or_insert_with(|| snapshot.composition_obligations().to_vec());
+        self.composition_rename
+            .entry(graph.to_string())
+            .or_insert_with(|| snapshot.composition_rename().clone());
         self.source_uris
             .insert((graph.to_string(), snapshot.source_id()), uri.to_string());
         self.add_graph_members(graph, uri, snapshot);
@@ -542,6 +578,19 @@ impl OpenDocumentIndex {
             });
         }
         if let Some(declaration) = target.exact_declaration {
+            if declaration != declaration.authored() {
+                return occurrence
+                    .occurrence
+                    .exact_declaration
+                    .is_some_and(|candidate| {
+                        self.same_declaration(
+                            &occurrence.graph,
+                            candidate,
+                            &target.graph,
+                            declaration,
+                        )
+                    });
+            }
             return occurrence
                 .occurrence
                 .exact_declaration
@@ -565,6 +614,10 @@ impl OpenDocumentIndex {
         right_graph: &str,
         right: Span,
     ) -> bool {
+        // Expansion identities are graph-local, even when authored locations coincide.
+        if left != left.authored() || right != right.authored() {
+            return left_graph == right_graph && left == right;
+        }
         left.start == right.start
             && left.end == right.end
             && self
@@ -634,6 +687,9 @@ impl OpenDocumentIndex {
     }
 
     fn contract_location(&self, graph: &str, declaration: Span) -> Option<IndexedLocation> {
+        if let Some(origin) = self.composition_origin(graph, declaration) {
+            return self.source_location(graph, origin.alias.unwrap_or(origin.authored_name));
+        }
         if let Some(member) = self.member_occurrences.iter().find(|member| {
             member.graph == graph
                 && member.occurrence.declaration
@@ -656,6 +712,37 @@ impl OpenDocumentIndex {
         Some(indexed_location(occurrence))
     }
 
+    fn source_location(&self, graph: &str, span: Span) -> Option<IndexedLocation> {
+        Some(IndexedLocation {
+            uri: self
+                .source_uris
+                .get(&(graph.to_string(), span.source))?
+                .clone(),
+            span: span.authored(),
+        })
+    }
+
+    fn composition_origin(&self, graph: &str, declaration: Span) -> Option<&EffectiveMemberOrigin> {
+        self.composition_origins
+            .get(graph)?
+            .iter()
+            .find(|origin| origin.id == declaration.expansion)
+    }
+
+    fn composition_locations(
+        &self,
+        graph: &str,
+        origin: &EffectiveMemberOrigin,
+    ) -> Vec<IndexedLocation> {
+        origin
+            .alias
+            .into_iter()
+            .chain(std::iter::once(origin.authored_name))
+            .chain(origin.paths.iter().flatten().copied())
+            .filter_map(|span| self.source_location(graph, span))
+            .collect()
+    }
+
     pub(crate) fn contract_definitions(
         &self,
         uri: &str,
@@ -676,24 +763,52 @@ impl OpenDocumentIndex {
         uri: &str,
         offset: usize,
     ) -> Option<Vec<IndexedLocation>> {
-        let reference = self
-            .contracts
-            .get(graph)?
-            .member_references
-            .iter()
-            .find(|reference| {
+        let mut locations = None;
+        if let Some(facts) = self.contracts.get(graph) {
+            for reference in facts.member_references.iter().filter(|reference| {
                 self.source_uris
                     .get(&(graph.clone(), reference.span.source))
                     .is_some_and(|source| source == uri)
                     && span_contains_offset(reference.span, offset)
-            })?;
-        Some(
-            reference
-                .origins
-                .iter()
-                .filter_map(|origin| self.contract_location(graph, *origin))
-                .collect(),
-        )
+            }) {
+                let locations = locations.get_or_insert_with(Vec::new);
+                for declaration in &reference.origins {
+                    if let Some(origin) = self.composition_origin(graph, *declaration) {
+                        locations.extend(self.composition_locations(graph, origin));
+                    } else {
+                        locations.extend(self.contract_location(graph, *declaration));
+                    }
+                }
+            }
+        }
+        for member in self.member_occurrences.iter().filter(|member| {
+            member.graph == *graph
+                && member.uri == uri
+                && span_contains_offset(member.occurrence.span, offset)
+        }) {
+            if let Some(origin) = member
+                .occurrence
+                .exact_declaration
+                .and_then(|span| self.composition_origin(graph, span))
+            {
+                locations
+                    .get_or_insert_with(Vec::new)
+                    .extend(self.composition_locations(graph, origin));
+            }
+        }
+        for origin in self.composition_origins.get(graph).into_iter().flatten() {
+            if origin.alias.is_some_and(|span| {
+                self.source_uris
+                    .get(&(graph.clone(), span.source))
+                    .is_some_and(|source| source == uri)
+                    && span_contains_offset(span, offset)
+            }) {
+                locations
+                    .get_or_insert_with(Vec::new)
+                    .extend(self.composition_locations(graph, origin));
+            }
+        }
+        locations
     }
 
     pub(crate) fn contract_references(
@@ -887,6 +1002,25 @@ impl OpenDocumentIndex {
             .iter()
             .find(|interface| matches(interface.name_span));
         let mut locations = Vec::new();
+        for obligation in self
+            .composition_obligations
+            .get(graph)
+            .into_iter()
+            .flatten()
+        {
+            if obligation.failures.is_empty()
+                && (matches(obligation.origin.authored_name)
+                    || origins.contains(&obligation.requirement.span)
+                    || origins.contains(&obligation.origin.authored_declaration))
+            {
+                if let Some(location) = obligation
+                    .implementation
+                    .and_then(|span| self.contract_location(graph, span))
+                {
+                    locations.push(location);
+                }
+            }
+        }
         for conformance in &facts.conformances {
             if conformance.status != doriac::semantics::contracts::ConformanceStatus::Checked {
                 continue;
@@ -925,6 +1059,154 @@ impl OpenDocumentIndex {
             }
         }
         locations
+    }
+
+    fn source_location_key(&self, graph: &str, span: Span) -> Option<(String, usize, usize)> {
+        self.source_location(graph, span)
+            .map(|location| (location.uri, location.span.start, location.span.end))
+    }
+
+    fn composition_targets_at(&self, uri: &str, offset: usize) -> Vec<(&str, &MemberRenameTarget)> {
+        let mut selected = Vec::new();
+        let Some(document) = self.documents.get(uri) else {
+            return selected;
+        };
+        for graph in &document.graphs {
+            if !self
+                .contracts
+                .get(graph)
+                .is_some_and(|facts| !facts.traits.is_empty())
+            {
+                continue;
+            }
+            let Some(facts) = self.composition_rename.get(graph) else {
+                continue;
+            };
+            for target in &facts.targets {
+                if std::iter::once(&target.name_span)
+                    .chain(&target.references)
+                    .any(|span| {
+                        self.source_location(graph, *span).is_some_and(|location| {
+                            location.uri == uri && span_contains_offset(location.span, offset)
+                        })
+                    })
+                {
+                    selected.push((graph.as_str(), target));
+                }
+            }
+        }
+        selected
+    }
+
+    fn composition_rename_targets(
+        &self,
+        uri: &str,
+        offset: usize,
+    ) -> Result<Option<Vec<(&str, &MemberRenameTarget)>>, ()> {
+        let selected = self
+            .composition_targets_at(uri, offset)
+            .into_iter()
+            .map(|(graph, target)| self.source_location_key(graph, target.name_span).ok_or(()))
+            .collect::<Result<HashSet<_>, _>>()?;
+        if selected.is_empty() {
+            return Ok(None);
+        }
+        if selected.len() != 1 {
+            return Err(());
+        }
+        let selected = selected.into_iter().next().ok_or(())?;
+        let owner = self.documents.get(&selected.0).ok_or(())?;
+        if self.incomplete_packages.contains(&owner.package) {
+            return Err(());
+        }
+        // The same authored declaration can participate in several analyzed
+        // graphs. Require agreement in all of them before collecting edits.
+        let mut targets = Vec::new();
+        for graph in &owner.graphs {
+            let facts = self.composition_rename.get(graph).ok_or(())?;
+            let mut matches = facts.targets.iter().filter(|target| {
+                self.source_location_key(graph, target.name_span).as_ref() == Some(&selected)
+            });
+            let target = matches.next().ok_or(())?;
+            if matches.next().is_some() || target.refusal.is_some() {
+                return Err(());
+            }
+            targets.push((graph.as_str(), target));
+        }
+        Ok(Some(targets))
+    }
+
+    pub(crate) fn composition_references(
+        &self,
+        uri: &str,
+        offset: usize,
+        include_declaration: bool,
+    ) -> Option<Vec<IndexedLocation>> {
+        let selected = self
+            .composition_targets_at(uri, offset)
+            .into_iter()
+            .filter_map(|(graph, target)| self.source_location_key(graph, target.name_span))
+            .collect::<HashSet<_>>();
+        if selected.is_empty() {
+            return None;
+        }
+        // Read-only lookup returns every known context, even when the compiler
+        // cannot prove a complete, unambiguous edit across all package graphs.
+        let mut locations = Vec::new();
+        for (graph, facts) in &self.composition_rename {
+            for target in &facts.targets {
+                if !self
+                    .source_location_key(graph, target.name_span)
+                    .is_some_and(|key| selected.contains(&key))
+                {
+                    continue;
+                }
+                locations.extend(
+                    target
+                        .references
+                        .iter()
+                        .chain(include_declaration.then_some(&target.name_span))
+                        .filter_map(|span| self.source_location(graph, *span)),
+                );
+            }
+        }
+        locations.extend(
+            self.contract_references(uri, offset, include_declaration)
+                .unwrap_or_default(),
+        );
+        if let Some(target @ SymbolTarget::Member(_)) = self.target_at(uri, offset) {
+            locations.extend(self.references(&target, include_declaration));
+        }
+        Some(unique_locations(locations))
+    }
+
+    pub(crate) fn composition_rename_edits(
+        &self,
+        uri: &str,
+        offset: usize,
+        new_name: &str,
+    ) -> Result<Option<Vec<IndexedEdit>>, ()> {
+        let Some(targets) = self.composition_rename_targets(uri, offset)? else {
+            return Ok(None);
+        };
+        if !is_identifier(new_name) {
+            return Err(());
+        }
+        let mut edits = Vec::new();
+        for (graph, target) in targets {
+            if target.forbidden_names.iter().any(|name| name == new_name) {
+                return Err(());
+            }
+            for span in std::iter::once(&target.name_span).chain(&target.references) {
+                let location = self.source_location(graph, *span).ok_or(())?;
+                edits.push(IndexedEdit {
+                    uri: location.uri,
+                    span: location.span,
+                    replacement: new_name.to_owned(),
+                });
+            }
+        }
+        Ok(Some(edits))
     }
 
     pub(crate) fn contract_rename_requires_family(&self, uri: &str, offset: usize) -> bool {
@@ -2061,4 +2343,259 @@ fn compiler_known_attribute_documentation(name: &str) -> String {
         _ => "Compiler-known attribute metadata.",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspace_graph::{analyze_open_graph, OpenSource};
+    use doriac::incremental::CompilationSession;
+    use doriac::source::{ExpansionId, SourceId};
+
+    #[test]
+    fn composition_references_do_not_require_a_rename_proof() {
+        let uri = "file:///workspace/traits.doria";
+        for (adaptation, refused) in [
+            ("uses Selected;", false),
+            (
+                "uses Selected, Other { Selected::value insteadof Other; }",
+                true,
+            ),
+        ] {
+            let source = format!("trait Selected {{ function value(): int {{ return 1; }} }} trait Other {{ function value(): int {{ return 2; }} }} class Owner {{ {adaptation} }} function read(Owner $owner): int {{ return $owner->value(); }}");
+            let snapshot = AnalysisSnapshot::analyze(uri, &source);
+            assert!(
+                snapshot.diagnostics().is_empty(),
+                "{:?}",
+                snapshot.diagnostics()
+            );
+            let declaration = source.find("value").unwrap();
+            let call = source.rfind("value").unwrap();
+            for incomplete in [false, true] {
+                let mut index = OpenDocumentIndex::rebuild(std::iter::once((
+                    "graph".to_string(),
+                    uri,
+                    &snapshot,
+                )));
+                let targets = index.composition_targets_at(uri, declaration);
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].1.refusal.is_some(), refused);
+                if incomplete {
+                    index
+                        .incomplete_packages
+                        .insert(snapshot.compilation_context().package.clone());
+                }
+                for include_declaration in [false, true] {
+                    let references = index
+                        .composition_references(uri, declaration, include_declaration)
+                        .expect("known references remain available");
+                    assert!(references
+                        .iter()
+                        .any(|location| location.uri == uri && location.span.start == call));
+                    assert_eq!(
+                        references
+                            .iter()
+                            .any(|location| location.span.start == declaration),
+                        include_declaration
+                    );
+                }
+                assert_eq!(
+                    index
+                        .composition_rename_edits(uri, declaration, "renamed")
+                        .is_err(),
+                    refused || incomplete
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ambiguous_composed_source_references_keep_each_known_target() {
+        let uri = "file:///workspace/contexts.doria";
+        let source = "trait Read { function read(): int { return $this->value(); } } class First { uses Read; function value(): int { return 1; } } class Second { uses Read; function value(): int { return 2; } }";
+        let snapshot = AnalysisSnapshot::analyze(uri, source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        let index =
+            OpenDocumentIndex::rebuild(std::iter::once(("graph".to_string(), uri, &snapshot)));
+        let call = source.find("value").unwrap();
+        let references = index
+            .composition_references(uri, call, true)
+            .expect("both compiler-known contexts");
+        for (offset, _) in source.match_indices("value") {
+            assert!(
+                references
+                    .iter()
+                    .any(|location| location.uri == uri && location.span.start == offset),
+                "{references:?}"
+            );
+        }
+        assert_eq!(references.len(), 3);
+        assert!(index
+            .composition_rename_edits(uri, call, "renamed")
+            .is_err());
+    }
+
+    #[test]
+    fn composed_source_presentations_keep_every_package_graph() {
+        let uri = "file:///shared/values.doria";
+        let source = "namespace Api; trait Values<T> { function value(T $value): T { return $value; } function again(T $value): T { return $this->value($value); } }";
+        let mut graphs = Vec::new();
+        for (package, class, ty) in [
+            ("app/first", "First", "int"),
+            ("app/second", "Second", "string"),
+        ] {
+            let composer =
+                format!("namespace App; use Api\\Values; class {class} {{ uses Values<{ty}>; }}");
+            let class_uri = format!("file:///{package}/class.doria");
+            let graph = analyze_open_graph(
+                package,
+                &[
+                    OpenSource {
+                        uri,
+                        relative_path: "values.doria".into(),
+                        text: source,
+                    },
+                    OpenSource {
+                        uri: &class_uri,
+                        relative_path: "class.doria".into(),
+                        text: &composer,
+                    },
+                ],
+                &mut CompilationSession::default(),
+            )
+            .unwrap();
+            assert!(graph.documents[uri].analysis.diagnostics().is_empty());
+            graphs.push((package, graph));
+        }
+        let offset = source.find("->value").unwrap() + 2;
+        let recovered = AnalysisSnapshot::merge_recovered_compositions(
+            graphs
+                .iter()
+                .map(|(_, graph)| graph.documents[uri].analysis.clone())
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(
+            recovered
+                .signature_help_at_offset(offset + "value(".len())
+                .unwrap()
+                .len(),
+            2
+        );
+        let recovered_members = recovered.member_completions_at_offset(offset).unwrap();
+        assert_eq!(
+            recovered_members
+                .iter()
+                .filter(|item| item.label == "value")
+                .count(),
+            2
+        );
+        let mut expected = None;
+        for reverse in [false, true] {
+            if reverse {
+                graphs.reverse();
+            }
+            let mut index = OpenDocumentIndex::default();
+            for (id, graph) in &graphs {
+                for (source_uri, document) in &graph.documents {
+                    index.add_document(id, source_uri, &document.analysis);
+                }
+            }
+            let view = index.composed_presentation(uri).unwrap();
+            let hover = view.hover(offset).unwrap();
+            let signatures = view.signatures(offset + "value(".len()).unwrap();
+            let completions = view.completions(offset).unwrap();
+            assert_eq!(signatures.len(), 2, "{signatures:?}");
+            for (class, ty) in [("First", "int"), ("Second", "string")] {
+                assert!(
+                    hover.markdown.contains(&format!("App\\{class}::again")),
+                    "{hover:?}"
+                );
+                let signature = format!("{ty} $value): {ty}");
+                assert!(
+                    signatures
+                        .iter()
+                        .any(|item| item.label.contains(&signature)),
+                    "{signatures:?}"
+                );
+                assert!(
+                    completions
+                        .iter()
+                        .any(|item| item.label == "value" && item.detail.contains(&signature)),
+                    "{completions:?}"
+                );
+            }
+            let result = (hover.markdown, signatures, completions);
+            if let Some(expected) = &expected {
+                assert_eq!(expected, &result);
+            }
+            expected = Some(result);
+            assert_eq!(index.diagnostic_groups(uri).unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn shared_trait_diagnostics_remain_grouped_by_compiler_graph() {
+        let uri = "file:///shared/read.doria";
+        let source = "trait ReadLimit { function read(): int { return self::LIMIT; } }";
+        let mut index = OpenDocumentIndex::default();
+        for (package, value) in [("app/first", "1"), ("app/second", "\"invalid\"")] {
+            let composer = format!("class Owner {{ const LIMIT = {value}; uses ReadLimit; }}");
+            let graph = analyze_open_graph(
+                package,
+                &[
+                    OpenSource {
+                        uri,
+                        relative_path: "read.doria".into(),
+                        text: source,
+                    },
+                    OpenSource {
+                        uri: "file:///composer.doria",
+                        relative_path: "composer.doria".into(),
+                        text: &composer,
+                    },
+                ],
+                &mut CompilationSession::default(),
+            )
+            .unwrap();
+            index.add_document(package, uri, &graph.documents[uri].analysis);
+        }
+        let groups = index.diagnostic_groups(uri).unwrap();
+        assert_eq!(groups.len(), 2);
+        assert!(groups[0].is_empty(), "{:?}", groups[0]);
+        assert!(
+            !groups[1].is_empty(),
+            "the second composer must not disappear behind the first source snapshot"
+        );
+    }
+
+    #[test]
+    fn composed_declarations_do_not_collapse_to_authored_locations() {
+        let mut index = OpenDocumentIndex::default();
+        index
+            .source_uris
+            .insert(("first".into(), SourceId(1)), "file:///trait.doria".into());
+        index
+            .source_uris
+            .insert(("second".into(), SourceId(2)), "file:///trait.doria".into());
+        let authored = Span::in_source(SourceId(1), 10, 20);
+        let first = authored.in_expansion(ExpansionId(1));
+        let second = authored.in_expansion(ExpansionId(2));
+
+        assert!(index.same_declaration("first", first, "first", first));
+        assert!(!index.same_declaration("first", first, "first", second));
+        assert!(!index.same_declaration("first", first, "first", authored));
+        let other_graph = Span::in_source(SourceId(2), 10, 20);
+        assert!(!index.same_declaration(
+            "first",
+            first,
+            "second",
+            other_graph.in_expansion(ExpansionId(1))
+        ));
+        assert!(index.same_declaration("first", authored, "second", other_graph));
+    }
 }

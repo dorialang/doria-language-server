@@ -81,7 +81,13 @@ members of a known implementer. Erased-call signature help preserves requirement
 parameter names, ownership modes, generic substitutions, and checked effects;
 implementation-only defaults do not appear. Shared owner/access completions
 preserve wrapper precedence and readonly/writable forwarding. Core operations
-and public iteration are implemented; trait composition remains Slice 4.
+and public iteration are implemented. Composed member hovers use the selected
+specialized signature, ownership, defaults, checked effects, and return-borrow
+facts. Hovering shared trait source preserves the separate composer contexts,
+including dependency sources shared by multiple workspace package graphs.
+Signature help lists each distinct checked specialization, and completion retains
+the corresponding signatures rather than choosing the first composer;
+aliases and adaptation candidates retain their authored implementation origins.
 `borrow` constructor promotion is presented as a retained readonly source loan,
 not an owned field. Keyword completion and hover explain the same source-loan
 boundary. Compiler return-borrow facts describe `getCurrent()` for

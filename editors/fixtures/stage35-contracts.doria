@@ -1,4 +1,4 @@
-// Slice 1 checks declarations. Composition below is a Slice 4 execution boundary.
+// Shared presentation coverage; the compiler owns composition and conformance.
 namespace Editor\Contracts;
 
 internal interface Reader<T>
@@ -14,13 +14,24 @@ interface Repository<T> extends Reader<T>
 
 trait Format<T>
 {
+    const string LABEL = "formatted";
+    writable int $count = 0;
+
+    static function label(): string { return self::LABEL; }
     function render(T $value): string { return "formatted"; }
     function required(): int;
+}
+
+trait NestedFormat<T>
+{
+    uses Format<T>;
 }
 
 trait Alternative<T>
 {
     function render(T $value): string { return "alternative"; }
+    function debug(): void {}
+    function trace(): void {}
 }
 
 class Report
@@ -28,6 +39,25 @@ class Report
     uses Format<int>, Alternative<int> {
         Format<int>::render insteadof Alternative<int>;
         Alternative<int>::render as renderAlternative;
-        Format<int>::required as internal;
+        Alternative<int>::debug as internal;
+        Alternative<int>::trace as internal traceAlternative;
+        Format<int>::label as typeLabel;
     }
+
+    function required(): int { return 1; }
+}
+
+class TextReport
+{
+    uses NestedFormat<string>;
+
+    function required(): int { return 2; }
+}
+
+function describe(Report $report, TextReport $text): void
+{
+    echo $report->render(1);
+    echo $report->renderAlternative(2);
+    echo $text->render("value");
+    echo Report::typeLabel();
 }

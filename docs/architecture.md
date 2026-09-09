@@ -128,12 +128,19 @@ dependency-cache, or otherwise readonly sources. Stage 35 Slice 1 extends compil
 facts with canonical requirements, conformance and authored trait origins.
 Requirement references navigate to all coalesced origins and checked concrete
 implementations. Rename refuses incomplete multi-declaration families rather
-than changing only part of a contract. Trait members are not injected into
-composers. Slice 2 consumes the compiler's interface specialization and call facts
+than changing only part of a contract. Slice 2 consumes the compiler's interface
+specialization and call facts
 for erased member completion, signatures, and shared payload views. The compiler
 also applies generic type substitutions for the server; no second requirement
-resolver, runtime descriptor index, or conformance checker lives here. Trait
-composition remains pending Slice 4.
+resolver, runtime descriptor index, or conformance checker lives here. Slice 4
+consumes the compiler's selected class members, adaptation candidates, effective
+origins, obligations, and rename proofs. Expansion identity is retained inside
+each analysis graph; only editor locations project back to authored spans.
+Shared-source presentation is aggregated after that projection, while compiler
+diagnostic causes are grouped within each graph before publishing editor ranges.
+Alias names are distinct from original methods, and a shared source token is
+renameable only when all checked composer contexts agree. Coupled exclusions
+and incomplete contract families are not partially renamed.
 
 Each source is indexed in every compiler analysis graph that contains it, including
 dependencies shared by workspace members. Hierarchy completion uses that indexed
@@ -165,10 +172,10 @@ requires every foreach binding to be explicitly typed; inferred compiler facts
 support diagnostics and insertion fixes but never make omitted source types
 valid. Scalar interpolation
 and `%s` are compiler-owned string materialization, so tooling adds no primitive
-`toString` or scalar cast. The corrective beat and Stage 35 Slices 1, 2, and 3 are
-complete, including core contracts and public iteration. Trait composition and
-property hooks remain separate future work. Retained-source and element-borrow
-hover uses compiler ownership facts; clients do not infer iterator lifetimes.
+`toString` or scalar cast. Core contracts, public iteration, and trait composition
+are implemented. Property hooks remain separate future work. Retained-source and
+element-borrow hover uses compiler ownership facts; clients do not infer iterator
+lifetimes.
 
 ### Editor clients
 

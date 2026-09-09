@@ -35,10 +35,17 @@ class DoriaLexerTest : TestCase() {
     fun testStage35ContractFixtureKeepsGraphSemanticsInCompiler() {
         val fixture = Files.readString(Path.of("..", "..", "fixtures", "stage35-contracts.doria"))
         val tokens = lex(fixture)
-        assertEquals(DoriaTokenTypes.TRAIT_USES_KEYWORD, tokens.first { it.text == "uses" }.type)
+        for (token in tokens.filter { it.text == "uses" }) {
+            assertEquals(DoriaTokenTypes.TRAIT_USES_KEYWORD, token.type)
+        }
         for (token in tokens.filter { it.text in setOf("interface", "trait", "extends", "implements", "as", "insteadof") }) {
             assertEquals(DoriaTokenTypes.KEYWORD, token.type)
         }
+        for (token in tokens.filter { it.text in setOf("internal", "writable", "static") }) {
+            assertEquals(DoriaTokenTypes.MODIFIER, token.type)
+        }
+        assertEquals(DoriaTokenTypes.METHOD_CALL, tokens.last { it.text == "renderAlternative" }.type)
+        assertEquals(DoriaTokenTypes.STATIC_METHOD_CALL, tokens.last { it.text == "typeLabel" }.type)
         assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
     }
 
