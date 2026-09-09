@@ -36,8 +36,9 @@ hierarchy, inherited-member, virtual-family, direct-parent, and callable-contrac
 facts for completion, hover, navigation, references, rename, and semantic tokens.
 It does not parse or check inheritance independently, and it preserves incomplete,
 generated, and dependency-source edit safety. Stage 35 interfaces and traits
-authority is accepted under Decision 0134; Slices 1, 2, and 3 are complete and Slice 4
-is next. Erased calls use compiler-specialized requirement signatures and origins;
+authority is accepted under Decision 0134. Composed members use compiler-selected
+signatures and origins; aliases retain distinct identities. Erased calls use
+compiler-specialized requirement signatures and origins;
 narrowed receivers expose their checked interface view. Error subinterfaces and
 all six shared/weak/access families retain their effects and access capabilities.
 
@@ -58,8 +59,8 @@ compiler diagnostics with Machine Applicable insertion fixes; they are never
 accepted as inferred declarations. Diagnostics and fixes are forwarded from the
 compiler, with no second foreach checker. Scalar interpolation and `%s` add no primitive `toString` or scalar-cast
 completion. Core contracts and public iteration execute, including retained
-readonly iterator sources received with `borrow`. Trait composition remains
-Stage 35 Slice 4 work; property hooks remain separate work.
+readonly iterator sources received with `borrow`. Trait composition is implemented;
+property hooks remain separate work.
 
 The compiler classifies checked effects into source-required effects and ambient
 canonical I/O effects. Hovers keep source signatures focused on required

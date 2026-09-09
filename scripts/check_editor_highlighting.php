@@ -2094,6 +2094,24 @@ function check_stage30f_callable_alignment(): void
     );
 }
 
+function check_stage35_composition_authority(): void
+{
+    global $root;
+
+    foreach ([
+        'README.md', 'server/README.md', 'docs/architecture.md', 'docs/semantic-hover.md',
+        'editors/vscode/doria/README.md', 'editors/intellij/doria/README.md',
+        'server/src/analysis.rs',
+    ] as $path) {
+        $production = explode("\n#[cfg(test)]\nmod tests", read_text($root . '/' . $path), 2)[0];
+        $normalized = preg_replace('/\s+/', ' ', $production);
+        require_check(
+            preg_match('/trait composition[^.]*\b(later|future|pending|remains)\b|\bSlice 4 is next\b/i', $normalized) === 0,
+            "{$path} must not describe implemented trait composition as future work",
+        );
+    }
+}
+
 function check_inferred_main_effect_alignment(): void
 {
     global $readme, $lspAnalysis, $lspServer, $lspTests;
@@ -2143,6 +2161,7 @@ function main(): int
     check_import_actions_and_diagnostic_messages();
     check_fixture();
     check_stage30f_callable_alignment();
+    check_stage35_composition_authority();
     check_inferred_main_effect_alignment();
     echo "Doria editor highlighting checks passed.\n";
     return 0;

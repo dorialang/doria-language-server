@@ -657,26 +657,30 @@ impl Server {
         self.publish_all_diagnostics(writer)
     }
 
+    fn prepared_document_diagnostics(&self, uri: &str) -> Vec<Diagnostic> {
+        // Cause identities are graph-local. Publication and actions must prepare
+        // the same groups independently, before projecting them to editor ranges.
+        if let Some(groups) = self.document_index.diagnostic_groups(uri) {
+            return groups
+                .iter()
+                .flat_map(|group| prepare_diagnostics(group))
+                .collect();
+        }
+        self.document(uri)
+            .map(|document| prepare_diagnostics(document.analysis.diagnostics()))
+            .unwrap_or_default()
+    }
+
     fn publish_diagnostics<W: Write>(&mut self, uri: &str, writer: &mut W) -> Result<(), String> {
         let Some(document) = self.document(uri) else {
             return Ok(());
         };
 
-        // Group compiler causes within their own graph, then deduplicate only
-        // fully projected diagnostics. Graph-local spans must not be compared
-        // between workspace members sharing a dependency source.
-        let groups = self
-            .document_index
-            .diagnostic_groups(uri)
-            .map(|groups| groups.iter().map(Vec::as_slice).collect::<Vec<_>>())
-            .unwrap_or_else(|| vec![document.analysis.diagnostics()]);
         let mut diagnostics = Vec::new();
-        for group in groups {
-            for diagnostic in prepare_diagnostics(group) {
-                let value = self.graph_diagnostic_to_lsp(uri, &diagnostic);
-                if !diagnostics.contains(&value) {
-                    diagnostics.push(value);
-                }
+        for diagnostic in self.prepared_document_diagnostics(uri) {
+            let value = self.graph_diagnostic_to_lsp(uri, &diagnostic);
+            if !diagnostics.contains(&value) {
+                diagnostics.push(value);
             }
         }
         let mut params = json!({
@@ -1604,15 +1608,16 @@ impl Server {
             return json!([]);
         }
 
-        let mut actions = prepare_diagnostics(document.analysis.diagnostics())
-            .iter()
-            .flat_map(|diagnostic| {
-                diagnostic
-                    .fixes
-                    .iter()
-                    .filter_map(|fix| self.graph_code_action(uri, diagnostic, fix))
-            })
-            .collect::<Vec<_>>();
+        let mut actions = Vec::new();
+        for diagnostic in self.prepared_document_diagnostics(uri) {
+            for fix in &diagnostic.fixes {
+                if let Some(action) = self.graph_code_action(uri, &diagnostic, fix) {
+                    if !actions.contains(&action) {
+                        actions.push(action);
+                    }
+                }
+            }
+        }
         if let Some(offset) = code_action_offset(params, &document.text) {
             let mut import_candidates = document
                 .analysis
@@ -1703,12 +1708,13 @@ impl Server {
             }
         };
 
-        let has_diagnostic = prepare_diagnostics(document.analysis.diagnostics())
-            .into_iter()
-            .any(|diagnostic| {
-                matches!(diagnostic.code, "E0304" | "E0309")
-                    && spans_overlap(diagnostic.span, callable.name_span)
-            });
+        let has_diagnostic =
+            self.prepared_document_diagnostics(uri)
+                .into_iter()
+                .any(|diagnostic| {
+                    matches!(diagnostic.code, "E0304" | "E0309")
+                        && spans_overlap(diagnostic.span, callable.name_span)
+                });
         if !has_diagnostic {
             return None;
         }
@@ -5935,6 +5941,109 @@ function main(): void
     }
 
     #[test]
+    fn shared_source_actions_cover_later_graph_diagnostics_without_duplicates() {
+        let uri = "file:///workspace/visit.doria";
+        let source = "trait Visit { function visit(): void { /* unicode: \u{1f9ea} */ foreach ($this->items() as $item) {} } }";
+        let composer_uri = "file:///workspace/composer.doria";
+        let composer = "class Visitor { uses Visit; function items(): int[] { return [1]; } }";
+        let mut server = stage31_server(&["file:///workspace"]);
+        for (id, composed) in [
+            ("test/declarations", false),
+            ("test/first", true),
+            ("test/second", true),
+        ] {
+            let mut sources = vec![OpenSource {
+                uri,
+                relative_path: "visit.doria".into(),
+                text: source,
+            }];
+            if composed {
+                sources.push(OpenSource {
+                    uri: composer_uri,
+                    relative_path: "composer.doria".into(),
+                    text: composer,
+                });
+            }
+            let graph =
+                analyze_open_graph(id, &sources, &mut CompilationSession::default()).unwrap();
+            server.source_uris.extend(graph.source_uris);
+            for (source_uri, document) in graph.documents {
+                server
+                    .document_index
+                    .add_document(id, &source_uri, &document.analysis);
+                server
+                    .documents
+                    .entry(source_uri)
+                    .or_insert_with(|| Document::from_graph(document, Some(1)));
+            }
+        }
+        assert!(
+            server.documents[uri]
+                .analysis
+                .diagnostics()
+                .iter()
+                .all(|diagnostic| {
+                    diagnostic
+                        .fixes
+                        .iter()
+                        .all(|fix| fix.applicability != FixApplicability::MachineApplicable)
+                }),
+            "{:?}",
+            server.documents[uri].analysis.diagnostics()
+        );
+        server.publish_diagnostics(uri, &mut Vec::new()).unwrap();
+        let published = server.published_diagnostics[uri]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic["data"]["fixes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|fix| fix["applicability"] == "machineApplicable")
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(published.len(), 1, "{}", server.published_diagnostics[uri]);
+        let actions = server.code_actions(Some(&json!({ "textDocument": { "uri": uri } })));
+        let actions = actions.as_array().unwrap();
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert_eq!(actions[0]["diagnostics"], json!(published));
+        let updated = apply_workspace_edits(source, &actions[0], uri);
+        assert!(updated.contains("as int $item"), "{updated}");
+        let graph = analyze_open_graph(
+            "test/fixed",
+            &[
+                OpenSource {
+                    uri,
+                    relative_path: "visit.doria".into(),
+                    text: &updated,
+                },
+                OpenSource {
+                    uri: composer_uri,
+                    relative_path: "composer.doria".into(),
+                    text: composer,
+                },
+            ],
+            &mut CompilationSession::default(),
+        )
+        .unwrap();
+        assert!(
+            graph.documents[uri].analysis.diagnostics().is_empty(),
+            "{:?}",
+            graph.documents[uri].analysis.diagnostics()
+        );
+        server
+            .source_edit_policies
+            .insert(uri.to_string(), SourceEditPolicy::DependencyCache);
+        assert_eq!(
+            server.code_actions(Some(&json!({ "textDocument": { "uri": uri } }))),
+            json!([])
+        );
+    }
+
+    #[test]
     fn equivalent_diagnostic_title_and_primary_label_are_not_repeated() {
         let diagnostic = Diagnostic::new(
             "E0201",
@@ -9595,7 +9704,7 @@ describe("🧪 suite", function (): void {
     #[test]
     fn stage35_contract_navigation_and_rename_use_compiler_origins() {
         let uri = "file:///workspace/contracts.doria";
-        let source = "interface Root<T> { function render(T $value): int; } interface Child extends Root<int> {} class Report implements Child { function render(int $value): int { return $value; } } function call<T implements Child>(T $report): int { return $report->render(42); }";
+        let source = "trait Auxiliary {} interface Root<T> { function render(T $value): int; } interface Child extends Root<int> {} class Report implements Child { function render(int $value): int { return $value; } } function call<T implements Child>(T $report): int { return $report->render(42); }";
         let mut server = stage31_server(&["file:///workspace"]);
         open_stage31_document(&mut server, uri, source);
         assert!(
@@ -9604,6 +9713,18 @@ describe("🧪 suite", function (): void {
             server.documents[uri].analysis.diagnostics()
         );
         let declaration = source.find("render").unwrap();
+        let interface_hover = server
+            .hover(Some(&params_at(uri, source, source.find("Root").unwrap())))
+            .unwrap();
+        let documentation = interface_hover["contents"]["value"].as_str().unwrap();
+        assert!(
+            documentation.contains("conformance is checked after composition"),
+            "{interface_hover}"
+        );
+        assert!(
+            !documentation.contains("later implementation boundary"),
+            "{interface_hover}"
+        );
         let implementation = source.find("render(int").unwrap();
         let call = source.rfind("render").unwrap();
         let definitions = server.definition(Some(&params_at(uri, source, call)));
@@ -9619,6 +9740,11 @@ describe("🧪 suite", function (): void {
         );
         let references = server.references(Some(&params_at(uri, source, declaration)));
         assert_eq!(references.as_array().unwrap().len(), 3, "{references}");
+        assert_eq!(
+            server.references(Some(&params_at(uri, source, implementation))),
+            references,
+            "composition targets must retain the checked interface reference family"
+        );
         let hover = server.hover(Some(&params_at(uri, source, call))).unwrap();
         assert!(
             hover["contents"]["value"]
@@ -9750,6 +9876,12 @@ describe("🧪 suite", function (): void {
             server.rename(Some(&params)),
             Value::Null,
             "readonly alias declaration"
+        );
+        let references = server.references(Some(&params));
+        assert_eq!(
+            references.as_array().map(Vec::len),
+            Some(2),
+            "readonly sources remain navigable: {references}"
         );
     }
 

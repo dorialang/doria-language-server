@@ -3109,7 +3109,7 @@ impl<'a> SnapshotBuilder<'a> {
             ));
         }
         let documentation = if kind == "interface" {
-            "Nominal interface declaration. Checked requirements govern owned and borrowed interface values, erased calls, narrowing, and shared payload views. Core-contract operations and public iteration are implemented. Trait composition remains a later implementation boundary."
+            "Nominal interface declaration. Checked requirements govern owned and borrowed interface values, erased calls, narrowing, and shared payload views. Selected trait members can satisfy interface requirements; conformance is checked after composition."
         } else {
             "Compile-time trait declaration. Members are specialized in each composing class; aliases retain separate identities and requirements are checked against the selected implementation."
         };

@@ -1061,19 +1061,16 @@ impl OpenDocumentIndex {
         locations
     }
 
-    fn composition_rename_targets(
-        &self,
-        uri: &str,
-        offset: usize,
-    ) -> Result<Option<Vec<(&str, &MemberRenameTarget)>>, ()> {
+    fn source_location_key(&self, graph: &str, span: Span) -> Option<(String, usize, usize)> {
+        self.source_location(graph, span)
+            .map(|location| (location.uri, location.span.start, location.span.end))
+    }
+
+    fn composition_targets_at(&self, uri: &str, offset: usize) -> Vec<(&str, &MemberRenameTarget)> {
+        let mut selected = Vec::new();
         let Some(document) = self.documents.get(uri) else {
-            return Ok(None);
+            return selected;
         };
-        let location_key = |graph: &str, span: Span| {
-            self.source_location(graph, span)
-                .map(|location| (location.uri, location.span.start, location.span.end))
-        };
-        let mut selected = None;
         for graph in &document.graphs {
             if !self
                 .contracts
@@ -1094,17 +1091,30 @@ impl OpenDocumentIndex {
                         })
                     })
                 {
-                    let key = location_key(graph, target.name_span).ok_or(())?;
-                    if selected.as_ref().is_some_and(|selected| selected != &key) {
-                        return Err(());
-                    }
-                    selected = Some(key);
+                    selected.push((graph.as_str(), target));
                 }
             }
         }
-        let Some(selected) = selected else {
+        selected
+    }
+
+    fn composition_rename_targets(
+        &self,
+        uri: &str,
+        offset: usize,
+    ) -> Result<Option<Vec<(&str, &MemberRenameTarget)>>, ()> {
+        let selected = self
+            .composition_targets_at(uri, offset)
+            .into_iter()
+            .map(|(graph, target)| self.source_location_key(graph, target.name_span).ok_or(()))
+            .collect::<Result<HashSet<_>, _>>()?;
+        if selected.is_empty() {
             return Ok(None);
-        };
+        }
+        if selected.len() != 1 {
+            return Err(());
+        }
+        let selected = selected.into_iter().next().ok_or(())?;
         let owner = self.documents.get(&selected.0).ok_or(())?;
         if self.incomplete_packages.contains(&owner.package) {
             return Err(());
@@ -1114,10 +1124,9 @@ impl OpenDocumentIndex {
         let mut targets = Vec::new();
         for graph in &owner.graphs {
             let facts = self.composition_rename.get(graph).ok_or(())?;
-            let mut matches = facts
-                .targets
-                .iter()
-                .filter(|target| location_key(graph, target.name_span).as_ref() == Some(&selected));
+            let mut matches = facts.targets.iter().filter(|target| {
+                self.source_location_key(graph, target.name_span).as_ref() == Some(&selected)
+            });
             let target = matches.next().ok_or(())?;
             if matches.next().is_some() || target.refusal.is_some() {
                 return Err(());
@@ -1133,20 +1142,42 @@ impl OpenDocumentIndex {
         offset: usize,
         include_declaration: bool,
     ) -> Option<Vec<IndexedLocation>> {
-        let targets = self.composition_rename_targets(uri, offset).ok()??;
-        Some(unique_locations(
-            targets
-                .into_iter()
-                .flat_map(|(graph, target)| {
+        let selected = self
+            .composition_targets_at(uri, offset)
+            .into_iter()
+            .filter_map(|(graph, target)| self.source_location_key(graph, target.name_span))
+            .collect::<HashSet<_>>();
+        if selected.is_empty() {
+            return None;
+        }
+        // Read-only lookup returns every known context, even when the compiler
+        // cannot prove a complete, unambiguous edit across all package graphs.
+        let mut locations = Vec::new();
+        for (graph, facts) in &self.composition_rename {
+            for target in &facts.targets {
+                if !self
+                    .source_location_key(graph, target.name_span)
+                    .is_some_and(|key| selected.contains(&key))
+                {
+                    continue;
+                }
+                locations.extend(
                     target
                         .references
                         .iter()
                         .chain(include_declaration.then_some(&target.name_span))
-                        .filter_map(|span| self.source_location(graph, *span))
-                        .collect::<Vec<_>>()
-                })
-                .collect(),
-        ))
+                        .filter_map(|span| self.source_location(graph, *span)),
+                );
+            }
+        }
+        locations.extend(
+            self.contract_references(uri, offset, include_declaration)
+                .unwrap_or_default(),
+        );
+        if let Some(target @ SymbolTarget::Member(_)) = self.target_at(uri, offset) {
+            locations.extend(self.references(&target, include_declaration));
+        }
+        Some(unique_locations(locations))
     }
 
     pub(crate) fn composition_rename_edits(
@@ -2320,6 +2351,93 @@ mod tests {
     use crate::workspace_graph::{analyze_open_graph, OpenSource};
     use doriac::incremental::CompilationSession;
     use doriac::source::{ExpansionId, SourceId};
+
+    #[test]
+    fn composition_references_do_not_require_a_rename_proof() {
+        let uri = "file:///workspace/traits.doria";
+        for (adaptation, refused) in [
+            ("uses Selected;", false),
+            (
+                "uses Selected, Other { Selected::value insteadof Other; }",
+                true,
+            ),
+        ] {
+            let source = format!("trait Selected {{ function value(): int {{ return 1; }} }} trait Other {{ function value(): int {{ return 2; }} }} class Owner {{ {adaptation} }} function read(Owner $owner): int {{ return $owner->value(); }}");
+            let snapshot = AnalysisSnapshot::analyze(uri, &source);
+            assert!(
+                snapshot.diagnostics().is_empty(),
+                "{:?}",
+                snapshot.diagnostics()
+            );
+            let declaration = source.find("value").unwrap();
+            let call = source.rfind("value").unwrap();
+            for incomplete in [false, true] {
+                let mut index = OpenDocumentIndex::rebuild(std::iter::once((
+                    "graph".to_string(),
+                    uri,
+                    &snapshot,
+                )));
+                let targets = index.composition_targets_at(uri, declaration);
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].1.refusal.is_some(), refused);
+                if incomplete {
+                    index
+                        .incomplete_packages
+                        .insert(snapshot.compilation_context().package.clone());
+                }
+                for include_declaration in [false, true] {
+                    let references = index
+                        .composition_references(uri, declaration, include_declaration)
+                        .expect("known references remain available");
+                    assert!(references
+                        .iter()
+                        .any(|location| location.uri == uri && location.span.start == call));
+                    assert_eq!(
+                        references
+                            .iter()
+                            .any(|location| location.span.start == declaration),
+                        include_declaration
+                    );
+                }
+                assert_eq!(
+                    index
+                        .composition_rename_edits(uri, declaration, "renamed")
+                        .is_err(),
+                    refused || incomplete
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ambiguous_composed_source_references_keep_each_known_target() {
+        let uri = "file:///workspace/contexts.doria";
+        let source = "trait Read { function read(): int { return $this->value(); } } class First { uses Read; function value(): int { return 1; } } class Second { uses Read; function value(): int { return 2; } }";
+        let snapshot = AnalysisSnapshot::analyze(uri, source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        let index =
+            OpenDocumentIndex::rebuild(std::iter::once(("graph".to_string(), uri, &snapshot)));
+        let call = source.find("value").unwrap();
+        let references = index
+            .composition_references(uri, call, true)
+            .expect("both compiler-known contexts");
+        for (offset, _) in source.match_indices("value") {
+            assert!(
+                references
+                    .iter()
+                    .any(|location| location.uri == uri && location.span.start == offset),
+                "{references:?}"
+            );
+        }
+        assert_eq!(references.len(), 3);
+        assert!(index
+            .composition_rename_edits(uri, call, "renamed")
+            .is_err());
+    }
 
     #[test]
     fn composed_source_presentations_keep_every_package_graph() {
