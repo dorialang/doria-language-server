@@ -2787,6 +2787,7 @@ fn completion_items() -> Value {
         "function",
         "let",
         "take",
+        "borrow",
         "writable",
         "readonly",
         "internal",
@@ -2904,6 +2905,9 @@ fn completion_items() -> Value {
             "detail": if planned { "planned Doria keyword" } else { "Doria keyword" },
         });
         match keyword {
+            "borrow" => {
+                item["documentation"] = json!(hover_description(&TokenKind::Borrow));
+            }
             "fn" => {
                 item["detail"] = json!("Doria arrow-closure keyword");
                 item["documentation"] = json!("Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. The compiler checks closure signatures, captures, ownership, invocation mode, checked effects, and escape.");
@@ -3802,7 +3806,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "Declares the single visible open parent of a class, or the parent contracts of an interface.",
         ),
         TokenKind::Interface => Some(
-            "Declares a nominal interface with checked generic requirements and parent contracts. Owned and borrowed interface values support erased calls, narrowing, and shared payload views. Core-contract operations require Stage 35 Slice 3; trait composition requires Slice 4.",
+            "Declares a nominal interface with checked generic requirements and parent contracts. Owned and borrowed interface values support erased calls, narrowing, and shared payload views. Core-contract operations and public iteration execute through compiler-selected contracts; trait composition remains Stage 35 Slice 4 work.",
         ),
         TokenKind::Implements => Some(
             "Declares checked nominal conformance. Concrete and specialized constrained calls remain direct; interface-erased calls use the requirement contract. Trait-dependent obligations remain deferred to Stage 35 Slice 4.",
@@ -3819,6 +3823,9 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
         TokenKind::Let => Some("Declares a local binding with an inferred type."),
         TokenKind::Take => Some(
             "Gives ownership of a move-type argument or structural function value to this parameter. Call sites remain unmarked. Consuming invocation is written `function once(...)`, not `function take(...)`.",
+        ),
+        TokenKind::Borrow => Some(
+            "Retains a readonly source loan through a promoted iterator constructor parameter. The cursor owns its position, not its source; it cannot outlive or allow mutation of that source while the loan is active. This does not declare a general borrowed class field.",
         ),
         TokenKind::Writable => Some(
             "Marks a binding, property, parameter, or method receiver as mutable. In a structural function type it may independently mark writable invocation or a writable parameter borrow.",
@@ -3860,7 +3867,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "`echo value;` writes the displayed value. `Doria\\Std\\Io\\IoError` is an ambient checked runtime effect and does not require source `throws`.",
         ),
         TokenKind::New => Some("Constructs an instance of a class."),
-        TokenKind::Foreach => Some("Iterates over a list or dictionary value."),
+        TokenKind::Foreach => Some("Iterates over supported collections, ranges, or an Iterable/Iterator contract. Every binding requires an explicit type. User-defined iteration is value-only; built-in sequence indices and dictionary keys retain their compiler-defined roles."),
         TokenKind::As => Some("Introduces a typed `foreach` binding, an import alias, or an authored trait alias/access adaptation."),
         TokenKind::Static => Some("Declares a static method or property."),
         TokenKind::SelfType => Some(
@@ -3918,7 +3925,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "Displayable" => Some("`interface Displayable` requires exactly `function toString(): string`. Concrete, constrained, erased, inherited, and narrowed views use the same canonical display in interpolation, echo, string-anchored concatenation, and `%s`, with no implicit string assignment or argument conversion."),
             "toString" => Some("`function toString(): string` is the exact externally accessible readonly instance method required by `Displayable`."),
             "List" => Some("`List<T>` is the growable, insertion-ordered sequence: `add`, `insertAt`, `removeAt`, `pop`, `contains`, `first`/`last`, and the `count`/`isEmpty` properties (decision 0100). An owned move type."),
-            "Dictionary" => Some("`Dictionary<K, V>` is the insertion-ordered map: `get` (`?V`), `set`, `remove` (`?V`), `has`, the `keys`/`values` projections, and `count`/`isEmpty` (decision 0100). Keys require `Hashable`. An owned move type."),
+            "Dictionary" => Some("`Dictionary<K, V>` is the insertion-ordered map: `get` (`?V`), `set`, `remove` (`?V`), `containsKey`, `containsValue`, `clear`, the foreach-only `keys`/`values` projections, and `count`/`isEmpty` (decisions 0100 and 0113). Keys require `Hashable`; nullable keys do not inherit payload conformance. An owned move type."),
             "Set" => Some("`Set<T>` is the insertion-ordered unique-element collection: `Set::from`, `add`, `remove`, `contains`, `union`/`intersect`/`difference`, and `count`/`isEmpty` (decision 0100). Elements require `Hashable`. An owned move type."),
             "SortedDictionary" => Some("`SortedDictionary<K, V>` is a key-ordered map with the `Dictionary` member surface. Keys and the `keys`/`values` projections use ascending `Comparable<K>` order. An owned move type."),
             "SortedSet" => Some("`SortedSet<T>` is an ascending-order unique-element collection with the `Set` member surface. Elements require `Comparable<T>`. An owned move type."),
@@ -4648,6 +4655,24 @@ mod tests {
     }
 
     #[test]
+    fn borrow_keyword_completion_and_hover_describe_retained_iterator_sources() {
+        let item = completion_item("borrow");
+        assert_eq!(item["detail"], "Doria keyword");
+        assert_eq!(
+            item["documentation"],
+            hover_description(&TokenKind::Borrow).unwrap()
+        );
+
+        let source = "class Cursor implements Iterator<int> { function __construct(borrow List<int> $source) {} function hasCurrent(): bool { return true; } function getCurrent(): int { return $this->source[0]; } writable function advance(): void {} }";
+        assert!(diagnostics_for_document("cursor.doria", source).is_empty());
+        let hover = hover_at_offset(source, source.find("borrow").unwrap()).unwrap();
+        let text = hover["contents"]["value"].as_str().unwrap();
+        assert!(text.contains("readonly source loan"), "{text}");
+        assert!(text.contains("not its source"), "{text}");
+        assert!(text.contains("cannot outlive"), "{text}");
+    }
+
+    #[test]
     fn enum_and_match_keywords_are_active_compiler_syntax() {
         for (keyword, kind) in [
             ("enum", TokenKind::Enum),
@@ -4910,7 +4935,16 @@ function main(): void
             .as_str()
             .expect("interface hover contents should be markdown");
         assert!(interface_text.contains("Owned and borrowed interface values"));
-        assert!(interface_text.contains("Stage 35 Slice 3"));
+        assert!(interface_text.contains("Core-contract operations and public iteration execute"));
+        assert!(!interface_text.contains("require Stage 35 Slice 3"));
+
+        let foreach_text = hover_description(&TokenKind::Foreach).unwrap();
+        assert!(foreach_text.contains("Iterable/Iterator"));
+        assert!(foreach_text.contains("Every binding requires an explicit type"));
+        let dictionary_text =
+            hover_description(&TokenKind::Identifier("Dictionary".into())).unwrap();
+        assert!(dictionary_text.contains("`containsKey`"));
+        assert!(!dictionary_text.contains("`has`"));
 
         let trait_source = "trait Formats {}";
         let trait_hover = hover_at_offset(trait_source, 0)
