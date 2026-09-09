@@ -662,10 +662,23 @@ impl Server {
             return Ok(());
         };
 
-        let diagnostics = prepare_diagnostics(document.analysis.diagnostics())
-            .iter()
-            .map(|diagnostic| self.graph_diagnostic_to_lsp(uri, diagnostic))
-            .collect::<Vec<_>>();
+        // Group compiler causes within their own graph, then deduplicate only
+        // fully projected diagnostics. Graph-local spans must not be compared
+        // between workspace members sharing a dependency source.
+        let groups = self
+            .document_index
+            .diagnostic_groups(uri)
+            .map(|groups| groups.iter().map(Vec::as_slice).collect::<Vec<_>>())
+            .unwrap_or_else(|| vec![document.analysis.diagnostics()]);
+        let mut diagnostics = Vec::new();
+        for group in groups {
+            for diagnostic in prepare_diagnostics(group) {
+                let value = self.graph_diagnostic_to_lsp(uri, &diagnostic);
+                if !diagnostics.contains(&value) {
+                    diagnostics.push(value);
+                }
+            }
+        }
         let mut params = json!({
             "uri": uri,
             "diagnostics": diagnostics,
@@ -906,6 +919,16 @@ impl Server {
             .and_then(Value::as_u64)? as u32;
         let document = self.document(uri)?;
         let offset = position_to_byte_offset(&document.text, line, character);
+        if let Some(hover) = self
+            .document_index
+            .composed_presentation(uri)
+            .and_then(|view| view.hover(offset))
+        {
+            return Some(json!({
+                "contents": { "kind": "markdown", "value": hover.markdown },
+                "range": span_to_range(&document.text, hover.span),
+            }));
+        }
         if let Some(hover) = document.analysis.namespace_hover_at_offset(offset) {
             return Some(json!({
                 "contents": {
@@ -971,19 +994,28 @@ impl Server {
         let Some((uri, document, offset)) = self.uri_document_and_offset(params) else {
             return Value::Null;
         };
-        let help = document
-            .analysis
-            .signature_help_at_offset(offset)
+        let help = self
+            .document_index
+            .composed_presentation(&uri)
+            .and_then(|view| view.signatures(offset))
+            .or_else(|| document.analysis.signature_help_at_offset(offset))
             .or_else(|| {
-                AnalysisSnapshot::signature_help_for_incomplete_call(&uri, &document.text, offset)
+                let recovered =
+                    AnalysisSnapshot::recover_incomplete_call_source(&uri, &document.text, offset)?;
+                self.analyze_temporary_project_overlay(&uri, &recovered)
+                    .unwrap_or_else(|| AnalysisSnapshot::analyze(&uri, &recovered))
+                    .signature_help_at_offset(offset)
             });
         let Some(help) = help else {
             return Value::Null;
         };
         json!({
-            "signatures": [{ "label": help.label }],
+            "signatures": help.iter().map(|signature| json!({
+                "label": signature.label,
+                "activeParameter": signature.active_parameter,
+            })).collect::<Vec<_>>(),
             "activeSignature": 0,
-            "activeParameter": help.active_parameter,
+            "activeParameter": help[0].active_parameter,
         })
     }
 
@@ -1015,6 +1047,13 @@ impl Server {
                 ),
             };
             return indexed_completion_items(completions);
+        }
+        if let Some(completions) = self
+            .document_index
+            .composed_presentation(&uri)
+            .and_then(|view| view.completions(offset))
+        {
+            return semantic_completion_items(completions);
         }
         let mut hierarchy_context = document.analysis.hierarchy_context_at_offset(offset);
         let contract_context = contract_completion_context(&document.text, offset);
@@ -1061,12 +1100,21 @@ impl Server {
             ));
         }
         if parent_completion_context(&document.text, offset) {
+            if let Some(completions) = document.analysis.static_completions_at_offset(offset) {
+                return semantic_completion_items(completions);
+            }
+            let mut recovered = document.text.clone();
+            recovered.insert_str(offset, "__doria_completion();");
+            let analysis = self.analyze_temporary_project_overlay(&uri, &recovered);
+            if let Some(completions) = analysis
+                .as_ref()
+                .and_then(|analysis| analysis.static_completions_at_offset(offset))
+            {
+                return semantic_completion_items(completions);
+            }
             if hierarchy_context.is_none() {
-                let mut recovered = document.text.clone();
-                recovered.insert_str(offset, "__doria_completion();");
-                hierarchy_context = self
-                    .analyze_temporary_project_overlay(&uri, &recovered)
-                    .and_then(|analysis| analysis.hierarchy_context_at_offset(offset));
+                hierarchy_context =
+                    analysis.and_then(|analysis| analysis.hierarchy_context_at_offset(offset));
             }
             return indexed_completion_items(hierarchy_context.as_ref().map_or_else(
                 Vec::new,
@@ -1091,6 +1139,13 @@ impl Server {
             }
         }
         if named_argument_completion_context(&document.text, offset) {
+            if let Some(completions) = self
+                .document_index
+                .composed_presentation(&uri)
+                .and_then(|view| view.named_arguments(offset))
+            {
+                return semantic_completion_items(completions);
+            }
             if let Some(recovered) =
                 AnalysisSnapshot::recover_incomplete_call_source(&uri, &document.text, offset)
             {
@@ -1179,7 +1234,31 @@ impl Server {
                 PLACEHOLDER.to_string()
             };
             source.insert_str(offset, &insertion);
-            let analysis = AnalysisSnapshot::analyze(&uri, &source);
+            let analysis = self
+                .analyze_temporary_project_overlay(&uri, &source)
+                .unwrap_or_else(|| {
+                    AnalysisSnapshot::analyze_with_context(
+                        &uri,
+                        &source,
+                        document.analysis.compilation_context().clone(),
+                    )
+                });
+            if let Some(completions) = analysis.static_completions_at_offset(offset) {
+                return semantic_completion_items(completions);
+            }
+            // A trait adaptation needs its own complete parser production, not
+            // the expression recovery used by ordinary static access.
+            let mut source = document.text.clone();
+            source.insert_str(offset, "__doria_completion as __doria_completion_alias;");
+            let analysis = self
+                .analyze_temporary_project_overlay(&uri, &source)
+                .unwrap_or_else(|| {
+                    AnalysisSnapshot::analyze_with_context(
+                        &uri,
+                        &source,
+                        document.analysis.compilation_context().clone(),
+                    )
+                });
             if let Some(completions) = analysis.static_completions_at_offset(offset) {
                 return semantic_completion_items(completions);
             }
@@ -1235,6 +1314,12 @@ impl Server {
             .and_then(|context| context.get("includeDeclaration"))
             .and_then(Value::as_bool)
             .unwrap_or(true);
+        if let Some(locations) =
+            self.document_index
+                .composition_references(&uri, offset, include_declaration)
+        {
+            return self.navigation_locations(locations);
+        }
         if let Some(locations) =
             self.document_index
                 .contract_references(&uri, offset, include_declaration)
@@ -1347,18 +1432,26 @@ impl Server {
         let Some((uri, document, offset)) = self.uri_document_and_offset(params) else {
             return Value::Null;
         };
-        if self
-            .document_index
-            .contract_rename_requires_family(&uri, offset)
-        {
-            return Value::Null;
-        }
         let Some(new_name) = params
             .and_then(|params| params.get("newName"))
             .and_then(Value::as_str)
         else {
             return Value::Null;
         };
+        match self
+            .document_index
+            .composition_rename_edits(&uri, offset, new_name)
+        {
+            Ok(Some(edits)) => return self.rename_workspace_edit(edits),
+            Err(()) => return Value::Null,
+            Ok(None) => {}
+        }
+        if self
+            .document_index
+            .contract_rename_requires_family(&uri, offset)
+        {
+            return Value::Null;
+        }
         if let Some(target) = self.document_index.target_at(&uri, offset) {
             let Some(mut edits) = self.document_index.rename(&target, new_name) else {
                 return Value::Null;
@@ -1379,43 +1472,7 @@ impl Server {
                     );
                 }
             }
-            edits.sort_by(|left, right| {
-                (&left.uri, left.span.start, left.span.end).cmp(&(
-                    &right.uri,
-                    right.span.start,
-                    right.span.end,
-                ))
-            });
-            edits.dedup_by(|left, right| left.uri == right.uri && left.span == right.span);
-            let mut changes = serde_json::Map::new();
-            for edit in edits {
-                if !self.source_is_editable(&edit.uri) {
-                    return Value::Null;
-                }
-                let Some(target_document) = self.document(&edit.uri) else {
-                    return Value::Null;
-                };
-                let replacement = if target_document
-                    .text
-                    .get(edit.span.start..edit.span.end)
-                    .is_some_and(|source| source.starts_with('$'))
-                    && !edit.replacement.starts_with('$')
-                {
-                    format!("${}", edit.replacement)
-                } else {
-                    edit.replacement
-                };
-                changes
-                    .entry(edit.uri)
-                    .or_insert_with(|| Value::Array(Vec::new()))
-                    .as_array_mut()
-                    .expect("workspace rename changes are arrays")
-                    .push(json!({
-                        "range": span_to_range(&target_document.text, edit.span),
-                        "newText": replacement,
-                    }));
-            }
-            return json!({ "changes": changes });
+            return self.rename_workspace_edit(edits);
         }
         let Some(edits) = document.analysis.rename_edits_at_offset(offset, new_name) else {
             return Value::Null;
@@ -1436,6 +1493,38 @@ impl Server {
             changes.insert(uri, Value::Array(edits));
             json!({ "changes": changes })
         }
+    }
+
+    fn rename_workspace_edit(&self, mut edits: Vec<IndexedEdit>) -> Value {
+        edits.sort_by(|left, right| {
+            (&left.uri, left.span.start, left.span.end).cmp(&(
+                &right.uri,
+                right.span.start,
+                right.span.end,
+            ))
+        });
+        edits.dedup_by(|left, right| left.uri == right.uri && left.span == right.span);
+        let mut changes = serde_json::Map::new();
+        for edit in edits {
+            if !self.source_is_editable(&edit.uri) {
+                return Value::Null;
+            }
+            let Some(target_document) = self.document(&edit.uri) else {
+                return Value::Null;
+            };
+            let Some(source) = target_document.text.get(edit.span.start..edit.span.end) else {
+                return Value::Null;
+            };
+            let replacement = if source.starts_with('$') && !edit.replacement.starts_with('$') {
+                format!("${}", edit.replacement)
+            } else {
+                edit.replacement
+            };
+            changes.entry(edit.uri).or_insert_with(|| Value::Array(Vec::new()))
+                .as_array_mut().expect("workspace rename changes are arrays")
+                .push(json!({ "range": span_to_range(&target_document.text, edit.span), "newText": replacement }));
+        }
+        json!({ "changes": changes })
     }
 
     fn semantic_tokens(&self, params: Option<&Value>) -> Value {
@@ -1964,6 +2053,7 @@ impl Server {
         target_uri: &str,
         target_text: &str,
     ) -> Option<AnalysisSnapshot> {
+        let mut snapshots = Vec::new();
         for root in &self.workspace_roots {
             let Some(project) = self.projects.get(&root.uri) else {
                 continue;
@@ -2009,11 +2099,62 @@ impl Server {
                     continue;
                 };
                 if let Some(document) = graph.documents.remove(target_uri) {
-                    return Some(document.analysis);
+                    snapshots.push(document.analysis);
                 }
             }
         }
-        None
+        if !snapshots.is_empty() {
+            return AnalysisSnapshot::merge_recovered_compositions(snapshots);
+        }
+        // Manifest-free workspaces still have explicit indexed graph membership.
+        // Reuse that boundary for recovery instead of dropping imports by checking
+        // the edited file alone or merging independent example programs.
+        if self.projects.values().any(|project| {
+            project.packages.iter().any(|package| {
+                uri_is_within(target_uri, &file_uri::path_to_file_uri(&package.root))
+            })
+        }) {
+            return None;
+        }
+        let graph_id = self.document_index.graph_for(target_uri)?;
+        let PackageIdentity::Named(package) = &self
+            .document(target_uri)?
+            .analysis
+            .compilation_context()
+            .package
+        else {
+            return None;
+        };
+        let mut sources = self
+            .documents
+            .iter()
+            .filter(|(uri, _)| self.document_index.graph_for(uri) == Some(graph_id))
+            .map(|(uri, document)| {
+                (
+                    uri.as_str(),
+                    self.graph_location(uri).2,
+                    if uri == target_uri {
+                        target_text
+                    } else {
+                        document.text.as_str()
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        sources.sort_by_key(|(uri, _, _)| *uri);
+        let open_sources = sources
+            .iter()
+            .map(|(uri, relative_path, text)| OpenSource {
+                uri,
+                relative_path: relative_path.clone(),
+                text,
+            })
+            .collect::<Vec<_>>();
+        analyze_open_graph(package, &open_sources, &mut CompilationSession::default())
+            .ok()?
+            .documents
+            .remove(target_uri)
+            .map(|document| document.analysis)
     }
 
     fn reanalyze_documents(&mut self) {
@@ -3427,22 +3568,38 @@ fn completion_items_with_analysis(analysis: &AnalysisSnapshot, offset: usize) ->
 
 fn scalar_runtime_type_description(name: &str) -> Option<&'static str> {
     match name {
-        "float" => Some("Implemented canonical IEEE 754 binary64 scalar type; exact alias of `float64`."),
+        "float" => {
+            Some("Implemented canonical IEEE 754 binary64 scalar type; exact alias of `float64`.")
+        }
         "float64" => Some("Implemented IEEE 754 binary64 scalar type; exact alias of `float`."),
         "float32" => Some("Implemented distinct IEEE 754 binary32 scalar type."),
-        "bool" => Some("Implemented Copy scalar type with runtime locals, parameters, returns, calls, and short-circuit operators."),
+        "bool" => Some(
+            "Implemented Copy scalar type with runtime locals, parameters, returns, calls, and short-circuit operators.",
+        ),
         _ => None,
     }
 }
 
 fn shared_ownership_type_description(name: &str) -> Option<&'static str> {
     match name {
-        "SharedReference" => Some("`SharedReference<T>` is a non-thread-safe owning move value for a readonly shared class allocation, including an interface view. `SharedReference<I> $owner = shared new Concrete()` uses checked nominal conformance without wrapper covariance. Ownership is duplicated only by explicit `share()`. It never converts to the writable family; readonly shared collection, scalar, string, and `mixed` payload execution remain unsupported."),
-        "WeakReference" => Some("`WeakReference<T>` is a non-thread-safe non-owning move value created from `SharedReference<T>`. `acquire()` returns `?SharedReference<T>` while the payload is alive and `null` after final strong release, preserving an interface payload's exact view. It never crosses ownership families."),
-        "WritableSharedReference" => Some("`WritableSharedReference<T>` is a non-thread-safe owning move value in the writable shared family. Ownership is duplicated only by explicit `share()`; payload access requires a lifetime-owning object obtained with `acquireReadonlyAccess()` or `acquireWritableAccess()`. It never converts to `SharedReference<T>`. Class, interface, generic class, typed-array, List, Dictionary, Set, and Bytes payloads execute; scalar, string, and `mixed` composition remain deferred."),
-        "WritableWeakReference" => Some("`WritableWeakReference<T>` is the non-thread-safe non-owning move value for the writable family. `acquire()` returns `?WritableSharedReference<T>` while the payload is alive, preserving its interface view when T is an interface, and never crosses into the readonly family."),
-        "ReadonlySharedReferenceAccess" => Some("`ReadonlySharedReferenceAccess<T>` is a non-thread-safe owned move value holding a readonly lease and keeping a writable-family payload alive for its full lifetime. It forwards readonly class/interface requirements and supported collection access. Borrowed payload views cannot outlive the lease. It cannot be shared, weakened, copied, or converted between families."),
-        "WritableSharedReferenceAccess" => Some("`WritableSharedReferenceAccess<T>` is a non-thread-safe owned move value holding an exclusive writable lease, including for interface payloads. Its binding must be `writable` to mutate through it; borrowed payload views cannot outlive the lease. It cannot be shared, weakened, copied, or converted between families."),
+        "SharedReference" => Some(
+            "`SharedReference<T>` is a non-thread-safe owning move value for a readonly shared class allocation, including an interface view. `SharedReference<I> $owner = shared new Concrete()` uses checked nominal conformance without wrapper covariance. Ownership is duplicated only by explicit `share()`. It never converts to the writable family; readonly shared collection, scalar, string, and `mixed` payload execution remain unsupported.",
+        ),
+        "WeakReference" => Some(
+            "`WeakReference<T>` is a non-thread-safe non-owning move value created from `SharedReference<T>`. `acquire()` returns `?SharedReference<T>` while the payload is alive and `null` after final strong release, preserving an interface payload's exact view. It never crosses ownership families.",
+        ),
+        "WritableSharedReference" => Some(
+            "`WritableSharedReference<T>` is a non-thread-safe owning move value in the writable shared family. Ownership is duplicated only by explicit `share()`; payload access requires a lifetime-owning object obtained with `acquireReadonlyAccess()` or `acquireWritableAccess()`. It never converts to `SharedReference<T>`. Class, interface, generic class, typed-array, List, Dictionary, Set, and Bytes payloads execute; scalar, string, and `mixed` composition remain deferred.",
+        ),
+        "WritableWeakReference" => Some(
+            "`WritableWeakReference<T>` is the non-thread-safe non-owning move value for the writable family. `acquire()` returns `?WritableSharedReference<T>` while the payload is alive, preserving its interface view when T is an interface, and never crosses into the readonly family.",
+        ),
+        "ReadonlySharedReferenceAccess" => Some(
+            "`ReadonlySharedReferenceAccess<T>` is a non-thread-safe owned move value holding a readonly lease and keeping a writable-family payload alive for its full lifetime. It forwards readonly class/interface requirements and supported collection access. Borrowed payload views cannot outlive the lease. It cannot be shared, weakened, copied, or converted between families.",
+        ),
+        "WritableSharedReferenceAccess" => Some(
+            "`WritableSharedReferenceAccess<T>` is a non-thread-safe owned move value holding an exclusive writable lease, including for interface payloads. Its binding must be `writable` to mutate through it; borrowed payload views cannot outlive the lease. It cannot be shared, weakened, copied, or converted between families.",
+        ),
         _ => None,
     }
 }
@@ -3691,15 +3848,12 @@ const SHARED_OWNERSHIP_METHODS: &[BuiltinMethod] = &[
     BuiltinMethod {
         name: "share",
         signature: "function share(): SharedReference<T> | WritableSharedReference<T>",
-        documentation:
-            "Creates one additional owner in the receiver's existing shared-ownership family.",
+        documentation: "Creates one additional owner in the receiver's existing shared-ownership family.",
     },
     BuiltinMethod {
         name: "createWeakReference",
-        signature:
-            "function createWeakReference(): WeakReference<T> | WritableWeakReference<T>",
-        documentation:
-            "Creates a non-owning reference in the receiver's existing shared-ownership family.",
+        signature: "function createWeakReference(): WeakReference<T> | WritableWeakReference<T>",
+        documentation: "Creates a non-owning reference in the receiver's existing shared-ownership family.",
     },
     BuiltinMethod {
         name: "acquire",
@@ -3714,8 +3868,7 @@ const SHARED_OWNERSHIP_METHODS: &[BuiltinMethod] = &[
     BuiltinMethod {
         name: "acquireWritableAccess",
         signature: "function acquireWritableAccess(): WritableSharedReferenceAccess<T>",
-        documentation:
-            "Acquires owned exclusive writable access to a writable shared payload.",
+        documentation: "Acquires owned exclusive writable access to a writable shared payload.",
     },
 ];
 
@@ -3769,23 +3922,45 @@ fn integer_conversion_hover_at(tokens: &[Token], token_index: usize) -> Option<&
 
 fn cross_kind_conversion_description(name: &str) -> Option<&'static str> {
     match name {
-        "Int::toFloat" => Some("`Int::toFloat(value)` converts canonical `int`/`int64` to canonical `float`/`float64` using IEEE 754 round-to-nearest, ties-to-even, without panicking."),
-        "Float::toInt" => Some("`Float::toInt(value)` truncates canonical `float`/`float64` toward zero to canonical `int`/`int64`; NaN, infinity, and out-of-range values panic."),
+        "Int::toFloat" => Some(
+            "`Int::toFloat(value)` converts canonical `int`/`int64` to canonical `float`/`float64` using IEEE 754 round-to-nearest, ties-to-even, without panicking.",
+        ),
+        "Float::toInt" => Some(
+            "`Float::toInt(value)` truncates canonical `float`/`float64` toward zero to canonical `int`/`int64`; NaN, infinity, and out-of-range values panic.",
+        ),
         _ => None,
     }
 }
 
 fn integer_conversion_description(companion: &str) -> Option<&'static str> {
     match companion {
-        "Int" => Some("`Int::from(value)` explicitly converts one integer expression to `int`, the exact `int64` alias. Out-of-range conversion panics."),
-        "Int8" => Some("`Int8::from(value)` explicitly converts one integer expression to `int8`. Out-of-range conversion panics."),
-        "Int16" => Some("`Int16::from(value)` explicitly converts one integer expression to `int16`. Out-of-range conversion panics."),
-        "Int32" => Some("`Int32::from(value)` explicitly converts one integer expression to `int32`. Out-of-range conversion panics."),
-        "Int64" => Some("`Int64::from(value)` explicitly converts one integer expression to `int64`, the same canonical type as `int`. Out-of-range conversion panics."),
-        "UInt8" => Some("`UInt8::from(value)` explicitly converts one integer expression to `uint8`. Out-of-range conversion panics."),
-        "UInt16" => Some("`UInt16::from(value)` explicitly converts one integer expression to `uint16`. Out-of-range conversion panics."),
-        "UInt32" => Some("`UInt32::from(value)` explicitly converts one integer expression to `uint32`. Out-of-range conversion panics."),
-        "UInt64" => Some("`UInt64::from(value)` explicitly converts one integer expression to `uint64`. Out-of-range conversion panics."),
+        "Int" => Some(
+            "`Int::from(value)` explicitly converts one integer expression to `int`, the exact `int64` alias. Out-of-range conversion panics.",
+        ),
+        "Int8" => Some(
+            "`Int8::from(value)` explicitly converts one integer expression to `int8`. Out-of-range conversion panics.",
+        ),
+        "Int16" => Some(
+            "`Int16::from(value)` explicitly converts one integer expression to `int16`. Out-of-range conversion panics.",
+        ),
+        "Int32" => Some(
+            "`Int32::from(value)` explicitly converts one integer expression to `int32`. Out-of-range conversion panics.",
+        ),
+        "Int64" => Some(
+            "`Int64::from(value)` explicitly converts one integer expression to `int64`, the same canonical type as `int`. Out-of-range conversion panics.",
+        ),
+        "UInt8" => Some(
+            "`UInt8::from(value)` explicitly converts one integer expression to `uint8`. Out-of-range conversion panics.",
+        ),
+        "UInt16" => Some(
+            "`UInt16::from(value)` explicitly converts one integer expression to `uint16`. Out-of-range conversion panics.",
+        ),
+        "UInt32" => Some(
+            "`UInt32::from(value)` explicitly converts one integer expression to `uint32`. Out-of-range conversion panics.",
+        ),
+        "UInt64" => Some(
+            "`UInt64::from(value)` explicitly converts one integer expression to `uint64`. Out-of-range conversion panics.",
+        ),
         _ => None,
     }
 }
@@ -3793,9 +3968,9 @@ fn integer_conversion_description(companion: &str) -> Option<&'static str> {
 fn hover_description(kind: &TokenKind) -> Option<&'static str> {
     match kind {
         TokenKind::Class => Some("Declares a Doria class."),
-        TokenKind::Open => Some(
-            "Permits subclassing on a class or creates a virtual method slot on a method.",
-        ),
+        TokenKind::Open => {
+            Some("Permits subclassing on a class or creates a virtual method slot on a method.")
+        }
         TokenKind::Override => Some(
             "Marks a method as the checked implementation of an inherited open virtual slot, or marks a constructor parameter as reusing one inherited property without creating storage.",
         ),
@@ -3806,10 +3981,10 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "Declares the single visible open parent of a class, or the parent contracts of an interface.",
         ),
         TokenKind::Interface => Some(
-            "Declares a nominal interface with checked generic requirements and parent contracts. Owned and borrowed interface values support erased calls, narrowing, and shared payload views. Core-contract operations and public iteration execute through compiler-selected contracts; trait composition remains Stage 35 Slice 4 work.",
+            "Declares a nominal interface with checked generic requirements and parent contracts. Owned and borrowed interface values support erased calls, narrowing, and shared payload views. Core-contract operations and public iteration execute through compiler-selected contracts; selected trait members can satisfy interface requirements.",
         ),
         TokenKind::Implements => Some(
-            "Declares checked nominal conformance. Concrete and specialized constrained calls remain direct; interface-erased calls use the requirement contract. Trait-dependent obligations remain deferred to Stage 35 Slice 4.",
+            "Declares checked nominal conformance. Concrete and specialized constrained calls remain direct; interface-erased calls use the requirement contract. Trait-dependent obligations are checked against the final selected members.",
         ),
         TokenKind::Function => Some(
             "Declares a named function or method, an anonymous block closure, or a structural function type according to context. Function types preserve readonly, writable, or once invocation; parameter ownership; and checked effects. The compiler checks structural callable compatibility.",
@@ -3857,9 +4032,9 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
         TokenKind::Catch => Some(
             "Handles a declared checked-error type and its conforming descendants from the protected `try` block. `catch (Error)` is the catch-all form.",
         ),
-        TokenKind::Throw => Some(
-            "Transfers ownership of one explicit `Error` value as a checked effect.",
-        ),
+        TokenKind::Throw => {
+            Some("Transfers ownership of one explicit `Error` value as a checked effect.")
+        }
         TokenKind::Throws => Some(
             "Declares a reusable callable's source-ordered checked-error effect set. The selected program entrypoint may omit it and infer escaping effects.",
         ),
@@ -3867,8 +4042,12 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "`echo value;` writes the displayed value. `Doria\\Std\\Io\\IoError` is an ambient checked runtime effect and does not require source `throws`.",
         ),
         TokenKind::New => Some("Constructs an instance of a class."),
-        TokenKind::Foreach => Some("Iterates over supported collections, ranges, or an Iterable/Iterator contract. Every binding requires an explicit type. User-defined iteration is value-only; built-in sequence indices and dictionary keys retain their compiler-defined roles."),
-        TokenKind::As => Some("Introduces a typed `foreach` binding, an import alias, or an authored trait alias/access adaptation."),
+        TokenKind::Foreach => Some(
+            "Iterates over supported collections, ranges, or an Iterable/Iterator contract. Every binding requires an explicit type. User-defined iteration is value-only; built-in sequence indices and dictionary keys retain their compiler-defined roles.",
+        ),
+        TokenKind::As => Some(
+            "Introduces a typed `foreach` binding, an import alias, or an authored trait alias/access adaptation.",
+        ),
         TokenKind::Static => Some("Declares a static method or property."),
         TokenKind::SelfType => Some(
             "Reserved declaring-class qualifier and type: `self::member` or a `self` return type. Interface return `self` denotes the exact dynamic implementer; trait `self` remains composer-dependent.",
@@ -3877,13 +4056,13 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "Direct parent-implementation qualifier. Calls through `parent::` bypass virtual dispatch.",
         ),
         TokenKind::Trait => Some(
-            "Declares accepted trait syntax. Decision 0134 defines composition, whose implementation lands in Stage 35 Slice 4.",
+            "Declares a trait under Decision 0134. Composition specializes its members in each using class, preserving authored origins, alias identities, and checked requirements.",
         ),
         TokenKind::Uses => Some(
-            "Records ordered trait composition and adaptations. Declarations and origins are checked; composer member injection remains pending Stage 35 Slice 4.",
+            "Composes trait members with compiler-checked substitutions, adaptations, and requirements. Selected methods, properties, and constants become members of the composing class.",
         ),
         TokenKind::Insteadof => Some(
-            "Selects an authored trait method over the listed conflicting origins. The adaptation is preserved for Stage 35 Slice 4 composition, not applied during declaration checking.",
+            "Selects a trait method over the listed conflicting origins. Excluded implementations remain available for explicit aliases; alias and original method identities stay distinct.",
         ),
         TokenKind::Const => Some("Declares a compile-time-evaluated constant."),
         TokenKind::Enum => Some("Declares a nominal Doria enum type."),
@@ -3912,34 +4091,67 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
         TokenKind::FloatType => scalar_runtime_type_description("float"),
         TokenKind::Float32Type => scalar_runtime_type_description("float32"),
         TokenKind::Float64Type => scalar_runtime_type_description("float64"),
-        TokenKind::StringType => Some("The immutable UTF-8 `string` primitive type. Its nullable form `?string` is one instance of the general `?T` nullable model (`??`, `?->`, and `!= null` / `is` narrowing); `read_line` returning `?string` at EOF is just one producer.") ,
+        TokenKind::StringType => Some(
+            "The immutable UTF-8 `string` primitive type. Its nullable form `?string` is one instance of the general `?T` nullable model (`??`, `?->`, and `!= null` / `is` narrowing); `read_line` returning `?string` at EOF is just one producer.",
+        ),
         TokenKind::BoolType => scalar_runtime_type_description("bool"),
         TokenKind::True | TokenKind::False => Some("Boolean literal."),
-        TokenKind::Null => Some("The `null` literal: the absent value of any nullable type `?T`. Assign it to a `?T` binding or compare with `== null` / `!= null`; a `!= null` guard narrows `?T` to `T`."),
+        TokenKind::Null => Some(
+            "The `null` literal: the absent value of any nullable type `?T`. Assign it to a `?T` binding or compare with `== null` / `!= null`; a `!= null` guard narrows `?T` to `T`.",
+        ),
         TokenKind::Reserved(_) => Some("Reserved for future Doria syntax."),
         TokenKind::Identifier(name) if Builtin::from_name(name).is_some() => {
             Builtin::from_name(name).map(builtin_documentation)
         }
         TokenKind::Identifier(name) => match name.as_str() {
-            "Error" => Some("`interface Error` is the compiler-known checked-error contract. Nominal conformance, including through an Error subinterface, requires an externally accessible readonly stored `string $message`. Subinterfaces participate in throws coverage, ordered catches, and typed toThrow inspectors while preserving concrete Error identity."),
-            "Displayable" => Some("`interface Displayable` requires exactly `function toString(): string`. Concrete, constrained, erased, inherited, and narrowed views use the same canonical display in interpolation, echo, string-anchored concatenation, and `%s`, with no implicit string assignment or argument conversion."),
-            "toString" => Some("`function toString(): string` is the exact externally accessible readonly instance method required by `Displayable`."),
-            "List" => Some("`List<T>` is the growable, insertion-ordered sequence: `add`, `insertAt`, `removeAt`, `pop`, `contains`, `first`/`last`, and the `count`/`isEmpty` properties (decision 0100). An owned move type."),
-            "Dictionary" => Some("`Dictionary<K, V>` is the insertion-ordered map: `get` (`?V`), `set`, `remove` (`?V`), `containsKey`, `containsValue`, `clear`, the foreach-only `keys`/`values` projections, and `count`/`isEmpty` (decisions 0100 and 0113). Keys require `Hashable`; nullable keys do not inherit payload conformance. An owned move type."),
-            "Set" => Some("`Set<T>` is the insertion-ordered unique-element collection: `Set::from`, `add`, `remove`, `contains`, `union`/`intersect`/`difference`, and `count`/`isEmpty` (decision 0100). Elements require `Hashable`. An owned move type."),
-            "SortedDictionary" => Some("`SortedDictionary<K, V>` is a key-ordered map with the `Dictionary` member surface. Keys and the `keys`/`values` projections use ascending `Comparable<K>` order. An owned move type."),
-            "SortedSet" => Some("`SortedSet<T>` is an ascending-order unique-element collection with the `Set` member surface. Elements require `Comparable<T>`. An owned move type."),
-            "PriorityQueue" => Some("`PriorityQueue<T>` is a min-priority queue: `push`, `pop`, `peek`, `count`, and `isEmpty`. It deliberately has no `foreach` order. Elements require `Comparable<T>`. An owned move type."),
-            "Deque" => Some("`Deque<T>` is a double-ended queue: `pushFront`/`pushBack`, `popFront`/`popBack`, `peekFront`/`peekBack`, `count`, and `isEmpty`. Iteration runs front to back. An owned move type."),
-            "String" => Some("`String` is the companion for canonical string operations. Text indices and lengths use Unicode extended grapheme clusters unless the API explicitly says bytes."),
-            name @ ("SharedReference" | "WeakReference" | "WritableSharedReference"
-            | "WritableWeakReference" | "ReadonlySharedReferenceAccess"
+            "Error" => Some(
+                "`interface Error` is the compiler-known checked-error contract. Nominal conformance, including through an Error subinterface, requires an externally accessible readonly stored `string $message`. Subinterfaces participate in throws coverage, ordered catches, and typed toThrow inspectors while preserving concrete Error identity.",
+            ),
+            "Displayable" => Some(
+                "`interface Displayable` requires exactly `function toString(): string`. Concrete, constrained, erased, inherited, and narrowed views use the same canonical display in interpolation, echo, string-anchored concatenation, and `%s`, with no implicit string assignment or argument conversion.",
+            ),
+            "toString" => Some(
+                "`function toString(): string` is the exact externally accessible readonly instance method required by `Displayable`.",
+            ),
+            "List" => Some(
+                "`List<T>` is the growable, insertion-ordered sequence: `add`, `insertAt`, `removeAt`, `pop`, `contains`, `first`/`last`, and the `count`/`isEmpty` properties (decision 0100). An owned move type.",
+            ),
+            "Dictionary" => Some(
+                "`Dictionary<K, V>` is the insertion-ordered map: `get` (`?V`), `set`, `remove` (`?V`), `containsKey`, `containsValue`, `clear`, the foreach-only `keys`/`values` projections, and `count`/`isEmpty` (decisions 0100 and 0113). Keys require `Hashable`; nullable keys do not inherit payload conformance. An owned move type.",
+            ),
+            "Set" => Some(
+                "`Set<T>` is the insertion-ordered unique-element collection: `Set::from`, `add`, `remove`, `contains`, `union`/`intersect`/`difference`, and `count`/`isEmpty` (decision 0100). Elements require `Hashable`. An owned move type.",
+            ),
+            "SortedDictionary" => Some(
+                "`SortedDictionary<K, V>` is a key-ordered map with the `Dictionary` member surface. Keys and the `keys`/`values` projections use ascending `Comparable<K>` order. An owned move type.",
+            ),
+            "SortedSet" => Some(
+                "`SortedSet<T>` is an ascending-order unique-element collection with the `Set` member surface. Elements require `Comparable<T>`. An owned move type.",
+            ),
+            "PriorityQueue" => Some(
+                "`PriorityQueue<T>` is a min-priority queue: `push`, `pop`, `peek`, `count`, and `isEmpty`. It deliberately has no `foreach` order. Elements require `Comparable<T>`. An owned move type.",
+            ),
+            "Deque" => Some(
+                "`Deque<T>` is a double-ended queue: `pushFront`/`pushBack`, `popFront`/`popBack`, `peekFront`/`peekBack`, `count`, and `isEmpty`. Iteration runs front to back. An owned move type.",
+            ),
+            "String" => Some(
+                "`String` is the companion for canonical string operations. Text indices and lengths use Unicode extended grapheme clusters unless the API explicitly says bytes.",
+            ),
+            name @ ("SharedReference"
+            | "WeakReference"
+            | "WritableSharedReference"
+            | "WritableWeakReference"
+            | "ReadonlySharedReferenceAccess"
             | "WritableSharedReferenceAccess") => shared_ownership_type_description(name),
-            "mixed" => Some("The dynamic boundary type: a boxed runtime value that accepts any type but rejects every operation until narrowed with the exact `is` type-test operator or an exact `match` type-binding pattern. `?mixed` adds nullability."),
+            "mixed" => Some(
+                "The dynamic boundary type: a boxed runtime value that accepts any type but rejects every operation until narrowed with the exact `is` type-test operator or an exact `match` type-binding pattern. `?mixed` adds nullability.",
+            ),
             "resource" => Some("Reserved for future PHP interop; not a usable core type."),
-            companion @ ("Int" | "Int8" | "Int16" | "Int32" | "Int64" | "UInt8"
-            | "UInt16" | "UInt32" | "UInt64") => integer_conversion_description(companion),
-            "Bytes" => Some("`Bytes` is the owned, mutable byte-buffer move type: `Bytes::fromArray` / `->toArray` (copying), the `length` property, byte indexing with in-place writes, and byte-wise equality. It converts to and from `uint8[]` only explicitly."),
+            companion @ ("Int" | "Int8" | "Int16" | "Int32" | "Int64" | "UInt8" | "UInt16"
+            | "UInt32" | "UInt64") => integer_conversion_description(companion),
+            "Bytes" => Some(
+                "`Bytes` is the owned, mutable byte-buffer move type: `Bytes::fromArray` / `->toArray` (copying), the `length` property, byte indexing with in-place writes, and byte-wise equality. It converts to and from `uint8[]` only explicitly.",
+            ),
             _ => None,
         },
         TokenKind::Variable(_) => Some("Doria variable. Variables must be declared before use."),
@@ -4460,8 +4672,9 @@ mod tests {
         assert!(hover_description(&TokenKind::Fn)
             .is_some_and(|text| text.contains("The compiler checks closure signatures")));
         assert!(hover_description(&TokenKind::Fn).is_some_and(|text| !text.contains("target")));
-        assert!(hover_description(&TokenKind::With).is_some_and(|text| text
-            .contains("validates capture names, modes, ownership, lifetimes, and escape")));
+        assert!(hover_description(&TokenKind::With).is_some_and(|text| {
+            text.contains("validates capture names, modes, ownership, lifetimes, and escape")
+        }));
 
         let source = "let $minimum = 70; let $f = fn(int $value) with ($minimum) => $value; function accept(take function once(): int $callback): void { $callback(); }";
         let closure = hover_at_offset(source, source.find("fn(").unwrap()).expect("closure hover");
@@ -4953,7 +5166,7 @@ function main(): void
             .as_str()
             .expect("trait hover contents should be markdown");
         assert!(trait_text.contains("Decision 0134"));
-        assert!(trait_text.contains("Stage 35 Slice 4"));
+        assert!(trait_text.contains("preserving authored origins, alias identities"));
     }
 
     #[test]
@@ -7147,6 +7360,39 @@ function main(): void { echo helper(31); }
     }
 
     #[test]
+    fn stage35_completion_recovery_keeps_standalone_examples_isolated() {
+        let first_uri = "file:///workspace/first.doria";
+        let second_uri = "file:///workspace/second.doria";
+        let first = "class Name { static function first(): int { return 1; } } function main(): void { echo Name::first(); }";
+        let second = "class Name { static function second(): int { return 2; } } function main(): void { echo Name::second(); }";
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, first_uri, first);
+        open_stage31_document(&mut server, second_uri, second);
+        let source = first.replace("Name::first()", "Name::");
+        server
+            .did_change(
+                Some(&json!({
+                    "textDocument": { "uri": first_uri, "version": 2 },
+                    "contentChanges": [{ "text": source }],
+                })),
+                &mut Vec::new(),
+            )
+            .unwrap();
+        let labels = request_completion_labels(
+            &server,
+            first_uri,
+            &source,
+            source.find("Name::").unwrap() + "Name::".len(),
+        );
+        assert!(labels.contains("first"), "{labels:?}");
+        assert!(!labels.contains("second"), "{labels:?}");
+        assert!(server.documents[second_uri]
+            .analysis
+            .diagnostics()
+            .is_empty());
+    }
+
+    #[test]
     fn stage35_interface_examples_do_not_share_an_entrypoint_or_declarations() {
         let first_uri = "file:///workspace/branch-results.doria";
         let second_uri = "file:///workspace/views.doria";
@@ -7714,11 +7960,11 @@ function inspect(Model $model): void
         };
         let lsp = server.graph_diagnostic_to_lsp(primary_uri, duplicate);
         assert_eq!(lsp["code"], "E0684");
-        assert!(lsp["relatedInformation"]
-            .as_array()
-            .is_some_and(|related| related
+        assert!(lsp["relatedInformation"].as_array().is_some_and(|related| {
+            related
                 .iter()
-                .any(|item| { item["location"]["uri"] == related_uri })));
+                .any(|item| item["location"]["uri"] == related_uri)
+        }));
         assert!(server.documents[related_uri]
             .analysis
             .diagnostics()
@@ -9079,12 +9325,8 @@ describe("🧪 User", function (): void {
             "function check(int $value): void { Doria\\Std\\Test\\expect($value)->; }\n",
         ] {
             let server = development_server(uri, source);
-            let labels = request_completion_labels(
-                &server,
-                uri,
-                source,
-                source.find("->;").unwrap() + 2,
-            );
+            let labels =
+                request_completion_labels(&server, uri, source, source.find("->;").unwrap() + 2);
             assert!(labels.contains("toEqual"), "{source}: {labels:?}");
         }
 
@@ -9439,21 +9681,401 @@ describe("🧪 suite", function (): void {
     }
 
     #[test]
-    fn stage35_composition_navigation_does_not_inject_members() {
-        let uri = "file:///workspace/traits.doria";
-        let source = "trait Format { function render(): string { return \"text\"; } } class Report { uses Format { Format::render as draw; } }";
+    fn stage35_alias_rename_and_references_preserve_cross_file_source_identity() {
+        let trait_uri = "file:///workspace/formatting.doria";
+        let class_uri = "file:///workspace/report.doria";
+        let call_uri = "file:///workspace/consumer.doria";
+        let trait_source =
+            "namespace Api; trait Formatting { function render(): int { return 1; } }";
+        let class_source = "namespace App; use Api\\Formatting; class Report { uses Formatting { Formatting::render as again; } }";
+        let call_source = "namespace App; function read(Report $report): int { return $report->render() + $report->again(); }";
+        let mut server = stage31_server(&["file:///workspace"]);
+        for (uri, source) in [
+            (trait_uri, trait_source),
+            (class_uri, class_source),
+            (call_uri, call_source),
+        ] {
+            open_stage31_document(&mut server, uri, source);
+        }
+        let alias = call_source.find("again()").unwrap();
+        let mut params = params_at(call_uri, call_source, alias);
+        let references = server.references(Some(&params));
+        assert_eq!(references.as_array().map(Vec::len), Some(2), "{references}");
+        assert!(references
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|reference| reference["uri"] != trait_uri));
+        params["newName"] = json!("repeat");
+        let rename = server.rename(Some(&params));
+        assert_eq!(
+            rename["changes"].as_object().map(serde_json::Map::len),
+            Some(2),
+            "{rename}"
+        );
+        let class_updated =
+            apply_workspace_edits(class_source, &json!({ "edit": rename }), class_uri);
+        let call_updated = apply_workspace_edits(call_source, &json!({ "edit": rename }), call_uri);
+        assert!(class_updated.contains("Formatting::render as repeat"));
+        assert!(call_updated.contains("$report->render() + $report->repeat()"));
+        for (uri, text) in [(class_uri, class_updated), (call_uri, call_updated)] {
+            server
+                .did_change(
+                    Some(&json!({ "textDocument": { "uri": uri, "version": 2 },
+                "contentChanges": [{ "text": text }] })),
+                    &mut Vec::new(),
+                )
+                .unwrap();
+        }
+        for uri in [trait_uri, class_uri, call_uri] {
+            assert!(
+                server.documents[uri].analysis.diagnostics().is_empty(),
+                "{uri}: {:?}",
+                server.documents[uri].analysis.diagnostics()
+            );
+        }
+        let source = server.documents[call_uri].text.clone();
+        let mut params = params_at(call_uri, &source, source.find("repeat()").unwrap());
+        params["newName"] = json!("render");
+        assert_eq!(
+            server.rename(Some(&params)),
+            Value::Null,
+            "member collision"
+        );
+        params["newName"] = json!("onceMore");
+        server
+            .source_edit_policies
+            .insert(class_uri.to_string(), SourceEditPolicy::DependencyCache);
+        assert_eq!(
+            server.rename(Some(&params)),
+            Value::Null,
+            "readonly alias declaration"
+        );
+    }
+
+    #[test]
+    fn stage35_trait_requirement_navigation_uses_checked_composer_obligations() {
+        let uri = "file:///workspace/required.doria";
+        let source = "trait Required<T> { function value(): T; } class Number { uses Required<int>; function value(): int { return 1; } } class Word { uses Required<string>; function value(): string { return \"text\"; } }";
         let mut server = stage31_server(&["file:///workspace"]);
         open_stage31_document(&mut server, uri, source);
-        let declaration = source.find("render").unwrap();
-        let adaptation = source.rfind("render").unwrap();
-        let definitions = server.definition(Some(&params_at(uri, source, adaptation)));
+        let implementations = server.implementation(Some(&params_at(
+            uri,
+            source,
+            source.find("value()").unwrap(),
+        )));
         assert_eq!(
-            definitions[0]["range"]["start"],
-            params_at(uri, source, declaration)["position"]
+            implementations.as_array().map(Vec::len),
+            Some(2),
+            "{implementations}"
         );
+        for needle in ["value(): int", "value(): string"] {
+            let expected = params_at(uri, source, source.find(needle).unwrap())["position"].clone();
+            assert!(
+                implementations
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|location| location["range"]["start"] == expected),
+                "{implementations}"
+            );
+        }
+    }
+
+    #[test]
+    fn stage35_adaptation_completion_uses_candidates_and_recovers_project_context() {
+        let trait_uri = "file:///workspace/formatting.doria";
+        let uri = "file:///workspace/report.doria";
+        let trait_source = "namespace Api; trait Formatting<T> { function render(T $value): T { return $value; } function required(): int; int $count = 1; }";
+        let source = "namespace App; use Api\\Formatting as Source; class Report { uses Source<int> { Source<int>::render as again; } function required(): int { return 1; } }";
+        for incomplete in [false, true] {
+            let mut server = stage31_server(&["file:///workspace"]);
+            open_stage31_document(&mut server, trait_uri, trait_source);
+            let source = if incomplete {
+                source.replace("render as again;", "")
+            } else {
+                source.to_owned()
+            };
+            open_stage31_document(&mut server, uri, &source);
+            let offset = source.find("Source<int>::").unwrap() + "Source<int>::".len();
+            let completions = server.completion(Some(&params_at(uri, &source, offset)));
+            let items = completions["items"].as_array().unwrap();
+            let render = items
+                .iter()
+                .find(|item| item["label"] == "render")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "implemented candidate, incomplete={incomplete}: {completions}; {:?}",
+                        server.documents[uri].analysis.diagnostics()
+                    )
+                });
+            assert!(
+                render["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("int $value): int"),
+                "{render}"
+            );
+            assert!(
+                items
+                    .iter()
+                    .all(|item| item["label"] != "required" && item["label"] != "count"),
+                "{completions}"
+            );
+        }
+    }
+
+    #[test]
+    fn stage35_nested_adaptation_completion_keeps_both_generic_contexts() {
+        let uri = "file:///workspace/nested.doria";
+        let source = "trait Leaf<T> { function value(T $value): T { return $value; } } trait Wrapped<T> { uses Leaf<T> { Leaf<T>::value as converted; } } class Numbers { uses Wrapped<int>; } class Words { uses Wrapped<string>; }";
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+        let offset = source.find("Leaf<T>::value").unwrap() + "Leaf<T>::".len();
+        let completions = server.completion(Some(&params_at(uri, source, offset)));
+        let values = completions["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["label"] == "value")
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 2, "{completions}");
+        for signature in ["int $value): int", "string $value): string"] {
+            assert!(
+                values
+                    .iter()
+                    .any(|item| item["detail"].as_str().unwrap().contains(signature)),
+                "{completions}"
+            );
+        }
+    }
+
+    #[test]
+    fn stage35_adaptation_navigation_keeps_excluded_method_origins() {
+        let uri = "file:///workspace/contracts.doria";
+        let source = include_str!("../../editors/fixtures/stage35-contracts.doria");
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+        assert!(
+            server.documents[uri].analysis.diagnostics().is_empty(),
+            "{:?}",
+            server.documents[uri].analysis.diagnostics()
+        );
+        for (trait_header, adaptation) in [
+            ("trait Format<T>", "Format<int>::render insteadof"),
+            ("trait Alternative<T>", "Alternative<int>::render as"),
+        ] {
+            let start = source.find(trait_header).unwrap();
+            let declaration = start + source[start..].find("render(").unwrap();
+            let offset = source.find(adaptation).unwrap() + adaptation.find("render").unwrap();
+            let definitions = server.definition(Some(&params_at(uri, source, offset)));
+            assert!(
+                definitions.as_array().unwrap().iter().any(|location| {
+                    location["uri"] == uri
+                        && location["range"]["start"]
+                            == params_at(uri, source, declaration)["position"]
+                }),
+                "{definitions}"
+            );
+        }
+    }
+
+    #[test]
+    fn stage35_shared_trait_body_preserves_cross_file_contexts_after_unsaved_edits() {
+        let trait_uri = "file:///workspace/values.doria";
+        let first_uri = "file:///workspace/first.doria";
+        let second_uri = "file:///workspace/second.doria";
+        let source = "namespace Api; trait Values<T> { function value(T $value): T { return $value; } function again(T $value): T { return $this->value($value); } }";
+        let first = "namespace App; use Api\\Values; class First { uses Values<int>; }";
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, trait_uri, source);
+        open_stage31_document(&mut server, first_uri, first);
+        for ty in ["string", "float64"] {
+            let second =
+                format!("namespace App; use Api\\Values; class Second {{ uses Values<{ty}>; }}");
+            if ty == "string" {
+                open_stage31_document(&mut server, second_uri, &second);
+            } else {
+                server
+                    .did_change(
+                        Some(&json!({
+                            "textDocument": { "uri": second_uri, "version": 2 },
+                            "contentChanges": [{ "text": second }],
+                        })),
+                        &mut Vec::new(),
+                    )
+                    .unwrap();
+            }
+            for uri in [trait_uri, first_uri, second_uri] {
+                assert!(
+                    server.documents[uri].analysis.diagnostics().is_empty(),
+                    "{:?}",
+                    server.documents[uri].analysis.diagnostics()
+                );
+            }
+            let offset = source.find("->value").unwrap() + 2;
+            let params = params_at(trait_uri, source, offset);
+            let hover = server.hover(Some(&params)).unwrap();
+            let markdown = hover["contents"]["value"].as_str().unwrap();
+            let display_type = if ty == "float64" { "float" } else { ty };
+            for expected in [
+                "App\\First::again".to_string(),
+                "App\\Second::again".to_string(),
+                "int $value): int".to_string(),
+                format!("{display_type} $value): {display_type}"),
+            ] {
+                assert!(markdown.contains(&expected), "{hover}");
+            }
+            if ty == "float64" {
+                assert!(!markdown.contains("string $value"), "{hover}");
+            }
+            let help =
+                server.signature_help(Some(&params_at(trait_uri, source, offset + "value(".len())));
+            assert_eq!(help["signatures"].as_array().unwrap().len(), 2, "{help}");
+            let definitions = server.definition(Some(&params));
+            let locations = definitions.as_array().unwrap();
+            for uri in [trait_uri, first_uri, second_uri] {
+                assert!(
+                    locations.iter().any(|location| location["uri"] == uri),
+                    "{definitions}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stage35_generic_alias_hover_uses_call_site_substitutions() {
+        let uri = "file:///workspace/generic-alias.doria";
+        let source = "trait Mapping<T> { function replace<U>(take U $value): U { return $value; } } class Mapper { uses Mapping<int> { Mapping<int>::replace as convert; } } function invoke(Mapper $mapper): string { return $mapper->convert(\"text\"); }";
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, uri, source);
+        assert!(
+            server.documents[uri].analysis.diagnostics().is_empty(),
+            "{:?}",
+            server.documents[uri].analysis.diagnostics()
+        );
+        let offset = source.rfind("convert(").unwrap();
+        let hover = server.hover(Some(&params_at(uri, source, offset))).unwrap();
+        let markdown = hover["contents"]["value"].as_str().unwrap();
+        assert!(
+            markdown.contains("convert<U>(take string $value): string"),
+            "{hover}"
+        );
+        assert!(!markdown.contains("#trait"), "{hover}");
+        let completions = server.completion(Some(&params_at(uri, source, offset)));
+        let items = completions["items"].as_array().unwrap();
+        assert!(
+            items.iter().any(|item| item["label"] == "convert"
+                && item["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("convert<U>(take U $value): U")),
+            "{completions}"
+        );
+        for private in ["#trait", "ExpansionId("] {
+            assert!(!completions.to_string().contains(private), "{completions}");
+        }
+        let signature = server.documents[uri]
+            .analysis
+            .signature_help_at_offset(source.find("\"text\"").unwrap())
+            .unwrap();
+        assert!(
+            signature[0].label.contains("take string $value): string"),
+            "{signature:?}"
+        );
+    }
+
+    #[test]
+    fn stage35_static_completion_preserves_project_and_composer_context() {
+        let trait_uri = "file:///workspace/state.doria";
+        let trait_source = "namespace Api; trait State { const string LABEL = \"ready\"; static writable int $count = 0; static function name(): string { return \"ready\"; } internal static function hidden(): void {} function read(): int { return 1; } }";
+        let class_uri = "file:///workspace/report.doria";
+        let class_source = "namespace App; use Api\\State; open class Report { uses State { State::name as displayName; } static function total(): int { return self::count; } } class Child extends Report { function inspect(): void { echo parent::displayName(); } }";
+        let consumer_uri = "file:///workspace/client.doria";
+        let consumer = "namespace Client; use App\\Report as View; function invoke(): void { echo View::displayName(); }";
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, trait_uri, trait_source);
+        open_stage31_document(&mut server, class_uri, class_source);
+        open_stage31_document(&mut server, consumer_uri, consumer);
+        for (uri, source, access, internal, instance) in [
+            (consumer_uri, consumer, "View::", false, false),
+            (class_uri, class_source, "self::", true, false),
+            (class_uri, class_source, "parent::", false, true),
+        ] {
+            assert!(
+                server.documents[uri].analysis.diagnostics().is_empty(),
+                "{:?}",
+                server.documents[uri].analysis.diagnostics()
+            );
+            let offset = source.find(access).unwrap() + access.len();
+            let labels = request_completion_labels(&server, uri, source, offset);
+            for expected in ["name", "displayName", "count", "LABEL"] {
+                assert!(labels.contains(expected), "{labels:?}");
+            }
+            assert_eq!(labels.contains("hidden"), internal, "{labels:?}");
+            assert_eq!(labels.contains("read"), instance, "{labels:?}");
+            assert!(!labels.contains("$count"), "{labels:?}");
+        }
+        let incomplete = consumer.replace("View::displayName()", "View::");
+        open_stage31_document(&mut server, consumer_uri, &incomplete);
+        let labels = request_completion_labels(
+            &server,
+            consumer_uri,
+            &incomplete,
+            incomplete.find("View::").unwrap() + "View::".len(),
+        );
+        assert!(labels.contains("displayName"), "{labels:?}");
+        assert!(labels.contains("count"), "{labels:?}");
+        assert!(!labels.contains("hidden"), "{labels:?}");
+    }
+
+    #[test]
+    fn stage35_composition_navigation_preserves_authored_and_alias_origins() {
+        let trait_uri = "file:///workspace/format.doria";
+        let trait_source =
+            "namespace Api; trait Format { function render(): string { return \"text\"; } }";
+        let uri = "file:///workspace/report.doria";
+        let source = "namespace App; use Api\\Format; class Report { uses Format { Format::render as draw; } } function invoke(Report $report): void { echo $report->render(); echo $report->draw(); }";
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(&mut server, trait_uri, trait_source);
+        open_stage31_document(&mut server, uri, source);
         let diagnostics = server.documents[uri].analysis.diagnostics();
-        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
-        assert_eq!(diagnostics[0].code, "E0493");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let declaration = params_at(
+            trait_uri,
+            trait_source,
+            trait_source.find("render").unwrap(),
+        );
+        let alias = params_at(uri, source, source.find("draw").unwrap());
+        for offset in [
+            source.find("render").unwrap(),
+            source.rfind("render").unwrap(),
+            source.find("draw").unwrap(),
+            source.rfind("draw").unwrap(),
+        ] {
+            let definitions = server.definition(Some(&params_at(uri, source, offset)));
+            let locations = definitions.as_array().unwrap();
+            assert!(
+                locations.iter().any(|location| {
+                    location["uri"] == trait_uri
+                        && location["range"]["start"] == declaration["position"]
+                }),
+                "{definitions}"
+            );
+            if source[offset..].starts_with("draw") {
+                assert!(
+                    locations.iter().any(|location| {
+                        location["uri"] == uri && location["range"]["start"] == alias["position"]
+                    }),
+                    "{definitions}"
+                );
+            }
+            let distinct = locations
+                .iter()
+                .map(Value::to_string)
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(distinct.len(), locations.len(), "{definitions}");
+        }
     }
 
     #[test]
@@ -9481,7 +10103,7 @@ describe("🧪 suite", function (): void {
             .analysis
             .signature_help_at_offset(consumer.find("7)").unwrap())
             .unwrap();
-        assert!(signature.label.contains("int $value"), "{signature:?}");
+        assert!(signature[0].label.contains("int $value"), "{signature:?}");
         let changed = contract.replace("$value", "$renamed");
         open_stage31_document(&mut server, contract_uri, &changed);
         assert!(!server.documents[consumer_uri]
@@ -9492,7 +10114,7 @@ describe("🧪 suite", function (): void {
             .analysis
             .signature_help_at_offset(consumer.find("7)").unwrap())
             .unwrap();
-        assert!(signature.label.contains("$renamed"), "{signature:?}");
+        assert!(signature[0].label.contains("$renamed"), "{signature:?}");
         open_stage31_document(&mut server, contract_uri, contract);
         assert!(server.documents[consumer_uri]
             .analysis
@@ -10242,7 +10864,7 @@ open class Base implements ValueSource
                 .analysis
                 .signature_help_at_offset(erased + "value(".len())
                 .unwrap();
-            assert!(signature.label.contains("value(): int"), "{signature:?}");
+            assert!(signature[0].label.contains("value(): int"), "{signature:?}");
         }
         let implementations =
             server.implementation(Some(&params_at(&base_uri, base_source, requirement)));
@@ -10334,12 +10956,26 @@ open class Base implements ValueSource
     fn stage34_compiler_diagnostics_and_incremental_refresh_do_not_go_stale() {
         for (source, code) in [
             ("class Base {} class Child extends Base {}", "E0722"),
-            ("open class Base { open function f(): void {} } class Child extends Base { function f(): void {} }", "E0726"),
-            ("open class Base { open function f(int $v): int { return $v; } } class Child extends Base { override function f(string $v): int { return 1; } }", "E0729"),
-            ("open class Base { function __construct(int $v) {} } class Child extends Base {}", "E0732"),
+            (
+                "open class Base { open function f(): void {} } class Child extends Base { function f(): void {} }",
+                "E0726",
+            ),
+            (
+                "open class Base { open function f(int $v): int { return $v; } } class Child extends Base { override function f(string $v): int { return 1; } }",
+                "E0729",
+            ),
+            (
+                "open class Base { function __construct(int $v) {} } class Child extends Base {}",
+                "E0732",
+            ),
         ] {
             let diagnostics = diagnostics_for_document("file:///workspace/error.doria", source);
-            assert!(diagnostics.iter().any(|diagnostic| diagnostic["code"] == code), "missing {code}: {diagnostics:#?}");
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic["code"] == code),
+                "missing {code}: {diagnostics:#?}"
+            );
         }
 
         let uri = "file:///workspace/incremental.doria";
@@ -10860,7 +11496,9 @@ function main(): void
                 actions.iter().any(|action| {
                     action["edit"]["changes"][uri]
                         .as_array()
-                        .is_some_and(|edits| edits.iter().any(|edit| edit["newText"] == replacement))
+                        .is_some_and(|edits| {
+                            edits.iter().any(|edit| edit["newText"] == replacement)
+                        })
                 }),
                 "missing compiler action for {code}: {actions:#?}"
             );
