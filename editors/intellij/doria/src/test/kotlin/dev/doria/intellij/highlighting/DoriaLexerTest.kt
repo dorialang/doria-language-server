@@ -6,6 +6,15 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 class DoriaLexerTest : TestCase() {
+    fun testStage35RetainedSourceModifierAndCurrentMethod() {
+        val fixture = Files.readString(Path.of("..", "..", "fixtures", "stage35-core-iteration.doria"))
+        val tokens = lex(fixture)
+        val modifiers = tokens.filter { it.text == "borrow" }
+        assertEquals(2, modifiers.size)
+        for (token in modifiers) assertEquals(DoriaTokenTypes.MODIFIER, token.type)
+        assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
+    }
+
     fun testStage35InterfaceRuntimeFixtureKeepsExistingTokens() {
         val fixture = Files.readString(Path.of("..", "..", "fixtures", "stage35-interface-runtime.doria"))
         val tokens = lex(fixture)

@@ -81,7 +81,12 @@ members of a known implementer. Erased-call signature help preserves requirement
 parameter names, ownership modes, generic substitutions, and checked effects;
 implementation-only defaults do not appear. Shared owner/access completions
 preserve wrapper precedence and readonly/writable forwarding. Core operations
-and public iteration remain Slice 3; trait composition remains Slice 4.
+and public iteration are implemented; trait composition remains Slice 4.
+`borrow` constructor promotion is presented as a retained readonly source loan,
+not an owned field. Compiler return-borrow facts describe `getCurrent()` for
+Move elements; exact-dynamic-result facts describe owned `clone()` results.
+Preserving collection operations and `List::filter` accept Copy-or-Cloneable
+elements without introducing implicit cloning in ordinary assignments.
 
 Stage 34 class and method hover consumes compiler-owned hierarchy metadata.
 Class hover shows the canonical declaration, direct parent, hierarchy depth,

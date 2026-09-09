@@ -65,7 +65,7 @@ inherited-member facts into open-parent, override, and `parent::` completion;
 hierarchy-aware hover and navigation; conservative virtual-family references and
 rename; and semantic tokens. It does not parse or validate inheritance itself,
 and it refuses rename whenever the complete family would cross an incomplete,
-generated, dependency-cache, or otherwise readonly graph boundary. Stage 35 interfaces and traits authority is accepted under Decision 0134; Slices 1 and 2 are complete and Slice 3 is next. Interface values, erased requirements, and shared-interface views use compiler facts for completion and signatures. Ordinary
+generated, dependency-cache, or otherwise readonly graph boundary. Stage 35 interfaces and traits authority is accepted under Decision 0134; Slices 1, 2, and 3 are complete and Slice 4 is next. Interface values, erased requirements, and shared-interface views use compiler facts for completion and signatures. Ordinary
 analysis remains target-neutral, and highlighting remains presentation only.
 
 The post-Stage-34 constructor-parameter-role correction is also implemented.
@@ -87,9 +87,12 @@ diagnostics and Machine Applicable insertion fixes, not accepted implicit
 declarations. The server does not implement a second foreach checker:
 unsupported first bindings, ranges, fixes, and UTF-16 ranges remain compiler
 diagnostics. Interpolation and `%s` materialize strings;
-the tooling invents no primitive `toString` or scalar-cast API. Stage 35 Slices 1
-and 2 are complete; core operations and public iteration are Slice 3, trait
-composition is Slice 4, and property hooks remain separate work.
+the tooling invents no primitive `toString` or scalar-cast API. Stage 35 Slices 1,
+2, and 3 are complete. Core operations, Copy-or-Cloneable preserving operations,
+and readonly public iteration are implemented; trait composition is Slice 4.
+`borrow` constructor promotion retains an iterator source loan, and
+`getCurrent()` returns a readonly borrow for Move elements. Property hooks
+remain separate work.
 
 Project-aware tooling asks Baton asynchronously for its strict schema-1 project
 document and gives each package-rooted dependency closure from the supplied

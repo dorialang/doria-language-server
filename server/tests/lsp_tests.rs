@@ -2521,6 +2521,29 @@ function cleanup(): void throws Failure, Doria\Std\Io\IoError
 }
 
 #[test]
+fn retained_iterator_loan_diagnostics_keep_utf16_ranges_and_no_ownership_fix() {
+    let uri = "file:///iterator-loan.doria";
+    let source = "class Cursor implements Iterator<int> { function __construct(borrow List<int> $source) {} function hasCurrent(): bool { return true; } function getCurrent(): int { return $this->source[0]; } writable function advance(): void {} } function main(): void { /* 😀 */ let writable $source = [1]; let $cursor = new Cursor($source); $source->add(2); echo $cursor->getCurrent(); }";
+    let diagnostics = diagnostics_for_document(uri, source);
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0763")
+        .expect("source-loan conflict");
+    let expected = byte_offset_to_position(source, source.rfind("$source->add").unwrap());
+    assert_eq!(diagnostic["range"]["start"]["line"], expected.line);
+    assert_eq!(
+        diagnostic["range"]["start"]["character"],
+        expected.character
+    );
+    assert!(
+        code_actions_for_document(uri, source)
+            .iter()
+            .all(|action| action["edit"].is_null()),
+        "ownership changes must not be automatic fixes"
+    );
+}
+
+#[test]
 fn explicit_foreach_binding_types_forward_utf16_safe_compiler_fixes() {
     let uri = "file:///explicit-foreach-bindings.doria";
     let source = "function main(): void { /* 😀 */ List<string> $values = [\"a\"]; foreach ($values as $index => $value) {} }";

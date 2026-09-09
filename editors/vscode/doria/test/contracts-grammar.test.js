@@ -7,6 +7,15 @@ const test = require("node:test");
 const grammar = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "syntaxes", "doria.tmLanguage.json"), "utf8"));
 const fixture = fs.readFileSync(path.join(__dirname, "..", "..", "..", "fixtures", "stage35-contracts.doria"), "utf8");
 
+test("retained iterator sources use the approved borrow modifier", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "..", "..", "fixtures", "stage35-core-iteration.doria"), "utf8");
+  const modifier = grammar.repository.keywords.patterns.find(pattern => pattern.name === "storage.modifier.mutability.doria");
+  assert.match("borrow", new RegExp(modifier.match));
+  assert.doesNotMatch("borrowed", new RegExp(modifier.match));
+  assert.match(source, /__construct\(borrow List<Book> \$source\)/);
+  assert.match(source, /function getCurrent\(\): Book/);
+});
+
 test("presents generic composition and adaptations without checking conformance", () => {
   const control = grammar.repository.keywords.patterns.find(pattern => pattern.name === "keyword.control.doria");
   assert.match("insteadof", new RegExp(control.match));

@@ -222,7 +222,7 @@
               }
             },
             {
-              "match": "(@param)\\s+((?:(?:internal|take|writable)\\s+)*)(\\S(?:.*?\\S)?)\\s+(\\$[A-Za-z_][A-Za-z0-9_]*)",
+              "match": "(@param)\\s+((?:(?:internal|take|borrow|writable)\\s+)*)(\\S(?:.*?\\S)?)\\s+(\\$[A-Za-z_][A-Za-z0-9_]*)",
               "captures": {
                 "1": {
                   "name": "keyword.other.documentation.tag.doria"
@@ -920,7 +920,7 @@
         },
         {
           "name": "storage.modifier.mutability.doria",
-          "match": "\\b(?:writable|readonly|take|shared)\\b"
+          "match": "\\b(?:writable|readonly|take|borrow|shared)\\b"
         },
         {
           "name": "storage.modifier.visibility.doria",
