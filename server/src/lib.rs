@@ -10521,7 +10521,10 @@ class Child extends Base
     #[test]
     fn stage34_hover_explains_hierarchy_and_direct_parent_dispatch() {
         let uri = "file:///workspace/hover.doria";
-        let source = r#"open class Base { open function value(): int { return 1; } }
+        let source = r#"open class Base {
+    open function value(): int { return 1; }
+    function fixed(): int { return 2; }
+}
 class Child extends Base { override function value(): int { return parent::value(); } }
 "#;
         let mut server = stage31_server(&["file:///workspace"]);
@@ -10549,6 +10552,28 @@ class Child extends Base { override function value(): int { return parent::value
         assert!(markdown.contains("Base::value"));
         assert!(markdown.contains("bypasses virtual dispatch"));
         assert!(!markdown.contains("vtable"));
+
+        for (declaration, prefix, dispatch) in [
+            ("open function value", "open function ", "Virtual"),
+            ("override function value", "override function ", "Virtual"),
+            ("function fixed", "function ", "Direct"),
+            (
+                "parent::value",
+                "parent::",
+                "Direct parent implementation (virtual dispatch bypassed)",
+            ),
+        ] {
+            let offset = source.find(declaration).unwrap() + prefix.len();
+            let indexed = server.document_index.hover(uri, offset).unwrap();
+            assert!(
+                indexed
+                    .markdown
+                    .contains(&format!("**Source Dispatch:** {dispatch}")),
+                "{}",
+                indexed.markdown
+            );
+            assert!(!indexed.markdown.contains("**Dispatch:**"));
+        }
     }
 
     #[test]

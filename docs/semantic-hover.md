@@ -102,9 +102,11 @@ Class hover shows the canonical declaration, direct parent, hierarchy depth,
 open/closed role, and runtime representation without exposing descriptors or
 layout details. Method hover preserves its complete source contract and adds the
 virtual root, nearest override, inherited defaults, and direct-versus-virtual
-dispatch facts. A `parent::` call names its exact direct parent declaration and
-states that virtual dispatch is bypassed. The server does not reconstruct a
-hierarchy or override checker from source text.
+facts labeled **Source Dispatch**. These describe language-level resolution,
+not the optimized machine-code shape; devirtualization and inlining do not change
+source definition or rename targets. A `parent::` call names its exact direct
+parent declaration and states that virtual dispatch is bypassed. The server does
+not reconstruct a hierarchy or override checker from source text.
 
 Constructor parameter hover likewise consumes compiler-owned role facts. A
 promoted parameter identifies its declared property, external or internal
@@ -140,8 +142,9 @@ from source spelling.
 Ownership hover text stays in Doria vocabulary: Owned Closure or Borrow-Bound Closure,
 Readonly/Writable/Owned taking capture, Readonly/Writable Repeatable or Consumes On
 Invocation, Nonescaping or Owned callback, and returned closures tied to a parameter
-or `$this`. Compiler-private binding IDs, closure coordinates, pass slots, future
-environment layout, and backend symbols are never presented.
+or `$this`. Nonescaping describes the source lifetime contract, not guaranteed
+physical stack placement. Compiler-private binding IDs, closure coordinates,
+pass slots, future environment layout, and backend symbols are never presented.
 
 Constructor-rooted writable paths and owned property writes use the same compiler
 authority. Accepted nested writes, owned initialization, and writable replacement
