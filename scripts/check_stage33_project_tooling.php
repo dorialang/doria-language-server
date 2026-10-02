@@ -107,7 +107,7 @@ stage33_require(
         && str_contains($intellijLspConfig, 'DoriaRefreshProjectAction'),
     'IntelliJ Baton override or explicit project refresh is missing.',
 );
-foreach (['Stage 33 and Phase F are complete', 'Stage 34 single class inheritance', 'never parses `Baton.toml`'] as $fact) {
+foreach (['Stage 33 and Phase F are complete', 'never parses `Baton.toml`'] as $fact) {
     stage33_require(str_contains($docs, $fact), "Stage 33 documentation is missing {$fact}.");
 }
 foreach (['stage33_project_graph_indexes_unopened_sources_and_overlays_open_buffers', 'project_inventory_replaces_watchers_with_exact_package_roots', 'modified_doria_sources_schedule_project_rediscovery', 'generated_and_git_sources_are_read_only', 'scheduling_is_non_blocking_debounced_and_cancels_superseded_work', 'cancelled_roots_keep_monotonic_generations_and_reject_stale_results'] as $coverage) {

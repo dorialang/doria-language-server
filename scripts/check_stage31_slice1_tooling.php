@@ -171,10 +171,8 @@ foreach ([
 }
 
 require_fact(
-    str_contains($docs, 'Stage 31 is complete')
-        && str_contains($docs, 'Stage 32 is complete')
-        && str_contains($docs, 'Stage 33 and Phase F are complete'),
-    'tooling documents must preserve Stage 31 and Stage 33 completion.',
+    str_contains($docs, 'Stage 31 is complete'),
+    'tooling documents must preserve Stage 31 completion.',
 );
 
 fwrite(STDOUT, "Stage 31 tooling guard passed.\n");

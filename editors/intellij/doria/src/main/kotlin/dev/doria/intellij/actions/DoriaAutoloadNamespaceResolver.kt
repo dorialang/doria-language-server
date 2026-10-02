@@ -35,7 +35,9 @@ internal object DoriaAutoloadNamespaceResolver {
         if (document.hasErrors()) return emptyList()
 
         return TABLE_NAMES.flatMap { (section, table) ->
-            document.getTable(section)?.getTable(table)?.let(::readMappings).orEmpty()
+            val sectionTable = document.get(section) as? TomlTable
+            val namespaceTable = sectionTable?.get(table) as? TomlTable
+            namespaceTable?.let(::readMappings).orEmpty()
         }
     }
 
@@ -43,7 +45,7 @@ internal object DoriaAutoloadNamespaceResolver {
         table.keySet().mapNotNull { prefix ->
             val path = when (val value = table.get(listOf(prefix))) {
                 is String -> value
-                is TomlTable -> value.getString("path")
+                is TomlTable -> value.get("path") as? String
                 else -> null
             } ?: return@mapNotNull null
 

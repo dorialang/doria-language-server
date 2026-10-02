@@ -6,6 +6,20 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Pinned the language server to the Stage 35 compiler closure revision.
+- Updated the VS Code packager's locked `qs` dependency within its existing
+  version range to address reported denial-of-service advisories.
+- Namespace suggestions ignore wrongly typed Baton autoload fields without
+  throwing, preserve valid development mappings, and reject partial mappings
+  recovered from malformed TOML.
+- Removed unrelated cross-stage status assertions from historical tooling
+  guards. Each retains its own contract checks; Stage 35 documentation checks
+  reside in the Stage 35 composition guard.
+- Added Stage 35 core-contract, public-iteration, and trait-composition tooling.
+  Retained `borrow` sources, readonly iterator results, specialized composed
+  members, and alias identities use compiler facts for hover, completion,
+  navigation, references, and conservative rename.
+
 - Added Stage 35 Slice 2 interface-runtime tooling. Erased and narrowed members,
   generic signatures, named arguments, effects, and authored definitions use
   compiler contract facts. Error subinterfaces expose their stored message;
@@ -24,8 +38,6 @@ This project follows the Doria toolchain CalVer.
   origins; rename refuses incomplete contract families. Cross-package indexing
   retains the compiler's actual analysis graph, including dependency sources.
   VS Code and IntelliJ present `uses` and `insteadof` without checking composition.
-  Slice 2 subsequently added interface runtime tooling; core operations remain
-  Slice 3 and composition Slice 4.
 
 - Added tooling for the post-Stage-34 indexed-foreach and scalar-display
   correction. The server projects compiler-owned foreach semantic facts into
@@ -49,8 +61,7 @@ This project follows the Doria toolchain CalVer.
   hover and navigation; conservative family-wide references and rename; and
   semantic tokens. Generated and dependency sources remain readonly, incomplete
   graphs refuse rename, and VS Code and IntelliJ recognize `open`, `override`,
-  `extends`, and `parent` as presentation only. Stage 35 Slice 1 subsequently
-  added interface and trait declaration checking without runtime erasure.
+  `extends`, and `parent` as presentation only.
 - Completed Native Testing Foundation Slice 3 and the foundation tooling closure.
   The server now consumes compiler-owned typed matcher candidates for Test-module
   imports and expectation completion, renders collection and checked-Error hover
@@ -79,11 +90,7 @@ This project follows the Doria toolchain CalVer.
   Aggregate workspaces are analyzed as isolated member dependency closures, so
   unrelated entrypoints cannot collide while declared dependencies remain navigable.
   Added debounced project watchers, manual refresh, and one Baton path override
-  to both official editor integrations. The Native Testing Foundation followed
-  that work and is now complete. Stage 34 subsequently completed single class
-  inheritance tooling; Stage 35 interfaces and traits authority is accepted
-  under Decision 0134. Slices 1 and 2 subsequently completed declaration and
-  runtime tooling; Slice 3 core contracts and public iteration are next.
+  to both official editor integrations.
 
 - Added compiler-resolved go-to-definition and conservative rename for local
   bindings and cross-file methods, properties, class constants, and enum cases,
