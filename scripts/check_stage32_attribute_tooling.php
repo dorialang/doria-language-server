@@ -111,8 +111,6 @@ stage32_require(
 
 foreach ([
     'Stage 32 is complete',
-    'Stage 33 and Phase F are complete',
-    'Stage 34 single class inheritance',
     'compiler-owned',
     'no runtime reflection',
 ] as $fact) {

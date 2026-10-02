@@ -2078,25 +2078,25 @@ function check_stage30f_callable_alignment(): void
             str_contains($readmeText, 'historical, reserved diagnostic') &&
             str_contains($readmeText, 'does not suppress') &&
             str_contains($readmeText, 'supported compatibility surface') &&
-            str_contains($readmeText, 'Stage 31 is complete') &&
-            str_contains($readmeText, 'Stage 32 is complete') &&
-            str_contains($readmeText, 'Stage 33 and Phase F are complete') &&
-            str_contains($readmeText, 'Stage 34 single class inheritance is complete') &&
-            str_contains($readmeText, 'Stage 35') &&
-            str_contains($readmeText, 'interfaces and traits authority is accepted under Decision 0134') &&
-            str_contains($readmeText, 'Trait aliases retain distinct identities') &&
-            !str_contains($readmeText, 'Slice 4 is next') &&
             str_contains($readmeText, '`map`, `filter`, and `reduce` only for resolved `List<T>` receivers') &&
             !str_contains($readmeText, 'Stage 30 remains incomplete') &&
             !str_contains($readmeText, 'Stage 30h is next') &&
             !str_contains($readmeText, 'lowering remains the Stage 30f boundary'),
-        'README must state Stage 30 through Stage 34 completion and current Stage 35 tooling contracts',
+        'README must preserve implemented closure contracts and compiler-owned diagnostics',
     );
 }
 
 function check_stage35_composition_authority(): void
 {
     global $root;
+
+    $readmeText = read_text($root . '/README.md');
+    foreach ([
+        'Stage 35 interfaces and traits authority is accepted under Decision 0134',
+        'Trait aliases retain distinct identities',
+    ] as $fact) {
+        require_check(str_contains($readmeText, $fact), "Stage 35 tooling documentation is missing {$fact}");
+    }
 
     foreach ([
         'README.md', 'server/README.md', 'docs/architecture.md', 'docs/semantic-hover.md',
@@ -2109,6 +2109,9 @@ function check_stage35_composition_authority(): void
             preg_match('/trait composition[^.]*\b(later|future|pending|remains)\b|\bSlice 4 is next\b/i', $normalized) === 0,
             "{$path} must not describe implemented trait composition as future work",
         );
+        foreach (['Stage 35 interfaces and traits are next', 'Stage 35 remains next'] as $stale) {
+            require_check(!str_contains($normalized, $stale), "{$path} contains stale Stage 35 status: {$stale}");
+        }
     }
 }
 

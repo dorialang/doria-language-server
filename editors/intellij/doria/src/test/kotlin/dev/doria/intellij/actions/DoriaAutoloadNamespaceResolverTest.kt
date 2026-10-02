@@ -75,6 +75,39 @@ class DoriaAutoloadNamespaceResolverTest {
     }
 
     @Test
+    fun rejectsPartialMappingsFromMalformedToml() {
+        for (invalidLine in listOf("broken =", "broken = [1,,2]")) {
+            val source = """
+                $invalidLine
+                [autoload.namespaces]
+                "Acme\\ImageTools\\" = "src/"
+            """.trimIndent()
+
+            assertEquals(emptyList<DoriaAutoloadNamespaceResolver.AutoloadMapping>(), mappings(source))
+        }
+    }
+
+    @Test
+    fun ignoresWronglyTypedMappingsWithoutLosingValidDevelopmentMappings() {
+        for (invalidMapping in listOf(
+            "autoload = 42",
+            "[autoload]\nnamespaces = []",
+            "[autoload.namespaces]\n'Acme\\' = { path = 42 }",
+            "[autoload.namespaces]\n'Acme\\' = false",
+        )) {
+            val source = """
+                $invalidMapping
+                [autoload-dev.namespaces]
+                'Acme\Tests\' = "tests/"
+            """.trimIndent()
+            val mappings = mappings(source)
+
+            assertNull(infer(listOf("project", "src"), mappings))
+            assertEquals("Acme\\Tests\\Unit", infer(listOf("project", "tests", "Unit"), mappings))
+        }
+    }
+
+    @Test
     fun ignoresDirectoriesOutsideTheConfiguredRoots() {
         val mappings = mappings(
             """
