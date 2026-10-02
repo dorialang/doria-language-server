@@ -7757,12 +7757,12 @@ fn method_hierarchy_documentation(
         Some(ReceiverMode::UnsupportedConsuming) => "Consuming (Unsupported)",
     };
     let dispatch = if hierarchy.virtual_root.is_some() {
-        "Virtual at ordinary call sites"
+        "Virtual"
     } else {
         "Direct"
     };
     format!(
-        "**Hierarchy Method Role:** {role}\n\n**Effective Receiver:** {receiver}\n\n**Dispatch:** {dispatch}"
+        "**Hierarchy Method Role:** {role}\n\n**Effective Receiver:** {receiver}\n\n**Source Dispatch:** {dispatch}"
     )
 }
 
@@ -8783,6 +8783,42 @@ function inspect(
             assert!(narrowed.markdown.contains("function(): int"));
             assert!(!narrowed.markdown.contains("?function(): int"));
             assert!(narrowed.markdown.contains("Execution capability"));
+        }
+    }
+
+    #[test]
+    fn method_hovers_label_dispatch_as_a_source_contract() {
+        let source = r#"open class Base
+{
+    open function value(): int { return 1; }
+    function fixed(): int { return 2; }
+}
+class Child extends Base
+{
+    override function value(): int { return parent::value(); }
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("dispatch.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        for (declaration, prefix, dispatch) in [
+            ("open function value", "open function ", "Virtual"),
+            ("override function value", "override function ", "Virtual"),
+            ("function fixed", "function ", "Direct"),
+        ] {
+            let offset = source.find(declaration).unwrap() + prefix.len();
+            let hover = snapshot.hover_at_offset(offset).unwrap();
+            assert!(
+                hover
+                    .markdown
+                    .contains(&format!("**Source Dispatch:** {dispatch}")),
+                "{}",
+                hover.markdown
+            );
+            assert!(!hover.markdown.contains("**Dispatch:**"));
         }
     }
 

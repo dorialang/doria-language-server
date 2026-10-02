@@ -1561,7 +1561,7 @@ impl OpenDocumentIndex {
                         "Nonvirtual"
                     };
                     markdown.push_str(&format!(
-                        "\n\n**Hierarchy Method Role:** {role}\n\n**Effective Receiver:** {}\n\n**Dispatch:** {}",
+                        "\n\n**Hierarchy Method Role:** {role}\n\n**Effective Receiver:** {}\n\n**Source Dispatch:** {}",
                         if member.member.writable_receiver {
                             "Writable"
                         } else {
