@@ -8,7 +8,7 @@ This project follows the Doria toolchain CalVer.
 
 - Clarified method hover's **Source Dispatch** label in standalone and indexed
   analysis. It describes the source contract, not optimized machine-code shape.
-- Pinned the language server to the Stage 35a optimizer-contract implementation.
+- Pinned the language server to the final Stage 35a optimizer-contract revision.
 - Updated the VS Code packager's locked `qs` dependency within its existing
   version range to address reported denial-of-service advisories.
 - Namespace suggestions ignore wrongly typed Baton autoload fields without
