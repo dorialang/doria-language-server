@@ -187,6 +187,18 @@ pub(crate) fn analyze_open_graph(
     })
 }
 
+pub(crate) fn project_contains_source(project: &ProjectDocument, uri: &str) -> bool {
+    let Some(path) = file_uri_to_path(uri) else {
+        return false;
+    };
+    let path = normalized_absolute(&path);
+    project
+        .packages
+        .iter()
+        .flat_map(|package| &package.sources)
+        .any(|source| normalized_absolute(&source.path) == path)
+}
+
 pub(crate) fn analyze_project_graph(
     project: &ProjectDocument,
     plan: &BuildPlan,

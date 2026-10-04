@@ -6,6 +6,30 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Removed the obsolete property-hook absence and future-work assertions from
+  the indexed-foreach/scalar guard, retaining its existing contracts. A dedicated
+  hook guard checks compiler-owned metadata projection, traversal, and regression
+  coverage. Replaced the gate-preservation regression and removed `E0764`
+  allowances from valid-hook tests: public hook acceptance now requires zero
+  compiler and LSP diagnostics. Updated shared fixtures and hover text for
+  parent-then-child backing initializers, with the child replacing the inherited
+  value in the reused field without calling setters. Pinned the compiler to the
+  final merged Stage 36 revision `8f347f6408174e8c2f1ea613502a27bc205e6fdc`.
+- Hook hover and completion consume compiler backing-field identities and
+  distinguish lent results from owned results retaining a source loan. Removed
+  the blanket claim that computed overrides cannot retain inherited storage.
+  Direct callable-property invocations use compiler-selected accessor identity
+  for hover, navigation, and semantic tokens, alongside ordinary property reads.
+  Callable-call traversal preserves references in the callee and arguments,
+  including grouped property invocations.
+  Protocol regressions check E0769/E0770 diagnostic fidelity. Constrained
+  generic receiver completion now consumes compiler-owned scoped member
+  surfaces, sharing interface presentation and access filtering without inferring
+  constraints. Local-compiler regressions cover separate lexical scopes,
+  compatible and conflicting intersections, Error messages, and shared-wrapper
+  forwarding while preserving receiver access restrictions.
+- Corrected collection-callback effect fixtures to perform actual input when
+  asserting ambient I/O, and also check pure callbacks without invented I/O.
 - Clarified method hover's **Source Dispatch** label in standalone and indexed
   analysis. It describes the source contract, not optimized machine-code shape.
 - Pinned the language server to the final Stage 35a optimizer-contract revision.

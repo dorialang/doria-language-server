@@ -162,6 +162,8 @@ pub(crate) struct OpenDocumentIndex {
     composed_presentations: HashMap<String, ComposedSourcePresentation>,
     diagnostic_groups: HashMap<String, Vec<Vec<doriac::diagnostics::Diagnostic>>>,
     source_uris: HashMap<(String, doriac::source::SourceId), String>,
+    accessor_declarations: HashMap<(String, Span), Span>,
+    accessor_references: HashMap<(String, Span), Vec<Span>>,
 }
 
 impl OpenDocumentIndex {
@@ -255,6 +257,16 @@ impl OpenDocumentIndex {
             .or_insert_with(|| snapshot.composition_rename().clone());
         self.source_uris
             .insert((graph.to_string(), snapshot.source_id()), uri.to_string());
+        self.accessor_declarations
+            .extend(snapshot.property_accessors.declarations.iter().map(
+                |(declaration, selection)| {
+                    ((graph.to_string(), declaration.authored()), *selection)
+                },
+            ));
+        self.accessor_references
+            .extend(snapshot.property_accessors.references.iter().map(
+                |(reference, declarations)| ((graph.to_string(), *reference), declarations.clone()),
+            ));
         self.add_graph_members(graph, uri, snapshot);
         if let Some(document) = self.documents.get_mut(uri) {
             if !document.graphs.iter().any(|known| known == graph) {
@@ -752,6 +764,39 @@ impl OpenDocumentIndex {
         for graph in &self.documents.get(uri)?.graphs {
             if let Some(found) = self.contract_definitions_in_graph(graph, uri, offset) {
                 locations.get_or_insert_with(Vec::new).extend(found);
+            }
+        }
+        locations.map(unique_locations)
+    }
+
+    pub(crate) fn property_accessor_definitions(
+        &self,
+        uri: &str,
+        offset: usize,
+    ) -> Option<Vec<IndexedLocation>> {
+        let mut locations = None;
+        for graph in &self.documents.get(uri)?.graphs {
+            for ((reference_graph, reference), declarations) in &self.accessor_references {
+                if reference_graph != graph
+                    || !span_contains_offset(*reference, offset)
+                    || self
+                        .source_uris
+                        .get(&(graph.clone(), reference.source))
+                        .map(String::as_str)
+                        != Some(uri)
+                {
+                    continue;
+                }
+                for declaration in declarations {
+                    if let Some(selection) = self
+                        .accessor_declarations
+                        .get(&(graph.clone(), declaration.authored()))
+                    {
+                        if let Some(location) = self.source_location(graph, *selection) {
+                            locations.get_or_insert_with(Vec::new).push(location);
+                        }
+                    }
+                }
             }
         }
         locations.map(unique_locations)

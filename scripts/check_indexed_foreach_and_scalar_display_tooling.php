@@ -140,7 +140,6 @@ foreach ([
     'Zero-Based Sequence Index',
     'Dictionary Key',
     'no primitive `toString` or scalar-cast completion',
-    'property hooks remain future work',
 ] as $fact) {
     indexed_foreach_require(str_contains($docs, $fact), "tooling documentation is missing {$fact}.");
 }
@@ -164,10 +163,5 @@ foreach (glob($root . '/scripts/check_*.php') ?: [] as $guardPath) {
         );
     }
 }
-
-indexed_foreach_require(
-    !str_contains($production, 'PropertyHook'),
-    'property-hook implementation must remain absent during this corrective beat.',
-);
 
 fwrite(STDOUT, "Indexed foreach and scalar display tooling guard passed.\n");
