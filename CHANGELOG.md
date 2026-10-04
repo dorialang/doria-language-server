@@ -14,7 +14,8 @@ This project follows the Doria toolchain CalVer.
   compiler and LSP diagnostics. Updated shared fixtures and hover text for
   parent-then-child backing initializers, with the child replacing the inherited
   value in the reused field without calling setters. Pinned the compiler to the
-  final merged Stage 36 revision `8f347f6408174e8c2f1ea613502a27bc205e6fdc`.
+  final Stage 36 source revision `f500042e1546a7282311423c31164131536ed1e1`,
+  including completion evidence with unchanged compiler code.
 - Hook hover and completion consume compiler backing-field identities and
   distinguish lent results from owned results retaining a source loan. Removed
   the blanket claim that computed overrides cannot retain inherited storage.
