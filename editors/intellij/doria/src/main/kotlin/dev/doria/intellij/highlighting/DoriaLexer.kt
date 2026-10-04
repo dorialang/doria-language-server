@@ -3,7 +3,7 @@ package dev.doria.intellij.highlighting
 import com.intellij.lexer.LexerBase
 import com.intellij.psi.tree.IElementType
 
-class DoriaLexer : LexerBase() {
+class DoriaLexer(private val highlightHooks: Boolean = true) : LexerBase() {
     private var buffer: CharSequence = ""
     private var startOffset: Int = 0
     private var endOffset: Int = 0
@@ -13,6 +13,7 @@ class DoriaLexer : LexerBase() {
     private var mode: Int = MODE_NORMAL
     private var attributeBracketDepth: Int = 0
     private var interpolationBraceDepth: Int = 0
+    private var hookOffsets: Set<Int>? = null
 
     override fun start(buffer: CharSequence, startOffset: Int, endOffset: Int, initialState: Int) {
         this.buffer = buffer
@@ -23,6 +24,7 @@ class DoriaLexer : LexerBase() {
         this.mode = decodeMode(initialState)
         this.attributeBracketDepth = decodeAttributeBracketDepth(initialState)
         this.interpolationBraceDepth = decodeInterpolationBraceDepth(initialState)
+        this.hookOffsets = null
         advance()
     }
 
@@ -486,7 +488,11 @@ class DoriaLexer : LexerBase() {
                 DoriaTokenTypes.LOGICAL_OPERATOR
             }
 
-            in MODIFIERS -> DoriaTokenTypes.MODIFIER
+            in MODIFIERS -> if (highlightHooks && text == "borrow" && isHookHeaderToken()) {
+                DoriaTokenTypes.INVALID
+            } else {
+                DoriaTokenTypes.MODIFIER
+            }
 
             in PRIMITIVE_TYPES -> DoriaTokenTypes.PRIMITIVE_TYPE
 
@@ -499,6 +505,8 @@ class DoriaLexer : LexerBase() {
             "null" -> DoriaTokenTypes.NULL_LITERAL
 
             else -> when {
+                highlightHooks && text in setOf("get", "set", "borrowed") && isHookHeaderToken() ->
+                    if (text == "borrowed") DoriaTokenTypes.MODIFIER else DoriaTokenTypes.KEYWORD
                 isFunctionDeclarationName() -> DoriaTokenTypes.FUNCTION_DECLARATION
                 isEnumDeclarationName() -> DoriaTokenTypes.ENUM_DECLARATION
                 isEnumCaseName(text) -> DoriaTokenTypes.ENUM_CASE
@@ -659,6 +667,61 @@ class DoriaLexer : LexerBase() {
 
     private fun isFunctionDeclarationName(): Boolean =
         nextNonWhitespace(tokenEnd) in setOf('(', '<') && previousIdentifier() == "function"
+
+    private fun isHookHeaderToken(): Boolean {
+        if (hookOffsets == null) {
+            // Reuse tokenization for balanced presentation scopes, including on lexer restart.
+            val lexer = DoriaLexer(highlightHooks = false)
+            lexer.start(buffer, 0, endOffset, MODE_NORMAL)
+            val scopes = ArrayDeque<Boolean>()
+            val initializerDepths = mutableSetOf<Int>()
+            val expressionBodyDepths = mutableSetOf<Int>()
+            val offsets = mutableSetOf<Int>()
+            var previous = ""
+            var previousType: IElementType? = null
+            while (lexer.tokenType != null) {
+                val type = lexer.tokenType
+                val text = buffer.subSequence(lexer.tokenStart, lexer.tokenEnd).toString()
+                if (lexer.mode == MODE_NORMAL && type !in HOOK_TRIVIA_TOKENS) {
+                    val depth = scopes.size
+                    when {
+                        type in setOf(DoriaTokenTypes.BRACE, DoriaTokenTypes.PAREN, DoriaTokenTypes.BRACKET) ->
+                            when (text) {
+                                "{" -> {
+                                    val expressionBody = expressionBodyDepths.remove(depth)
+                                    val hooks = !expressionBody &&
+                                        (previousType == DoriaTokenTypes.VARIABLE || depth in initializerDepths)
+                                    if (hooks) initializerDepths.remove(depth)
+                                    scopes.addLast(hooks)
+                                }
+                                "(", "[" -> scopes.addLast(false)
+                                "}", ")", "]" -> {
+                                    initializerDepths.remove(depth)
+                                    expressionBodyDepths.remove(depth)
+                                    if (scopes.isNotEmpty()) scopes.removeLast()
+                                }
+                            }
+                        text == "=" && previousType == DoriaTokenTypes.VARIABLE -> initializerDepths.add(depth)
+                        text == ";" -> {
+                            initializerDepths.remove(depth)
+                            expressionBodyDepths.remove(depth)
+                        }
+                        depth in initializerDepths && type == DoriaTokenTypes.KEYWORD &&
+                            text in setOf("function", "match", "given", "when", "else") -> expressionBodyDepths.add(depth)
+                        text in setOf("get", "set", "borrowed", "borrow") && scopes.lastOrNull() == true &&
+                            previous in setOf("{", "}", ";", "writable") -> offsets.add(lexer.tokenStart)
+                        text == "get" && scopes.lastOrNull() == true &&
+                            previous in setOf("borrowed", "borrow") -> offsets.add(lexer.tokenStart)
+                    }
+                    previous = text
+                    previousType = type
+                }
+                lexer.advance()
+            }
+            hookOffsets = offsets
+        }
+        return tokenStart in hookOffsets.orEmpty()
+    }
 
     private fun isRejectedFunctionInvocationModifier(): Boolean {
         val prefix = buffer.subSequence(startOffset, tokenStart).toString()
@@ -985,6 +1048,11 @@ class DoriaLexer : LexerBase() {
         private val FUNCTION_BEFORE_REJECTED_TAKE = Regex("\\bfunction" + CODE_TRIVIA + "$")
         private val OPEN_PAREN_AFTER_CODE_TRIVIA = Regex("^" + CODE_TRIVIA + "\\(")
         private val HASH_COMMENT_MARKER = Regex("#(?!\\[)")
+        private val HOOK_TRIVIA_TOKENS = setOf(
+            DoriaTokenTypes.WHITE_SPACE, DoriaTokenTypes.COMMENT, DoriaTokenTypes.DOC_COMMENT,
+            DoriaTokenTypes.STRING, DoriaTokenTypes.ESCAPE_SEQUENCE,
+            DoriaTokenTypes.ATTRIBUTE_DELIMITER,
+        )
         private const val STATE_MODE_MASK = 0xFF
         private const val STATE_DEPTH_MASK = 0xFFF
         private const val STATE_ATTRIBUTE_DEPTH_SHIFT = 8
@@ -1045,8 +1113,6 @@ class DoriaLexer : LexerBase() {
             "with",
             "fn",
             "once",
-            "get",
-            "set",
             "insteadof",
             "try",
             "catch",

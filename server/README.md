@@ -59,8 +59,11 @@ compiler diagnostics with Machine Applicable insertion fixes; they are never
 accepted as inferred declarations. Diagnostics and fixes are forwarded from the
 compiler, with no second foreach checker. Scalar interpolation and `%s` add no primitive `toString` or scalar-cast
 completion. Core contracts and public iteration execute, including retained
-readonly iterator sources received with `borrow`. Trait composition is implemented;
-property hooks remain separate work.
+readonly iterator sources received with `borrow`. Trait composition is implemented.
+Property-hook tooling projects compiler metadata and traverses accessor bodies
+without a second checker. Hover and navigation preserve accessor origins,
+receiver access, result ownership, and checked effects. Compiler diagnostics
+are forwarded unchanged.
 
 The compiler classifies checked effects into source-required effects and ambient
 canonical I/O effects. Hovers keep source signatures focused on required

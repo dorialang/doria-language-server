@@ -6,6 +6,125 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 class DoriaLexerTest : TestCase() {
+    fun testStage36HookHeadsKeepOrdinaryGetAndSetCallableNames() {
+        val fixture = Files.readString(Path.of("..", "..", "fixtures", "stage36-property-hooks.doria"))
+        val tokens = lex(fixture)
+        val hookNames = tokens.filter { it.text in setOf("get", "set") }
+        assertEquals(13, hookNames.count { it.type == DoriaTokenTypes.KEYWORD })
+        assertEquals(4, hookNames.count { it.type == DoriaTokenTypes.FUNCTION_DECLARATION })
+        assertEquals(4, hookNames.count { it.type == DoriaTokenTypes.METHOD_CALL })
+        assertEquals(3, hookNames.count { it.type == DoriaTokenTypes.FUNCTION_CALL })
+        val borrowedNames = tokens.filter { it.text == "borrowed" }
+        assertEquals(2, borrowedNames.count { it.type == DoriaTokenTypes.MODIFIER })
+        assertEquals(2, borrowedNames.count { it.type == DoriaTokenTypes.FUNCTION_DECLARATION })
+        assertEquals(1, borrowedNames.count { it.type == DoriaTokenTypes.FUNCTION_CALL })
+        assertEquals(1, borrowedNames.count { it.type == DoriaTokenTypes.METHOD_CALL })
+        assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
+        assertEquals(DoriaTokenTypes.MODIFIER, tokens.first { it.text == "take" }.type)
+        assertEquals(DoriaTokenTypes.KEYWORD, tokens.first { it.text == "throws" }.type)
+    }
+
+    fun testHookDeclarationHeadsAcceptTypedParametersAndTrivia() {
+        for (source in listOf(
+            "get;", "get => \$this->value;", "writable get {", "get throws Failure => 1;",
+            "get /* comment */ => 1;", "set (int \$value);",
+            "borrowed get;", "writable borrowed get throws Failure {",
+            "set (take List<string> \$value) throws Failure {",
+            "set (?Acme\\Value[] \$value) => \$this->value = \$value;",
+            "set (Dictionary<string, List<?int>> \$value) {",
+            "set (function(int): string \$value) {",
+        )) {
+            val token = lex("class Example { writable int \$property { $source } }")
+                .first { it.text in setOf("get", "set") }
+            assertEquals(source, DoriaTokenTypes.KEYWORD, token.type)
+        }
+    }
+
+    fun testMultilineHookHeadersAndNestedBodiesPreserveScopeOnRestart() {
+        val source = "class Example { writable List<string> \$items /* property */\n" +
+            "{ writable borrowed /* result */\n get\n throws Failure\n { if (true) { set(value: get()); } return \$this->items; }\n" +
+            "set /* setter */ (\n take List<string> \$value\n ) throws Failure\n { \$this->items = \$value; } }\n" +
+            "int \$next { get => get(); } function get(): int { return 1; } }"
+        val tokens = lex(source)
+        assertEquals(3, tokens.count { it.text in setOf("get", "set") && it.type == DoriaTokenTypes.KEYWORD })
+        assertEquals(DoriaTokenTypes.MODIFIER, tokens.first { it.text == "borrowed" }.type)
+        val lexer = DoriaLexer()
+        lexer.start(source)
+        while (lexer.tokenType != null) {
+            val text = source.substring(lexer.tokenStart, lexer.tokenEnd)
+            if (text in setOf("get", "set", "borrowed") &&
+                lexer.tokenType in setOf(DoriaTokenTypes.KEYWORD, DoriaTokenTypes.MODIFIER)) {
+                val restarted = DoriaLexer()
+                restarted.start(source, lexer.tokenStart, source.length, lexer.state)
+                assertEquals(lexer.tokenType, restarted.tokenType)
+                assertEquals(lexer.tokenEnd, restarted.tokenEnd)
+            }
+            lexer.advance()
+        }
+    }
+
+    fun testHookNamesDoNotReserveCallsPropertiesOrIdentifierPrefixes() {
+        val source = "get set getter setter forget reset; " +
+            "get(); set(1); set(\$value); set(value: get()); set(fn(int \$value) => \$value); " +
+            "Accessors::get(); Accessors::set(\$value); " +
+            "\$object->get; \$object->set; Accessors::get; " +
+            "\"get => set (int \$value)\"; // get => set (int \$value)\n"
+        val tokens = lex(source)
+        assertFalse(tokens.any { it.type == DoriaTokenTypes.KEYWORD && it.text in setOf("get", "set") })
+        assertEquals(2, tokens.count { it.type == DoriaTokenTypes.STATIC_METHOD_CALL })
+        assertEquals(2, tokens.count { it.type == DoriaTokenTypes.PROPERTY })
+        assertEquals(1, tokens.count { it.type == DoriaTokenTypes.STATIC_PROPERTY })
+    }
+
+    fun testBackingInitializersKeepExpressionBodiesSeparateFromHooks() {
+        for (initializer in listOf(
+            "\"\"", "\"{ get; set(int \$value); }\"",
+            "[\"value\" => [get(), 2]]", "Factory::make(get())",
+            "fn(): int => get()",
+            "function(): int { set(value: get()); return get(); }",
+            "match (get()) { true => get(), false => 0 }",
+            "when (true): int { set(value: get()); return 1; } else { return 0; }",
+            "given { let \$initial = get(); } when (true): int { return \$initial; } else { return 0; }",
+            "Factory::make(function(): int { return get(); })",
+        )) {
+            for (separator in listOf("", "\n/* hooks follow */\n")) {
+                val source = "class Example { writable mixed \$value = $initializer$separator{" +
+                    "get => \$this->value; set (mixed \$value) { \$this->value = \$value; } } " +
+                    "function get(): int { return 1; } }"
+                val tokens = lex(source)
+                assertEquals(source, listOf("get", "set"), tokens.filter {
+                    it.text in setOf("get", "set") && it.type == DoriaTokenTypes.KEYWORD
+                }.map { it.text })
+                assertTrue(tokens.any { it.text == "get" && it.type == DoriaTokenTypes.FUNCTION_DECLARATION })
+            }
+            assertFalse(lex("let \$value = $initializer; set(value: get());").any {
+                it.text in setOf("get", "set") && it.type == DoriaTokenTypes.KEYWORD
+            })
+        }
+    }
+
+    fun testBorrowedRemainsAnOrdinaryNameOutsideHookHeaders() {
+        val tokens = lex("borrowed; borrowedValue; borrowed(); Accessors::borrowed(); " +
+            "\$object->borrowed(); \$object->borrowed; Accessors::borrowed; " +
+            "function borrowed(): void {} " +
+            "class Example { List<string> \$items { get => borrowed(); " +
+            "set (take List<string> \$value) { borrowed(); } } " +
+            "function borrowed(): void {} } \"borrowed get\"; // borrowed get\n")
+        val names = tokens.filter { it.text == "borrowed" }
+        assertEquals(3, names.count { it.type == DoriaTokenTypes.FUNCTION_CALL })
+        assertEquals(2, names.count { it.type == DoriaTokenTypes.FUNCTION_DECLARATION })
+        assertEquals(1, names.count { it.type == DoriaTokenTypes.METHOD_CALL })
+        assertEquals(1, names.count { it.type == DoriaTokenTypes.STATIC_METHOD_CALL })
+        assertFalse(names.any { it.type in setOf(DoriaTokenTypes.KEYWORD, DoriaTokenTypes.MODIFIER) })
+    }
+
+    fun testBorrowGetIsRejectedWithoutChangingBorrowParameters() {
+        val tokens = lex("class Example { List<string> \$items { borrow /* wrong spelling */\n get; } " +
+            "function __construct(borrow List<string> \$source) {} }")
+        val modifiers = tokens.filter { it.text == "borrow" }
+        assertEquals(listOf(DoriaTokenTypes.INVALID, DoriaTokenTypes.MODIFIER), modifiers.map { it.type })
+    }
+
     fun testStage35RetainedSourceModifierAndCurrentMethod() {
         val fixture = Files.readString(Path.of("..", "..", "fixtures", "stage35-core-iteration.doria"))
         val tokens = lex(fixture)

@@ -91,8 +91,12 @@ the tooling invents no primitive `toString` or scalar-cast API. Core operations,
 Copy-or-Cloneable preserving operations, readonly public iteration, and trait
 composition are implemented.
 `borrow` constructor promotion retains an iterator source loan, and
-`getCurrent()` returns a readonly borrow for Move elements. Property hooks
-remain separate work.
+`getCurrent()` returns a readonly borrow for Move elements.
+
+The tooling projects compiler-owned property-hook metadata for hover, completion,
+navigation, and semantic tokens. It preserves accessor origins, receiver access,
+result ownership, and checked effects. Hook bodies use the compiler's callable
+traversal, and the server forwards compiler diagnostics unchanged.
 
 Project-aware tooling asks Baton asynchronously for its strict schema-1 project
 document and gives each package-rooted dependency closure from the supplied

@@ -36,7 +36,9 @@ use baton_discovery::{DiscoveryRequest, ProjectDiscovery};
 use file_uri::file_uri_to_path;
 use project::{ProjectDocument, SourceEditPolicy};
 use string_surface::{STRING_COMPANION_METHODS, STRING_PROPERTIES};
-use workspace_graph::{analyze_open_graph, analyze_project_graph, GraphDocument, OpenSource};
+use workspace_graph::{
+    analyze_open_graph, analyze_project_graph, project_contains_source, GraphDocument, OpenSource,
+};
 use workspace_index::{IndexedEdit, IndexedLocation, OpenDocumentIndex, SymbolTarget};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -943,7 +945,11 @@ impl Server {
             }));
         }
         let indexed = self.document_index.hover(uri, offset);
-        if let Some(locations) = self.document_index.contract_definitions(uri, offset) {
+        if let Some(locations) = self
+            .document_index
+            .property_accessor_definitions(uri, offset)
+            .or_else(|| self.document_index.contract_definitions(uri, offset))
+        {
             // Call-site compiler substitutions take precedence over authored generic origins.
             if let Some(hover) = document.analysis.semantic_hover_at_offset(offset) {
                 return Some(json!({
@@ -1397,7 +1403,11 @@ impl Server {
         let Some((uri, document, offset)) = self.uri_document_and_offset(params) else {
             return Value::Null;
         };
-        if let Some(locations) = self.document_index.contract_definitions(&uri, offset) {
+        if let Some(locations) = self
+            .document_index
+            .property_accessor_definitions(&uri, offset)
+            .or_else(|| self.document_index.contract_definitions(&uri, offset))
+        {
             return self.navigation_locations(locations);
         }
         if let Some(location) = self.document_index.definition(&uri, offset) {
@@ -2064,19 +2074,12 @@ impl Server {
             let Some(project) = self.projects.get(&root.uri) else {
                 continue;
             };
-            if !project.packages.iter().any(|package| {
-                uri_is_within(target_uri, &file_uri::path_to_file_uri(&package.root))
-            }) {
+            if !project_contains_source(project, target_uri) {
                 continue;
             }
             let sources = self
                 .documents
                 .iter()
-                .filter(|(uri, _)| {
-                    project.packages.iter().any(|package| {
-                        uri_is_within(uri, &file_uri::path_to_file_uri(&package.root))
-                    })
-                })
                 .map(|(uri, document)| {
                     (
                         uri.as_str(),
@@ -2116,9 +2119,10 @@ impl Server {
         // Reuse that boundary for recovery instead of dropping imports by checking
         // the edited file alone or merging independent example programs.
         if self.projects.values().any(|project| {
-            project.packages.iter().any(|package| {
-                uri_is_within(target_uri, &file_uri::path_to_file_uri(&package.root))
-            })
+            project_contains_source(project, target_uri)
+                || project.packages.iter().any(|package| {
+                    uri_is_within(target_uri, &file_uri::path_to_file_uri(&package.root))
+                })
         }) {
             return None;
         }
@@ -2184,14 +2188,11 @@ impl Server {
             })
             .collect::<Vec<_>>();
         for (root_uri, project) in projects {
+            // The project graph selects inventory members by canonical path;
+            // lexical root filtering would drop buffers opened through symlinks.
             let sources = self
                 .documents
                 .iter()
-                .filter(|(uri, _)| {
-                    project.packages.iter().any(|package| {
-                        uri_is_within(uri, &file_uri::path_to_file_uri(&package.root))
-                    })
-                })
                 .map(|(uri, document)| (uri.clone(), document.text.clone()))
                 .collect::<Vec<_>>();
             let open_sources = sources
@@ -4521,6 +4522,8 @@ fn send_message<W: Write>(writer: &mut W, message: &Value) -> Result<(), String>
 }
 #[cfg(test)]
 mod tests {
+    mod property_hooks;
+
     use std::collections::HashSet;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -8567,6 +8570,81 @@ function main(): void {}
         assert!(String::from_utf8(clear_output)
             .unwrap()
             .contains("\"diagnostics\":[]"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_overlays_preserve_unsaved_sources_across_symlinked_roots() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("doria-lsp-overlay-alias-{nonce}"));
+        let root = directory.join("actual");
+        fs::create_dir_all(root.join("src")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let alias = directory.join("alias");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        let declaration = "class Panel { function read(): int { return 1; } }\n";
+        let changed = "class Panel { function read(): string { return \"one\"; } }\n";
+        let usage = "function inspect(Panel $panel): void { $panel->read(); }\n";
+        let declaration_path = root.join("src/Panel.doria");
+        let usage_path = root.join("src/main.doria");
+        fs::write(&declaration_path, declaration).unwrap();
+        fs::write(&usage_path, usage).unwrap();
+        let root_uri = file_uri::path_to_file_uri(&alias);
+        let declaration_uri = file_uri::path_to_file_uri(&declaration_path);
+        let usage_uri = file_uri::path_to_file_uri(&usage_path);
+        let mut server = stage31_server(&[&root_uri]);
+        server.projects.insert(
+            root_uri,
+            project::test_project(
+                &alias,
+                &["src/Panel.doria", "src/main.doria"],
+                project::PackageSource::Path,
+                &[],
+            ),
+        );
+        open_stage31_document(&mut server, &usage_uri, usage);
+        open_stage31_document(&mut server, &declaration_uri, changed);
+        assert_eq!(server.documents[&declaration_uri].text, changed);
+        assert_eq!(fs::read_to_string(&declaration_path).unwrap(), declaration);
+        let offset = usage.find("read()").unwrap();
+        let hover = server
+            .hover(Some(&params_at(&usage_uri, usage, offset)))
+            .unwrap();
+        assert!(
+            hover["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("read(): string"),
+            "{hover}"
+        );
+        let recovered = server
+            .analyze_temporary_project_overlay(&usage_uri, usage)
+            .expect("recovery must retain the same project overlays");
+        assert!(recovered
+            .hover_at_offset(offset)
+            .unwrap()
+            .markdown
+            .contains("read(): string"));
+        server
+            .did_close(
+                Some(&json!({ "textDocument": { "uri": declaration_uri } })),
+                &mut Vec::new(),
+            )
+            .unwrap();
+        let restored = server
+            .hover(Some(&params_at(&usage_uri, usage, offset)))
+            .unwrap();
+        assert!(
+            restored["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("read(): int"),
+            "{restored}"
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

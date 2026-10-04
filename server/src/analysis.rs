@@ -27,7 +27,7 @@ use doriac::semantics::contracts::{ContractFacts, InterfaceSpecializationFacts, 
 use doriac::semantics::{
     CallableSignatureSemanticInfo, CallableTarget, ConstructorParameterSemanticRole,
     EnumSemanticInfo, ForeachIterationKind, ForeachValueAccess, ListAlgorithmCallInfo,
-    ListAlgorithmKind, ListCallbackAccess, SemanticInfo,
+    ListAlgorithmKind, ListCallbackAccess, ObjectPathAccess, SemanticInfo,
 };
 use doriac::source::{SourceFile, SourceId, Span};
 use doriac::symbols::{
@@ -39,6 +39,10 @@ use doriac::types::{
 };
 
 use crate::string_surface::{string_companion_method, string_property};
+
+mod property_hooks;
+use doriac::property_hooks::{member_callables, PropertyHookContext};
+use property_hooks::PropertyAccessorNavigation;
 
 const SEMANTIC_TOKEN_FUNCTION: u32 = 3;
 const SEMANTIC_TOKEN_TYPE: u32 = 1;
@@ -347,6 +351,7 @@ pub(crate) struct AnalysisSnapshot {
     composition_origins: Vec<doriac::trait_composition::EffectiveMemberOrigin>,
     composition_obligations: Vec<doriac::trait_composition::MethodObligation>,
     class_member_surfaces: Vec<ClassMemberSurface>,
+    property_backing_fields: HashMap<Span, doriac::property_hooks::PropertyBackingField>,
     trait_adaptations: Vec<doriac::ast::TraitAdaptation>,
     trait_adaptation_surfaces: Vec<doriac::semantics::composition::TraitAdaptationSurface>,
     composition_rename: doriac::semantics::composition_rename::CompositionRenameFacts,
@@ -356,6 +361,7 @@ pub(crate) struct AnalysisSnapshot {
     assertion_semantic_tokens: Vec<SemanticTokenSpan>,
     foreach_semantic_tokens: Vec<SemanticTokenSpan>,
     hierarchy_semantic_tokens: Vec<SemanticTokenSpan>,
+    pub(crate) property_accessors: PropertyAccessorNavigation,
     assertion_completions: Vec<(Span, doriac::semantics::AssertionCompletionInfo)>,
     test_semantics: TestSemanticFacts,
     source_semantic_context: Option<SourceSemanticContext>,
@@ -525,6 +531,7 @@ enum OccurrenceRole {
 #[derive(Debug, Clone)]
 struct MemberReceiver {
     span: Span,
+    receiver_span: Span,
     receiver: ResolvedType,
     current_class: Option<String>,
     writable_payload_access: bool,
@@ -1491,9 +1498,12 @@ impl AnalysisSnapshot {
         if let ResolvedType::Class(class) = receiver {
             return self.class_member_completions(class, context.writable_payload_access, context);
         }
-        if let Some(completions) =
-            interface_member_completions(&self.contracts, receiver, context.writable_payload_access)
-        {
+        if let Some(completions) = interface_member_completions(
+            &self.contracts,
+            receiver,
+            context.receiver_span,
+            context.writable_payload_access,
+        ) {
             return completions;
         }
         if let Some(completions) = list_algorithm_completions(receiver) {
@@ -1533,11 +1543,11 @@ impl AnalysisSnapshot {
         if !forwards_payload {
             return completions;
         }
-        let writable = *kind == WritableSharedReferenceAccess;
+        let writable = context.writable_payload_access;
         if let ResolvedType::Class(class) = payload.as_ref() {
             completions.extend(self.class_member_completions(class, writable, context));
         } else if let Some(members) =
-            interface_member_completions(&self.contracts, payload, writable)
+            interface_member_completions(&self.contracts, payload, context.receiver_span, writable)
         {
             completions.extend(members);
         }
@@ -1710,6 +1720,12 @@ impl AnalysisSnapshot {
                         && (member.kind != CompilerMemberKind::InstanceMethod
                             || writable
                             || !member.writable)
+                        && member.hooks.as_ref().is_none_or(|hooks| {
+                            writable
+                                || hooks.getter.as_ref().is_some_and(|getter| {
+                                    getter.receiver_mode == ReceiverMode::Readonly
+                                })
+                        })
                         && (member.access == MemberAccess::External
                             || context.current_class.as_deref()
                                 == Some(member.declaring_class.name.as_str()))
@@ -1745,7 +1761,11 @@ impl AnalysisSnapshot {
     }
 
     fn surface_member_completion(&self, member: &ClassMemberSurfaceEntry) -> SemanticCompletion {
-        let mut completion = class_surface_member_completion(member, &HashMap::new());
+        let mut completion = class_surface_member_completion(
+            member,
+            &HashMap::new(),
+            self.property_backing_fields.get(&member.declaration),
+        );
         if let Some(documentation) = self
             .class_members
             .get(&member.declaring_class.name)
@@ -1926,22 +1946,17 @@ impl AnalysisSnapshot {
         });
         spans.extend(self.directive_semantic_tokens.iter().copied());
         spans.extend(self.attribute_semantic_tokens.iter().copied());
-        spans.retain(|(span, _)| {
-            !test_semantic_tokens
-                .iter()
-                .any(|(test_span, _, _)| span == test_span)
-                && !self
-                    .assertion_semantic_tokens
-                    .iter()
-                    .any(|(assertion_span, _, _)| span == assertion_span)
-        });
-        let mut tokens = spans
+        // Explicit semantic classifications take precedence over generic symbol kinds.
+        let mut tokens = test_semantic_tokens
             .into_iter()
-            .map(|(span, token_type)| (span, token_type, 0))
-            .chain(test_semantic_tokens)
             .chain(self.assertion_semantic_tokens.iter().copied())
             .chain(self.foreach_semantic_tokens.iter().copied())
             .chain(self.hierarchy_semantic_tokens.iter().copied())
+            .chain(
+                spans
+                    .into_iter()
+                    .map(|(span, token_type)| (span, token_type, 0)),
+            )
             .collect::<Vec<_>>();
         tokens.sort_by_key(|(span, _, _)| (span.start, span.end));
         tokens.dedup_by_key(|(span, _, _)| (span.start, span.end));
@@ -2344,6 +2359,7 @@ struct SnapshotBuilder<'a> {
     assertion_semantic_tokens: Vec<SemanticTokenSpan>,
     foreach_semantic_tokens: Vec<SemanticTokenSpan>,
     hierarchy_semantic_tokens: Vec<SemanticTokenSpan>,
+    property_accessors: PropertyAccessorNavigation,
     assertion_completions: Vec<(Span, doriac::semantics::AssertionCompletionInfo)>,
     attribute_parameter_occurrences: Vec<AttributeParameterOccurrence>,
     missing_callables: Vec<MissingCallable>,
@@ -2398,6 +2414,7 @@ impl<'a> SnapshotBuilder<'a> {
             assertion_semantic_tokens: Vec::new(),
             foreach_semantic_tokens: Vec::new(),
             hierarchy_semantic_tokens: Vec::new(),
+            property_accessors: PropertyAccessorNavigation::default(),
             assertion_completions: Vec::new(),
             attribute_parameter_occurrences: Vec::new(),
             missing_callables: Vec::new(),
@@ -2483,6 +2500,7 @@ impl<'a> SnapshotBuilder<'a> {
                 .semantic_info
                 .map(|info| info.class_member_surfaces.clone())
                 .unwrap_or_default(),
+            property_backing_fields: self.semantic_info.map(|info| info.property_backing_fields.clone()).unwrap_or_default(),
             trait_adaptations: program.items.iter().filter_map(|item| match item {
                 Item::Class(class) => Some(&class.members),
                 Item::Trait(declaration) => Some(&declaration.members),
@@ -2502,6 +2520,7 @@ impl<'a> SnapshotBuilder<'a> {
             assertion_semantic_tokens: self.assertion_semantic_tokens,
             foreach_semantic_tokens: self.foreach_semantic_tokens,
             hierarchy_semantic_tokens: self.hierarchy_semantic_tokens,
+            property_accessors: self.property_accessors,
             assertion_completions: self.assertion_completions,
             test_semantics,
             source_semantic_context,
@@ -3045,6 +3064,7 @@ impl<'a> SnapshotBuilder<'a> {
                                 &trait_decl.name,
                                 property,
                                 phpdoc_before(self.text, property.span.start),
+                                PropertyHookContext::Trait,
                             ),
                             ClassMember::Constant(constant) => {
                                 self.collect_authored_constant(&trait_decl.name, constant)
@@ -3063,6 +3083,14 @@ impl<'a> SnapshotBuilder<'a> {
                     );
                     for requirement in &interface.requirements {
                         self.collect_method(&interface.name, requirement);
+                    }
+                    for property in &interface.properties {
+                        self.collect_authored_property(
+                            &interface.name,
+                            property,
+                            phpdoc_before(self.text, property.span.start),
+                            PropertyHookContext::Interface,
+                        );
                     }
                 }
                 Item::Function(function) => {
@@ -3405,7 +3433,12 @@ impl<'a> SnapshotBuilder<'a> {
                     } else {
                         phpdoc_before(self.text, property.span.start)
                     };
-                    self.collect_authored_property(&class.name, property, documentation.clone());
+                    self.collect_authored_property(
+                        &class.name,
+                        property,
+                        documentation.clone(),
+                        PropertyHookContext::Class,
+                    );
                     self.class_members
                         .entry(class.name.clone())
                         .or_default()
@@ -3497,8 +3530,10 @@ impl<'a> SnapshotBuilder<'a> {
         &mut self,
         owner: &str,
         property: &doriac::ast::PropertyDecl,
-        documentation: Option<String>,
+        mut documentation: Option<String>,
+        context: PropertyHookContext,
     ) {
+        self.collect_property_hooks(owner, property, context, &mut documentation);
         let selection_span =
             find_variable_span(self.tokens, property.span, &property.name).unwrap_or(property.span);
         let symbol = self.add_declaration_symbol(
@@ -4126,7 +4161,7 @@ impl<'a> SnapshotBuilder<'a> {
             .and_then(|fact| {
                 fact.requirements
                     .iter()
-                    .find(|required| &required.name == method_name)
+                    .find(|required| required.accessor.is_none() && &required.name == method_name)
             })
         else {
             return false;
@@ -4226,7 +4261,11 @@ impl<'a> SnapshotBuilder<'a> {
                     .collect()
             })
             .unwrap_or_default();
-        let mut completion = class_surface_member_completion(member, &bindings);
+        let mut completion = class_surface_member_completion(
+            member,
+            &bindings,
+            info.property_backing_fields.get(&member.declaration),
+        );
         if let Some(origin) = info.composition.origin(member.declaration) {
             append_documentation(
                 &mut completion.documentation,
@@ -4316,7 +4355,11 @@ impl<'a> SnapshotBuilder<'a> {
         } else {
             MemberKind::Property
         };
-        let completion = class_surface_member_completion(member, &HashMap::new());
+        let completion = class_surface_member_completion(
+            member,
+            &HashMap::new(),
+            info.property_backing_fields.get(&member.declaration),
+        );
         self.record_member_occurrence(&member.declaring_class.name, name, kind, member_span, false);
         if let Some(occurrence) = self
             .member_occurrences
@@ -4332,8 +4375,10 @@ impl<'a> SnapshotBuilder<'a> {
                 origin.trait_type, origin.composing_class
             ));
         }
-        self.semantic_hovers
-            .push(SemanticHover::new(member_span, markdown));
+        if !info.property_accessor_calls.contains_key(&access_span) {
+            self.semantic_hovers
+                .push(SemanticHover::new(member_span, markdown));
+        }
         true
     }
 
@@ -4371,9 +4416,9 @@ impl<'a> SnapshotBuilder<'a> {
                         }
                     }
                     for member in &class.members {
-                        if let ClassMember::Method(method) = member {
+                        for method in member_callables(member, PropertyHookContext::Class) {
                             self.visit_function_body(
-                                method,
+                                &method,
                                 Some(&class.name),
                                 class.parent.as_ref().map(AstTypeName::ast_type_name),
                             );
@@ -4405,12 +4450,14 @@ impl<'a> SnapshotBuilder<'a> {
                 }
                 Item::Trait(trait_decl) => {
                     for member in &trait_decl.members {
-                        if let ClassMember::Method(method) = member {
-                            if !self.semantic_info.is_some_and(|info| info.composition.origins.iter().any(|origin|
-                                origin.authored_declaration == method.span
-                                    && info.composition.class(&origin.composing_class).is_some_and(|class|
-                                        class.members.iter().any(|member| matches!(member, ClassMember::Method(selected) if selected.span == origin.declaration))))) {
-                                self.visit_function_body(method, Some(&trait_decl.name), None);
+                        for method in member_callables(member, PropertyHookContext::Trait) {
+                            if !self.has_composed_callable(method.span) {
+                                self.visit_function_body(&method, Some(&trait_decl.name), None);
+                            }
+                        }
+                        if let ClassMember::Property(property) = member {
+                            if let Some(initializer) = &property.initializer {
+                                self.visit_expr(initializer, Some(&trait_decl.name), None);
                             }
                         }
                     }
@@ -4418,6 +4465,16 @@ impl<'a> SnapshotBuilder<'a> {
                 Item::Interface(interface) => {
                     for requirement in &interface.requirements {
                         self.visit_function_body(requirement, Some(&interface.name), None);
+                    }
+                    for property in &interface.properties {
+                        if let Some(facts) = doriac::property_hooks::declaration_facts(
+                            property,
+                            PropertyHookContext::Interface,
+                        ) {
+                            for callable in facts.callables() {
+                                self.visit_function_body(&callable, Some(&interface.name), None);
+                            }
+                        }
                     }
                 }
                 Item::Function(function) => self.visit_function_body(function, None, None),
@@ -4447,13 +4504,14 @@ impl<'a> SnapshotBuilder<'a> {
             };
             let parent = class.parent.as_ref().map(AstTypeName::ast_type_name);
             for member in &class.members {
-                match member {
-                    ClassMember::Method(method)
-                        if method.span.source == self.source_id
-                            && method.span != method.span.authored() =>
+                for callable in member_callables(member, PropertyHookContext::Class) {
+                    if callable.span.source == self.source_id
+                        && callable.span != callable.span.authored()
                     {
-                        self.visit_function_body(method, Some(name), parent);
+                        self.visit_function_body(&callable, Some(name), parent);
                     }
+                }
+                match member {
                     ClassMember::Property(property)
                         if property.span.source == self.source_id
                             && property.span != property.span.authored() =>
@@ -4986,6 +5044,31 @@ impl<'a> SnapshotBuilder<'a> {
                 let method_span =
                     self.member_name_span(span.at(object.span().end, span.end), method);
                 self.record_member_receiver(method_span, object, current_class);
+                if let (Some(member_span), Some(callee_span)) = (
+                    method_span,
+                    self.semantic_info
+                        .and_then(|info| info.callable_value_calls.get(span))
+                        .filter(|call| {
+                            call.target_kind == doriac::semantics::CallableValueTargetKind::Property
+                        })
+                        .map(|call| call.callee_span),
+                ) {
+                    self.record_property_accessor_reference(callee_span, member_span, method);
+                    let receiver = self
+                        .semantic_info
+                        .and_then(|info| info.expression_type(object.span()))
+                        .and_then(member_receiver_class_type)
+                        .cloned();
+                    if let Some(receiver) = receiver {
+                        self.record_class_value_reference(
+                            &receiver,
+                            method,
+                            callee_span,
+                            member_span,
+                        );
+                    }
+                    return;
+                }
                 let builtin_hover = self.semantic_info.and_then(|info| {
                     if let Some(algorithm) = info.list_algorithm_calls.get(span) {
                         return Some(list_algorithm_hover(algorithm));
@@ -5059,6 +5142,12 @@ impl<'a> SnapshotBuilder<'a> {
                         }
                         self.record_call_signature(*span, args, symbol);
                     }
+                }
+            }
+            Expr::CallableCall { callee, args, .. } => {
+                self.visit_expr(callee, current_class, parent_class);
+                for argument in args {
+                    self.visit_expr(&argument.value, current_class, parent_class);
                 }
             }
             Expr::FunctionCall { name, args, span } => {
@@ -5226,6 +5315,9 @@ impl<'a> SnapshotBuilder<'a> {
                 self.visit_expr(object, current_class, parent_class);
                 let property_span =
                     self.member_name_span(span.at(object.span().end, span.end), property);
+                if let Some(property_span) = property_span {
+                    self.record_property_accessor_reference(*span, property_span, property);
+                }
                 self.record_member_receiver(property_span, object, current_class);
                 let receiver = self
                     .semantic_info
@@ -5939,20 +6031,21 @@ impl<'a> SnapshotBuilder<'a> {
         let Some(span) = member_span else {
             return;
         };
-        let Some(receiver) = self
-            .semantic_info
-            .and_then(|info| info.expression_type(object.span()))
-            .cloned()
-        else {
+        let Some(info) = self.semantic_info else {
+            return;
+        };
+        let Some(receiver) = info.expression_type(object.span()).cloned() else {
             return;
         };
         self.member_receivers.push(MemberReceiver {
             span,
+            receiver_span: object.span(),
             receiver,
             current_class: current_class
                 .and_then(|name| self.member_owner(name, span, true))
                 .map(|owner| owner.qualified_name),
-            writable_payload_access: !is_readonly_shared_projection(object, self.semantic_info),
+            writable_payload_access: info.member_receiver_access(object.span())
+                == Some(ObjectPathAccess::Writable),
         });
     }
 
@@ -6067,24 +6160,6 @@ fn generated_parameter_type(ty: &ResolvedType) -> String {
     }
 }
 
-fn is_readonly_shared_projection(expression: &Expr, semantic_info: Option<&SemanticInfo>) -> bool {
-    let Expr::PropertyAccess {
-        object, property, ..
-    } = expression
-    else {
-        return false;
-    };
-    property == "referencedValue"
-        && semantic_info
-            .and_then(|info| info.expression_type(object.span()))
-            .is_some_and(|receiver| {
-                matches!(
-                    non_nullable_type(receiver),
-                    ResolvedType::SharedHandle(SharedHandleKind::SharedReference, _)
-                )
-            })
-}
-
 struct CompilerKnownMethodHover {
     signature: String,
     documentation: String,
@@ -6093,26 +6168,44 @@ struct CompilerKnownMethodHover {
 fn interface_member_completions(
     facts: &ContractFacts,
     receiver: &ResolvedType,
+    receiver_span: Span,
     writable: bool,
 ) -> Option<Vec<SemanticCompletion>> {
-    if !matches!(receiver, ResolvedType::Interface(_) | ResolvedType::Error) {
-        return None;
-    }
-    let Some(fact) = interface_contract(facts, receiver) else {
-        return Some(Vec::new());
+    let (requirements, has_error_message) = match receiver {
+        ResolvedType::TypeParameter(_) => {
+            let surface = facts.constrained_member_surfaces.get(&receiver_span)?;
+            (&surface.requirements, surface.has_error_message)
+        }
+        ResolvedType::Interface(_) | ResolvedType::Error => {
+            let Some(fact) = interface_contract(facts, receiver) else {
+                return Some(Vec::new());
+            };
+            (&fact.requirements, interface_has_message(fact))
+        }
+        _ => return None,
     };
-    let mut completions = fact
-        .requirements
+    let mut completions = requirements
         .iter()
+        .filter(|requirement| {
+            requirement.accessor != Some(doriac::ast::PropertyHookKind::Set)
+                || !requirements.iter().any(|other| {
+                    other.name == requirement.name
+                        && other.accessor == Some(doriac::ast::PropertyHookKind::Get)
+                })
+        })
         .filter(|requirement| writable || !requirement.writable_receiver)
         .map(|requirement| SemanticCompletion {
             label: requirement.name.clone(),
-            kind: 2,
+            kind: if requirement.accessor.is_some() {
+                10
+            } else {
+                2
+            },
             detail: interface_requirement_signature(requirement, &HashMap::new()),
             documentation: Some(interface_requirement_documentation(requirement)),
         })
         .collect::<Vec<_>>();
-    if interface_has_message(fact) {
+    if has_error_message {
         completions.push(SemanticCompletion {
             label: "message".to_string(),
             kind: 10,
@@ -6152,6 +6245,20 @@ fn interface_requirement_signature(
     requirement: &RequirementFacts,
     bindings: &HashMap<String, ResolvedType>,
 ) -> String {
+    if let Some(kind) = requirement.accessor {
+        return property_hooks::accessor_signature(
+            &requirement.name,
+            kind,
+            &requirement.signature,
+            if requirement.writable_receiver {
+                ReceiverMode::Writable
+            } else {
+                ReceiverMode::Readonly
+            },
+            &requirement.checked_effects,
+            bindings,
+        );
+    }
     format!(
         "{}{}",
         if requirement.writable_receiver {
@@ -6218,6 +6325,7 @@ fn semantic_callable_signature(
 fn class_surface_member_completion(
     member: &ClassMemberSurfaceEntry,
     bindings: &HashMap<String, ResolvedType>,
+    backing_field: Option<&doriac::property_hooks::PropertyBackingField>,
 ) -> SemanticCompletion {
     let mut modifiers = Vec::new();
     if member.access == MemberAccess::Internal {
@@ -6267,15 +6375,22 @@ fn class_surface_member_completion(
             (10, format!("{ty} ${}", member.name))
         }
     };
+    let mut documentation = callable_details_documentation(
+        member.signature.as_ref(),
+        member.return_borrow,
+        &member.automatic_effects,
+    );
+    if let Some(hooks) = &member.hooks {
+        append_documentation(
+            &mut documentation,
+            &property_hooks::surface_documentation(&member.name, hooks, bindings, backing_field),
+        );
+    }
     SemanticCompletion {
         label: member.name.clone(),
         kind,
         detail: format!("{prefix}{signature}"),
-        documentation: callable_details_documentation(
-            member.signature.as_ref(),
-            member.return_borrow,
-            &member.automatic_effects,
-        ),
+        documentation,
     }
 }
 
@@ -6337,14 +6452,19 @@ fn callable_return_documentation(
                 .map(|parameter| format!("`${}`", parameter.name))
                 .unwrap_or_else(|| "the declared parameter".to_string()),
         };
-        documentation.push_str(&format!(
-            "\n\nReturns a {} borrow rooted in {source}.",
-            if borrow.writable {
-                "writable"
-            } else {
-                "readonly"
-            }
-        ));
+        let access = if borrow.writable {
+            "writable"
+        } else {
+            "readonly"
+        };
+        match borrow.kind {
+            doriac::types::ReturnBorrowKind::Value => documentation.push_str(&format!(
+                "\n\nReturns a {access} borrow rooted in {source}.",
+            )),
+            doriac::types::ReturnBorrowKind::Retained => documentation.push_str(&format!(
+                "\n\nReturns an owned value that retains a {access} borrow rooted in {source}. The source must outlive the result.",
+            )),
+        }
     } else if matches!(signature.return_type, ResolvedType::InterfaceSelf(_)) {
         documentation.push_str(
             "\n\nReturns a new owned value of the same exact dynamic implementing class.",
@@ -7902,6 +8022,69 @@ mod tests {
     use super::*;
 
     #[test]
+    fn callable_calls_preserve_callee_and_argument_references() {
+        let source = "function invoke(function(int): int $callback, int $value): int { return ($callback)($value); }";
+        let snapshot = AnalysisSnapshot::analyze("callable-references.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        for name in ["$callback", "$value"] {
+            assert_eq!(
+                snapshot
+                    .declaration_span_at_offset(source.rfind(name).unwrap())
+                    .unwrap()
+                    .start,
+                source.find(name).unwrap(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn return_documentation_preserves_compiler_loan_kind_source_and_access() {
+        use doriac::symbols::{BorrowSource, ReturnBorrow};
+        use doriac::types::ReturnBorrowKind;
+
+        let signature = CallableSignatureSemanticInfo {
+            generic_parameter_count: 0,
+            parameters: vec![doriac::semantics::CallableParameterSemanticInfo {
+                name: "source".to_string(),
+                r#type: ResolvedType::Class(ClassType::new("Source", Vec::new())),
+                take: false,
+                writable: true,
+                borrow: false,
+                has_default: false,
+            }],
+            return_type: ResolvedType::Class(ClassType::new("Result", Vec::new())),
+        };
+        for (source, label) in [
+            (BorrowSource::Receiver, "the receiver"),
+            (BorrowSource::Parameter(0), "`$source`"),
+        ] {
+            for writable in [false, true] {
+                let access = if writable { "writable" } else { "readonly" };
+                for kind in [ReturnBorrowKind::Value, ReturnBorrowKind::Retained] {
+                    let actual = callable_return_documentation(
+                        &signature,
+                        Some(ReturnBorrow {
+                            source,
+                            writable,
+                            kind,
+                        }),
+                    );
+                    let expected = match kind {
+                        ReturnBorrowKind::Value => format!("Returns a {access} borrow rooted in {label}."),
+                        ReturnBorrowKind::Retained => format!("Returns an owned value that retains a {access} borrow rooted in {label}. The source must outlive the result."),
+                    };
+                    assert_eq!(actual.trim(), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn composed_completions_use_the_selected_specialized_member_surface() {
         let source = include_str!("../../editors/fixtures/stage35-contracts.doria");
         let snapshot = AnalysisSnapshot::analyze("contracts.doria", source);
@@ -9399,12 +9582,14 @@ function transform(): void throws Failure
     List<int> $values = [1, 2];
     let writable $calls = 0;
     let writable $callback = function (int $value): string with (writable $calls) {
+        read_line();
         $calls += 1;
         if ($value == 2) { throw new Failure("stop"); }
         return "{$value}";
     };
     List<string> $mapped = $values->map($callback);
     int $total = $values->reduce(0, function (writable int $sum, int $value): void {
+        read_line();
         $sum += $value;
     });
 }
@@ -9460,6 +9645,19 @@ function main(): void {}
             .markdown
             .contains("**Required checked effects:** none"));
         assert!(reduce.markdown.contains("**Ambient I/O:**"));
+
+        let pure_source = source.replace("        read_line();\n", "");
+        let pure = AnalysisSnapshot::analyze("stage30g-pure-hover.doria", &pure_source);
+        assert!(pure.diagnostics().is_empty(), "{:?}", pure.diagnostics());
+        for name in ["map", "reduce"] {
+            let offset = pure_source.find(&format!("$values->{name}")).unwrap() + "$values->".len();
+            let hover = pure.hover_at_offset(offset).unwrap();
+            assert!(
+                !hover.markdown.contains("**Ambient I/O:**"),
+                "{}",
+                hover.markdown
+            );
+        }
     }
 
     #[test]
@@ -9692,6 +9890,65 @@ function main(): void
         assert!(labels.contains("value"));
         assert!(!labels.contains("create"));
         assert!(!labels.contains("instances"));
+    }
+
+    #[test]
+    fn member_completions_respect_compiler_receiver_access() {
+        let source = r#"
+interface CounterView {
+    function read(): int;
+    writable function change(): void;
+}
+class Counter implements CounterView {
+    function read(): int { return 1; }
+    writable function change(): void {}
+    function inspect(): int { return $this->read(); }
+    writable function edit(): int { return $this->read(); }
+}
+function inspect(Counter $readonly): int { return $readonly->read(); }
+function edit(writable Counter $writable): int { return $writable->read(); }
+function view(CounterView $view): int { return $view->read(); }
+function editView(writable CounterView $editView): int { return $editView->read(); }
+function locals(): void {
+    let $readonlyLocal = new Counter();
+    let writable $writableLocal = new Counter();
+    $readonlyLocal->read();
+    $writableLocal->read();
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("receiver-access.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        for (expression, writable) in [
+            ("$readonly->read", false),
+            ("$writable->read", true),
+            ("$view->read", false),
+            ("$editView->read", true),
+            ("$readonlyLocal->read", false),
+            ("$writableLocal->read", true),
+        ] {
+            let offset = source.find(expression).unwrap() + expression.find("->").unwrap() + 2;
+            let completions = snapshot.member_completions_at_offset(offset).unwrap();
+            assert!(completions.iter().any(|item| item.label == "read"));
+            assert_eq!(
+                completions.iter().any(|item| item.label == "change"),
+                writable,
+                "{expression}: {completions:?}"
+            );
+        }
+        for (index, (offset, _)) in source.match_indices("$this->read").enumerate() {
+            let completions = snapshot
+                .member_completions_at_offset(offset + "$this->".len())
+                .unwrap();
+            assert_eq!(
+                completions.iter().any(|item| item.label == "change"),
+                index == 1,
+                "{completions:?}"
+            );
+        }
     }
 
     #[test]

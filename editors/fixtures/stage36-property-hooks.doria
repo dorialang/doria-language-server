@@ -1,0 +1,91 @@
+// Shared property-hook acceptance and highlighting fixture.
+// Hook keywords and borrowed are contextual; ordinary names remain callable.
+namespace Editor\Hooks;
+
+class HookFailure implements Error
+{
+    function __construct(string $message) {}
+}
+
+interface Named
+{
+    writable string $name {
+        get;
+        set (string $value);
+    }
+}
+
+interface Labelled
+{
+    List<string> $labels { borrowed get; }
+}
+
+trait HasName
+{
+    writable string $name = "" {
+        get => $this->name;
+        set (string $value) => $this->name = $value;
+    }
+}
+
+class Temperature
+{
+    internal writable float $celsius = 0.0;
+
+    writable float $fahrenheit {
+        get => $this->celsius * 9.0 / 5.0 + 32.0;
+        set (float $value) => $this->celsius = ($value - 32.0) * 5.0 / 9.0;
+    }
+
+    internal writable int $reads = 0;
+    int $readCount {
+        writable get {
+            $this->reads += 1;
+            return $this->reads;
+        }
+    }
+
+    string $checkedName {
+        get throws HookFailure => "temperature";
+    }
+
+    writable List<string> $labels = ["temperature"] {
+        writable borrowed get => $this->labels;
+        set (take List<string> $value) throws HookFailure {
+            $this->labels = $value;
+        }
+    }
+}
+
+open class Gauge
+{
+    open int $reading = 1 { get => $this->reading; }
+}
+
+class PreciseGauge extends Gauge
+{
+    override int $reading = 2 { get => $this->reading; }
+}
+
+class Accessors
+{
+    function get(): int { return 1; }
+    function set(int $value): void {}
+    function borrowed(): int { return 1; }
+}
+
+function get(): int { return 1; }
+function set(int $value): void {}
+function borrowed(): int { return 1; }
+
+function calls(Accessors $accessors, writable Dictionary<string, int> $values): void
+{
+    $accessors->set($accessors->get());
+    $values->set("reading", get());
+    let $value = $values->get("reading");
+    set(value: get());
+    $accessors->borrowed();
+    borrowed();
+    string $text = "get => set (int $value)";
+    // get => set (int $value)
+}

@@ -173,9 +173,14 @@ support diagnostics and insertion fixes but never make omitted source types
 valid. Scalar interpolation
 and `%s` are compiler-owned string materialization, so tooling adds no primitive
 `toString` or scalar cast. Core contracts, public iteration, and trait composition
-are implemented. Property hooks remain separate future work. Retained-source and
+are implemented. Retained-source and
 element-borrow hover uses compiler ownership facts; clients do not infer iterator
 lifetimes.
+
+Property-hook tooling uses compiler declaration facts,
+callable traversal, accessor-call metadata, and composition surfaces. Hover and
+navigation preserve accessor origins, receiver access, result ownership, and
+checked effects; the server forwards compiler diagnostics unchanged.
 
 ### Editor clients
 

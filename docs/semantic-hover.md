@@ -97,6 +97,18 @@ elements without introducing implicit cloning in ordinary assignments.
 Nullable hash-key and ordered-element rejections are forwarded from the compiler;
 the server does not infer payload conformance for nullable types.
 
+Property-hook hovers preserve compiler-resolved setter types and ownership modes;
+the setter input type is exactly the property's type. Automatic backing in an
+override reuses the inherited field. Backing initializers run parent then child
+without invoking setters; a child initializer replaces the inherited value.
+Hooks cannot perform blocking I/O, including output or blocking helper calls;
+diagnostics and transitive effect checks belong
+to the compiler. An ordinary interface getter may return a new owned callback
+that borrows its receiver, but the callback cannot outlive that receiver.
+`borrowed get` instead lends an existing callback. Hover keeps ownership of the
+returned value separate from loans retained by its captures, using compiler facts
+rather than inferring lifetimes from source or return-type spelling.
+
 Stage 34 class and method hover consumes compiler-owned hierarchy metadata.
 Class hover shows the canonical declaration, direct parent, hierarchy depth,
 open/closed role, and runtime representation without exposing descriptors or
