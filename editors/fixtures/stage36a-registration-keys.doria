@@ -1,0 +1,41 @@
+use Doria\Std\Io\{RegistrationKey as Key, ReadableFile, WritableFile};
+
+const ?Key<ReadableFile> EMPTY = null;
+
+function identity(Key<ReadableFile> $key): Key<ReadableFile>
+{
+    return $key;
+}
+
+function forward(Key<ReadableFile> $key): Key<ReadableFile>
+{
+    let $copy = $key;
+    let $returned = identity($copy);
+    let $again = identity($key);
+    return $returned;
+}
+
+function inspect(?Key<ReadableFile> $key = EMPTY): bool
+{
+    let $optionalCopy = $key;
+    if ($optionalCopy != null) {
+        let $returned = forward($optionalCopy);
+        if ($key != null) {
+            let $again = forward($key);
+            return true;
+        }
+    }
+    return $key == null;
+}
+
+function other(?Doria\Std\Io\RegistrationKey<WritableFile> $key): ?Key<WritableFile>
+{
+    let $writableCopy = $key;
+    return $key;
+}
+
+function main(): void
+{
+    let $ready = inspect();
+    echo $ready . ":" . (other(null) == null) . "\n";
+}

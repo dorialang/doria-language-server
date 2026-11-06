@@ -1,0 +1,34 @@
+use Doria\Std\Io\{ReadinessSet as Registry, TransferPlan as Plan, IoError, Wait};
+use Doria\Std\Time\Deadline;
+use Doria\Std\Concurrency\{CancellationSource, CancellationToken};
+
+function detachedCancellation(): CancellationToken
+{
+    let $source = new CancellationSource();
+    return $source->token;
+}
+
+function controlled(writable Registry $set, take Plan $plan,
+    ?Deadline $deadline, ?CancellationToken $cancellation): void throws IoError
+{
+    let writable $controlled = $set->begin($plan,
+        deadline: $deadline, cancellation: $cancellation);
+    let $observation = $controlled->getNextCompletion(Wait::Immediate);
+}
+
+function uncontrolled(writable Registry $set, take Plan $plan): void throws IoError
+{
+    let $group = $set->begin($plan);
+}
+
+function nullControls(writable Registry $set, take Plan $plan): void throws IoError
+{
+    let $group = $set->begin($plan, deadline: null, cancellation: null);
+}
+
+function detachedControl(writable Registry $set, take Plan $plan): void throws IoError
+{
+    let $token = detachedCancellation();
+    let $group = $set->begin($plan, cancellation: $token);
+    let $copy = $token;
+}

@@ -1,0 +1,18 @@
+use Doria\Std\Io\{IoError as Failure, IoErrorReason, IoOperation, IoTarget};
+
+function rejectPlan(): void throws Failure
+{
+    throw new Failure("invalid configuration", IoOperation::Configure,
+        IoTarget::TransferPlan, IoErrorReason::InvalidInput);
+}
+
+function main(): void
+{
+    try {
+        rejectPlan();
+    } catch (Failure $error) {
+        IoOperation $operation = $error->operation;
+        IoTarget $target = $error->target;
+        ?int $progress = $error->transferredByteCount;
+    }
+}

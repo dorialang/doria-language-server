@@ -40,7 +40,7 @@ foreach ([
         'facts.constrained_member_surfaces.get(&receiver_span)',
         'CallableValueTargetKind::Property', 'call.callee_span',
         'ReturnBorrowKind::Value', 'ReturnBorrowKind::Retained',
-        'return_documentation_preserves_compiler_loan_kind_source_and_access']],
+        'return_documentation_preserves_compiler_loan_kind_source_access_and_lifetime']],
     [$hooks, ['declaration_facts(property, context)', 'facts.callables()',
         'info.property_accessor_calls', 'PropertyHooksSurface',
         'call.return_borrow', 'call.checked_effects']],

@@ -6,6 +6,19 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Synchronized the language server with Stage 36a and pinned the compiler to
+  `1f68889d696f0d633d7d97eaf026ae729528a450`. Hover and completion use
+  compiler facts for conditional capabilities, generic enums, inline Copy
+  values, retained borrows, consuming receivers, and owned-field extraction.
+  Removed name-only property recovery for generic compiler-supplied classes;
+  member lookup now requires the checked receiver application.
+- Added tooling coverage for Stage 36a standard-library APIs, including
+  streams, readiness and pending transfers, buffered adapters, files, child
+  processes, cancellation, and time. String `byteRegion` and region bulk-copy
+  members use compiler intrinsic metadata. Both editors recognize reserved
+  spellings in member positions, and semantic tokens use parser name spans.
+  The shared fixtures cover accepted syntax and compiler diagnostic fidelity.
+
 - Removed the obsolete property-hook absence and future-work assertions from
   the indexed-foreach/scalar guard, retaining its existing contracts. A dedicated
   hook guard checks compiler-owned metadata projection, traversal, and regression

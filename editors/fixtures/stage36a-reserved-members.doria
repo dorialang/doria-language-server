@@ -1,0 +1,18 @@
+interface Operation {
+    function async(): void;
+}
+
+class Worker implements Operation {
+    function async(): void {}
+    function await(): int { return 1; }
+    static function spawn(): void {}
+    static function scope(): void {}
+}
+
+function inspect(?Worker $maybe): void {
+    let $worker = new Worker();
+    $worker->async();
+    echo $maybe?->await() ?? 0;
+    Worker::spawn();
+    Worker::scope();
+}

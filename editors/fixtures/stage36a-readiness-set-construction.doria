@@ -1,0 +1,40 @@
+use Doria\Std\Io\{ReadinessSet as Registry, IoError, IoOperation, IoTarget, IoErrorReason};
+
+class SetHolder
+{
+    internal Registry $set;
+
+    function __construct(parameter take Registry $set)
+    {
+        $this->set = $set;
+    }
+}
+
+function create(): Registry
+{
+    return new Registry();
+}
+
+function failAfterTaking(take Registry $set): void
+{
+    throw new IoError("checked exit", IoOperation::Register,
+        IoTarget::ReadinessSet, IoErrorReason::Other);
+}
+
+function main(): void
+{
+    let $holder = new SetHolder(create());
+    List<Registry> $sets = [create(), new Doria\Std\Io\ReadinessSet()];
+    foreach ($sets as Registry $set) {
+        echo "stored set\n";
+    }
+    ?Registry $optional = create();
+    if ($optional != null) {
+        echo "optional set\n";
+    }
+    try {
+        failAfterTaking(new Registry());
+    } catch (IoError $error) {
+        echo $error->message . "\n";
+    }
+}

@@ -1,0 +1,29 @@
+// Accepted Stage 36a receiver syntax. This fixture tests editor presentation.
+class Product {}
+
+class Builder
+{
+    consuming function finish(): Product
+    {
+        return new Product();
+    }
+
+    consuming function continueBuilding(): self
+    {
+        return $this;
+    }
+
+    function accept(take function(): void $callback): void
+    {
+        $callback();
+    }
+
+    function acceptOnce(take function once(): void $callback): void
+    {
+        $callback();
+    }
+
+    function acceptWriter(take function writable(): void $callback): void
+    {
+    }
+}

@@ -1,0 +1,70 @@
+use Doria\Std\Io\{StandardStreams as Devices, StandardInput, ReadinessStream,
+    WritableStream, FlushableStream, FlushOutcome, ReadinessSet, TransferPlan, Wait,
+    ByteRegion, WriteOutcome, IoError};
+
+function copy<T>(take T $value): T { return $value; }
+function borrowed(ReadinessStream $owner): ReadinessStream { return $owner; }
+function optional(?ReadinessStream $owner): ?ReadinessStream { return $owner; }
+function present(?ReadinessStream $view): bool { return $view != null; }
+
+function send<T implements WritableStream>(writable T $stream, ByteRegion $source): WriteOutcome throws IoError
+{
+    return $stream->write($source);
+}
+
+function flush<T implements FlushableStream>(writable T $stream): FlushOutcome throws IoError
+{
+    let $outcome = $stream->flush();
+    return match ($outcome) {
+        FlushOutcome::Complete => FlushOutcome::Complete,
+        FlushOutcome::Pending => FlushOutcome::Pending,
+    };
+}
+
+function main(): void throws IoError
+{
+    let writable $input = Devices::input;
+    let $inputCopy = copy($input);
+    let writable $output = Devices::output;
+    let writable $error = Devices::error;
+    ?StandardInput $optional = $input;
+    ?StandardInput $missing = null;
+
+    ReadinessStream $owner = $input;
+    let $view = borrowed($owner);
+    $input = Devices::input;
+    let $source = $view->readinessSource;
+    echo present($view);
+    ?ReadinessStream $optionalOwner = $optional;
+    let $optionalView = optional($optionalOwner);
+    echo present($optionalView);
+    echo present(borrowed($input));
+    echo present(optional($missing));
+
+    let writable $destinationBytes = Bytes::allocate(0);
+    let $sourceBytes = Bytes::allocate(0);
+    {
+        let writable $destination = $destinationBytes->getWritableRegion(0, 0);
+        let $read = $input->read(destination: $destination);
+    }
+    let $bytes = $sourceBytes->getRegion(0, 0);
+    let $write = send($output, $bytes);
+    let $errorWrite = send($error, $bytes);
+
+    let writable $set = new ReadinessSet();
+    let $readerKey = $set->register(stream: $inputCopy);
+    let $writerKey = $set->register(stream: $output);
+    {
+        let writable $registered = $set->getWritableStream(key: $writerKey);
+        let $registeredWrite = send($registered, $bytes);
+    }
+    {
+        let $plan = TransferPlan::read($readerKey, $destinationBytes->getWritableRegion(0, 0))
+            ->andWriteTo($writerKey, $sourceBytes->getRegion(0, 0));
+        let $readKey = $plan->getReadKey(0);
+        let $writeKey = $plan->getWriteKey(1);
+        let writable $group = $set->begin($plan);
+        let $completion = $group->getNextCompletion(wait: Wait::Immediate);
+    }
+    let $outputCopy = copy($output);
+}

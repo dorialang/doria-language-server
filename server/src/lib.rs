@@ -35,7 +35,7 @@ use analysis::{
 use baton_discovery::{DiscoveryRequest, ProjectDiscovery};
 use file_uri::file_uri_to_path;
 use project::{ProjectDocument, SourceEditPolicy};
-use string_surface::{STRING_COMPANION_METHODS, STRING_PROPERTIES};
+use string_surface::STRING_COMPANION_METHODS;
 use workspace_graph::{
     analyze_open_graph, analyze_project_graph, project_contains_source, GraphDocument, OpenSource,
 };
@@ -3132,12 +3132,15 @@ fn completion_items() -> Value {
     items.extend(
         doriac::compiler_known_io::CANONICAL_TYPES
             .into_iter()
+            .chain(doriac::compiler_known_stream::CANONICAL_TYPES)
+            .chain(doriac::compiler_known_time::CANONICAL_TYPES)
+            .chain(doriac::compiler_known_concurrency::CANONICAL_TYPES)
             .map(|name| {
                 json!({
                     "label": name,
-                    "kind": 25,
+                    "kind": compiler_known_declaration(name).map_or(25, |(_, _, kind)| kind),
                     "detail": "compiler-known Doria standard-library type",
-                    "documentation": compiler_known_io_documentation(name),
+                    "documentation": compiler_known_type_documentation(name),
                 })
             }),
     );
@@ -3151,14 +3154,18 @@ fn completion_items() -> Value {
             ),
         })
     }));
-    items.extend(STRING_PROPERTIES.iter().map(|property| {
-        json!({
-            "label": property.name,
-            "kind": 10,
-            "detail": property.signature,
-            "documentation": property.documentation,
-        })
-    }));
+    items.extend(
+        analysis::string_property_completions()
+            .into_iter()
+            .map(|property| {
+                json!({
+                    "label": property.label,
+                    "kind": property.kind,
+                    "detail": property.detail,
+                    "documentation": property.documentation,
+                })
+            }),
+    );
     items.extend(STRING_COMPANION_METHODS.iter().map(|method| {
         json!({
             "label": format!("String::{}", method.name),
@@ -3658,7 +3665,7 @@ fn hover_at_offset_with_analysis(
             && offset < token.span.end
     })?;
     let token = &tokens[token_index];
-    if let Some((description, span)) = compiler_known_io_hover_at(&tokens, token_index) {
+    if let Some((description, span)) = compiler_known_type_hover_at(&tokens, token_index) {
         return Some(json!({
             "contents": {
                 "kind": "markdown",
@@ -3667,7 +3674,7 @@ fn hover_at_offset_with_analysis(
             "range": span_to_range(text, span),
         }));
     }
-    let description = string_companion_hover_at(&tokens, token_index)
+    let description = intrinsic_companion_hover_at(&tokens, token_index)
         .or_else(|| compiler_builtin_hover_at(&tokens, token_index))
         .or_else(|| integer_conversion_hover_at(&tokens, token_index).map(ToOwned::to_owned))
         .or_else(|| builtin_method_hover_at(&tokens, token_index))
@@ -3694,7 +3701,7 @@ fn compiler_builtin_hover_at(tokens: &[Token], token_index: usize) -> Option<Str
     ))
 }
 
-fn compiler_known_io_hover_at(tokens: &[Token], token_index: usize) -> Option<(String, Span)> {
+fn compiler_known_type_hover_at(tokens: &[Token], token_index: usize) -> Option<(String, Span)> {
     if token_index < 6 {
         return None;
     }
@@ -3712,7 +3719,7 @@ fn compiler_known_io_hover_at(tokens: &[Token], token_index: usize) -> Option<(S
         kind: TokenKind::Backslash,
         ..
     }, Token {
-        kind: TokenKind::Identifier(io),
+        kind: TokenKind::Identifier(module),
         ..
     }, Token {
         kind: TokenKind::Backslash,
@@ -3724,39 +3731,150 @@ fn compiler_known_io_hover_at(tokens: &[Token], token_index: usize) -> Option<(S
     else {
         return None;
     };
-    if root != "Doria" || standard != "Std" || io != "Io" {
+    if root != "Doria" || standard != "Std" {
         return None;
     }
-    let qualified = format!("Doria\\Std\\Io\\{name}");
-    let documentation = compiler_known_io_documentation(&qualified)?;
+    let qualified = format!("Doria\\Std\\{module}\\{name}");
+    let documentation = compiler_known_type_documentation(&qualified)?;
     Some((
         format!("```doria\n{qualified}\n```\n\n{documentation}"),
         Span::new(segment[0].span.start, segment[6].span.end),
     ))
 }
 
-fn compiler_known_io_documentation(name: &str) -> Option<&'static str> {
-    match name {
+fn compiler_known_declaration(name: &str) -> Option<(&'static str, Span, u32)> {
+    static TIME_DECLARATIONS: std::sync::LazyLock<doriac::ast::Program> =
+        std::sync::LazyLock::new(|| {
+            let empty = doriac::parse_source("<compiler-known:time>", "")
+                .expect("empty compiler-known source must parse");
+            doriac::compiler_known_time::augment_program(&empty)
+        });
+    static CONCURRENCY_DECLARATIONS: std::sync::LazyLock<doriac::ast::Program> =
+        std::sync::LazyLock::new(|| {
+            let empty = doriac::parse_source(doriac::compiler_known_concurrency::SOURCE_NAME, "")
+                .expect("empty compiler-known source must parse");
+            doriac::compiler_known_concurrency::augment_program(&empty)
+        });
+    let (declarations, source) = if doriac::compiler_known_time::CANONICAL_TYPES.contains(&name) {
+        (
+            &*TIME_DECLARATIONS,
+            doriac::compiler_known_time::SOURCE_TEXT,
+        )
+    } else if doriac::compiler_known_concurrency::CANONICAL_TYPES.contains(&name) {
+        (
+            &*CONCURRENCY_DECLARATIONS,
+            doriac::compiler_known_concurrency::SOURCE_TEXT,
+        )
+    } else if doriac::compiler_known_stream::CANONICAL_TYPES.contains(&name) {
+        (
+            doriac::compiler_known_stream::declarations(),
+            doriac::compiler_known_stream::SOURCE_TEXT,
+        )
+    } else {
+        return None;
+    };
+    declarations.items.iter().find_map(|item| match item {
+        doriac::ast::Item::Enum(declaration) if declaration.name == name => {
+            Some((source, declaration.span, 13))
+        }
+        doriac::ast::Item::Interface(declaration) if declaration.name == name => {
+            Some((source, declaration.span, 8))
+        }
+        doriac::ast::Item::Class(declaration) if declaration.name == name => {
+            let kind = if doriac::inline_value::InlineValueKind::for_name(name).is_some() {
+                22
+            } else {
+                7
+            };
+            Some((source, declaration.span, kind))
+        }
+        _ => None,
+    })
+}
+
+fn compiler_known_type_documentation(name: &str) -> Option<String> {
+    if let Some(ty) = doriac::inline_value::InlineValueKind::for_name(name) {
+        return Some(analysis::inline_value_documentation(ty));
+    }
+    if let Some(ty) = doriac::byte_intrinsics::type_from_source_name(name) {
+        return doriac::byte_intrinsics::type_documentation(&ty).map(str::to_string);
+    }
+    if let Some((source, span, _)) = compiler_known_declaration(name) {
+        let declaration = &source[span.start..span.end];
+        let description = analysis::pending_request_documentation(name)
+            .or_else(|| analysis::transfer_result_documentation(name))
+            .or_else(|| analysis::file_position_documentation(name))
+            .or_else(|| {
+                (name == doriac::compiler_known_stream::STANDARD_STREAMS)
+                    .then_some(analysis::STANDARD_STREAM_DOCUMENTATION)
+            })
+            .or_else(|| {
+                (name == doriac::compiler_known_stream::TRANSFER_GROUP)
+                    .then_some(analysis::TRANSFER_GROUP_CONTROL_DOCUMENTATION)
+            })
+            .into_iter()
+            .chain(analysis::writable_file_documentation(name))
+            .map(|documentation| format!("\n\n{documentation}"))
+            .collect::<String>();
+        return Some(format!(
+            "Declared compiler-known contract:\n\n```doria\n{declaration}\n```{description}"
+        ));
+    }
+    let description = match name {
         doriac::compiler_known_io::IO_OPERATION => Some(
-            "Compiler-known I/O operation enum with `Open`, `Read`, `Write`, `Append`, and `Flush` cases.",
+            "Compiler-known I/O operation enum.",
         ),
         doriac::compiler_known_io::IO_TARGET => Some(
-            "Compiler-known I/O target enum with `File(string $path)`, `StandardInput`, `StandardOutput`, and `StandardError` cases.",
+            "Compiler-known I/O target enum.",
         ),
         doriac::compiler_known_io::IO_ERROR_REASON => Some(
             "Compiler-known I/O reason enum with stable portable categories; host-specific codes remain in `IoError::$systemCode`.",
         ),
         doriac::compiler_known_io::UTF8_INPUT_SOURCE => Some(
-            "Compiler-known UTF-8 input-source enum with `File(string $path)` and `StandardInput` cases.",
+            "Compiler-known UTF-8 input-source enum.",
         ),
         doriac::compiler_known_io::IO_ERROR => Some(
-            "Compiler-known checked `Error` carrying readonly `message`, `operation`, `target`, `reason`, and nullable `systemCode` properties.",
+            "Compiler-known checked `Error` carrying readonly `message`, `operation`, `target`, `reason`, and nullable `systemCode` and `transferredByteCount` properties. Optional byte progress distinguishes no reported progress (`null`) from a reported count, including zero.",
         ),
         doriac::compiler_known_io::INVALID_UTF8_ERROR => Some(
             "Compiler-known checked `Error` carrying readonly `message`, `source`, `validByteCount`, and nullable `invalidByteCount` properties.",
         ),
         _ => None,
-    }
+    }?;
+    static IO_DECLARATIONS: std::sync::LazyLock<doriac::ast::Program> =
+        std::sync::LazyLock::new(|| {
+            let empty = doriac::parse_source("<compiler-known:io>", "")
+                .expect("empty compiler-known source must parse");
+            doriac::compiler_known_io::augment_program(&empty)
+        });
+    let declaration = IO_DECLARATIONS.items.iter().find_map(|item| match item {
+        doriac::ast::Item::Enum(declaration) if declaration.name == name => Some(declaration),
+        _ => None,
+    });
+    let Some(declaration) = declaration else {
+        return Some(description.to_string());
+    };
+    let cases = declaration
+        .cases
+        .iter()
+        .map(|case| {
+            let parameters = case
+                .payload
+                .iter()
+                .map(|field| format!("{} ${}", field.ty, field.name))
+                .collect::<Vec<_>>();
+            let payload = if parameters.is_empty() {
+                String::new()
+            } else {
+                format!("({})", parameters.join(", "))
+            };
+            format!("    case {}{payload};", case.name)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!(
+        "{description}\n\n```doria\nenum {name}\n{{\n{cases}\n}}\n```"
+    ))
 }
 
 fn builtin_documentation(builtin: Builtin) -> &'static str {
@@ -3825,7 +3943,7 @@ fn builtin_documentation_with_effects(builtin: Builtin) -> String {
     documentation
 }
 
-fn string_companion_hover_at(tokens: &[Token], token_index: usize) -> Option<String> {
+fn intrinsic_companion_hover_at(tokens: &[Token], token_index: usize) -> Option<String> {
     if token_index < 2 || !matches!(tokens[token_index - 1].kind, TokenKind::DoubleColon) {
         return None;
     }
@@ -3835,6 +3953,20 @@ fn string_companion_hover_at(tokens: &[Token], token_index: usize) -> Option<Str
     let TokenKind::Identifier(method) = &tokens[token_index].kind else {
         return None;
     };
+    if let Some(receiver) = doriac::byte_intrinsics::type_from_source_name(companion) {
+        if token_index >= 3 && matches!(tokens[token_index - 3].kind, TokenKind::Backslash) {
+            return None;
+        }
+        let member = doriac::byte_intrinsics::member(&receiver, method)?;
+        if member.kind != doriac::byte_intrinsics::ByteMemberKind::StaticMethod {
+            return None;
+        }
+        return Some(format!(
+            "```doria\n{}\n```\n\n{}",
+            analysis::byte_signature(&receiver, &member),
+            member.documentation,
+        ));
+    }
     if companion != "String" {
         return None;
     }
@@ -4004,10 +4136,10 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
         ),
         TokenKind::Let => Some("Declares a local binding with an inferred type."),
         TokenKind::Take => Some(
-            "Gives ownership of a move-type argument or structural function value to this parameter. Call sites remain unmarked. Consuming invocation is written `function once(...)`, not `function take(...)`.",
+            "Transfers ownership in a parameter or capture, or explicitly moves a value in an expression. In a consuming method, `take $this->field` extracts an owned field and consumes the receiver without running its own destructor.",
         ),
         TokenKind::Borrow => Some(
-            "Retains a readonly source loan through a promoted iterator constructor parameter. The cursor owns its position, not its source; it cannot outlive or allow mutation of that source while the loan is active. This does not declare a general borrowed class field.",
+            "Retains a source loan through a promoted constructor parameter. `borrow` retains a readonly source loan; `borrow writable` retains exclusive writable access. The object borrows its source without taking ownership and cannot outlive that source.",
         ),
         TokenKind::Writable => Some(
             "Marks a binding, property, parameter, or method receiver as mutable. In a structural function type it may independently mark writable invocation or a writable parameter borrow.",
@@ -4156,9 +4288,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "resource" => Some("Reserved for future PHP interop; not a usable core type."),
             companion @ ("Int" | "Int8" | "Int16" | "Int32" | "Int64" | "UInt8" | "UInt16"
             | "UInt32" | "UInt64") => integer_conversion_description(companion),
-            "Bytes" => Some(
-                "`Bytes` is the owned, mutable byte-buffer move type: `Bytes::fromArray` / `->toArray` (copying), the `length` property, byte indexing with in-place writes, and byte-wise equality. It converts to and from `uint8[]` only explicitly.",
-            ),
+            "Bytes" => doriac::byte_intrinsics::type_documentation(&doriac::types::ResolvedType::Bytes),
             _ => None,
         },
         TokenKind::Variable(_) => Some("Doria variable. Variables must be declared before use."),
@@ -4890,7 +5020,8 @@ mod tests {
         let hover = hover_at_offset(source, source.find("borrow").unwrap()).unwrap();
         let text = hover["contents"]["value"].as_str().unwrap();
         assert!(text.contains("readonly source loan"), "{text}");
-        assert!(text.contains("not its source"), "{text}");
+        assert!(text.contains("exclusive writable access"), "{text}");
+        assert!(text.contains("without taking ownership"), "{text}");
         assert!(text.contains("cannot outlive"), "{text}");
     }
 
@@ -5185,11 +5316,18 @@ function main(): void
             assert_eq!(item["detail"], method.signature);
             assert_eq!(item["documentation"], method.documentation);
         }
-        for property in STRING_PROPERTIES {
+        for property in string_surface::STRING_PROPERTIES {
             let item = completion_item(property.name);
             assert_eq!(item["detail"], property.signature);
             assert_eq!(item["documentation"], property.documentation);
         }
+        let view = completion_item("byteRegion");
+        let intrinsic =
+            doriac::byte_intrinsics::member(&doriac::types::ResolvedType::String, "byteRegion")
+                .unwrap();
+        assert_eq!(view["kind"], 10);
+        assert_eq!(view["detail"], "Doria\\Std\\Io\\ByteRegion $byteRegion");
+        assert_eq!(view["documentation"], intrinsic.documentation);
 
         let labels = completion_labels();
         assert!(labels.contains(&"String::containsIgnoreCase".to_string()));
@@ -5670,6 +5808,333 @@ function main(): void
         let short = "IoError $error;";
         assert!(hover_at_offset(short, 1).is_none());
         assert!(!labels.contains(&"IoError".to_string()));
+    }
+
+    #[test]
+    fn io_enum_documentation_uses_compiler_case_and_payload_inventory() {
+        let empty = doriac::parse_source("io-inventory.doria", "").unwrap();
+        let declarations = doriac::compiler_known_io::augment_program(&empty);
+        let completions = completion_items();
+        for item in &declarations.items {
+            let doriac::ast::Item::Enum(declaration) = item else {
+                continue;
+            };
+            let documentation = compiler_known_type_documentation(&declaration.name).unwrap();
+            for case in &declaration.cases {
+                assert!(documentation.contains(&format!("case {}", case.name)));
+                for field in &case.payload {
+                    assert!(documentation.contains(&format!("{} ${}", field.ty, field.name)));
+                }
+            }
+            let completion = completions["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["label"] == declaration.name)
+                .unwrap();
+            assert_eq!(completion["documentation"], documentation);
+            let source = format!("/* 😀 */ {} $value;", declaration.name);
+            let offset = source.find(&declaration.name).unwrap();
+            let hover = hover_at_offset(&source, offset + declaration.name.len() - 1).unwrap();
+            assert!(hover["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains(&documentation));
+        }
+        let operations =
+            compiler_known_type_documentation(doriac::compiler_known_io::IO_OPERATION).unwrap();
+        for case in [
+            "Close",
+            "Register",
+            "Unregister",
+            "Wait",
+            "Configure",
+            "Access",
+            "Seek",
+            "SynchronizeData",
+            "SynchronizeMetadata",
+            "Resize",
+            "Spawn",
+            "Terminate",
+        ] {
+            assert!(
+                operations.contains(&format!("case {case};")),
+                "{operations}"
+            );
+        }
+        let targets =
+            compiler_known_type_documentation(doriac::compiler_known_io::IO_TARGET).unwrap();
+        assert!(targets.contains("case File(string $path);"));
+        assert!(targets.contains("case ReadinessSet;"));
+        assert!(targets.contains("case TransferPlan;"));
+        assert!(targets.contains("case TransferGroup;"));
+        for name in ["Process", "ProcessInput", "ProcessOutput", "ProcessErrors"] {
+            assert!(targets.contains(&format!("case {name}(string $program);")));
+        }
+    }
+
+    #[test]
+    fn stream_type_fallbacks_show_compiler_declarations_without_short_aliases() {
+        let completions = completion_items();
+        let items = completions["items"].as_array().unwrap();
+        for name in doriac::compiler_known_stream::CANONICAL_TYPES
+            .into_iter()
+            .chain(doriac::compiler_known_time::CANONICAL_TYPES)
+            .chain(doriac::compiler_known_concurrency::CANONICAL_TYPES)
+        {
+            let (source, span, kind) = compiler_known_declaration(name).unwrap();
+            if doriac::compiler_known_concurrency::CANONICAL_TYPES.contains(&name) {
+                assert_eq!(source, doriac::compiler_known_concurrency::SOURCE_TEXT);
+                assert_eq!(span.source, doriac::compiler_known_concurrency::SOURCE_ID);
+            }
+            let declaration = &source[span.start..span.end];
+            let item = items.iter().find(|item| item["label"] == name).unwrap();
+            assert_eq!(item["kind"], kind);
+            let documentation = item["documentation"].as_str().unwrap();
+            let expected = if let Some(ty) = doriac::inline_value::InlineValueKind::for_name(name) {
+                assert_eq!(kind, 22);
+                assert!(!documentation.contains("__construct"));
+                analysis::inline_value_documentation(ty)
+            } else {
+                declaration.to_string()
+            };
+            assert!(documentation.contains(expected.as_str()));
+            assert_eq!(
+                documentation.contains(analysis::DURATION_NUMERIC_DOCUMENTATION),
+                name == doriac::compiler_known_time::DURATION
+            );
+            if let Some(request) = analysis::pending_request_documentation(name) {
+                assert!(item["documentation"].as_str().unwrap().contains(request));
+            }
+            if let Some(result) = analysis::transfer_result_documentation(name) {
+                assert_eq!(kind, 13);
+                assert!(documentation.contains(result));
+            }
+            if name == doriac::compiler_known_stream::TRANSFER_GROUP {
+                assert!(documentation.contains(analysis::TRANSFER_GROUP_CONTROL_DOCUMENTATION));
+            }
+            if name == doriac::compiler_known_stream::STANDARD_STREAMS {
+                assert!(documentation.contains(analysis::STANDARD_STREAM_DOCUMENTATION));
+                assert_eq!(span.source, doriac::compiler_known_stream::SOURCE_ID);
+            }
+            if let Some(position) = analysis::file_position_documentation(name) {
+                assert!(documentation.contains(position));
+            }
+            if let Some(writable) = analysis::writable_file_documentation(name) {
+                assert!(documentation.contains(writable));
+            }
+            let text = format!("/* 😀 */ {name} $value;");
+            let start = text.find(name).unwrap();
+            let hover = hover_at_offset(&text, start + name.len() - 1).unwrap();
+            assert!(hover["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains(expected.as_str()));
+            if let Some(result) = analysis::transfer_result_documentation(name) {
+                assert!(hover["contents"]["value"]
+                    .as_str()
+                    .unwrap()
+                    .contains(result));
+            }
+            if name == doriac::compiler_known_stream::TRANSFER_GROUP {
+                assert!(hover["contents"]["value"]
+                    .as_str()
+                    .unwrap()
+                    .contains(analysis::TRANSFER_GROUP_CONTROL_DOCUMENTATION));
+            }
+            assert_eq!(
+                hover["range"],
+                span_to_range(&text, Span::new(start, start + name.len()))
+            );
+            let short = name.rsplit('\\').next().unwrap();
+            assert!(!items.iter().any(|item| item["label"] == short));
+            assert!(hover_at_offset(&format!("{short} $value;"), 0).is_none());
+        }
+        let io_error =
+            compiler_known_type_documentation(doriac::compiler_known_io::IO_ERROR).unwrap();
+        assert!(io_error.contains("transferredByteCount"));
+        assert!(io_error.contains("including zero"));
+        assert!(analysis::file_position_documentation("ReadableFile").is_none());
+        assert!(analysis::file_position_documentation("App\\ReadableFile").is_none());
+        assert!(analysis::writable_file_documentation(
+            doriac::compiler_known_stream::READABLE_FILE
+        )
+        .is_none());
+        assert!(analysis::writable_file_documentation("App\\WritableFile").is_none());
+        assert!(compiler_known_declaration("App\\Concurrency\\CancellationSource").is_none());
+    }
+
+    #[test]
+    fn transfer_key_and_plan_fallback_help_preserves_approved_identity() {
+        use doriac::compiler_known_stream::{READ_TRANSFER_KEY, TRANSFER_PLAN, WRITE_TRANSFER_KEY};
+
+        for (name, expected, other, observed, absent) in [
+            (
+                READ_TRANSFER_KEY,
+                analysis::READ_TRANSFER_KEY_DOCUMENTATION,
+                analysis::WRITE_TRANSFER_KEY_DOCUMENTATION,
+                "readonly observedReadKey: ?ReadTransferKey",
+                "observedWriteKey",
+            ),
+            (
+                WRITE_TRANSFER_KEY,
+                analysis::WRITE_TRANSFER_KEY_DOCUMENTATION,
+                analysis::READ_TRANSFER_KEY_DOCUMENTATION,
+                "readonly observedWriteKey: ?WriteTransferKey",
+                "observedReadKey",
+            ),
+        ] {
+            let documentation = compiler_known_type_documentation(name).unwrap();
+            assert!(documentation.contains(expected));
+            assert!(documentation.contains(analysis::INLINE_COPY_DOCUMENTATION));
+            assert!(documentation.contains(analysis::TRANSFER_KEY_LOOKUP_FAILURE_DOCUMENTATION));
+            for expected in [
+                "resubmitRead/resubmitWrite",
+                "active or unobserved operations",
+                "Valid reuse preserves the original directional key and retained buffer",
+                "operation = IoOperation::Configure",
+                "target = IoTarget::TransferGroup",
+                "reason = IoErrorReason::InvalidInput",
+                "The TransferGroup target has no payload",
+                "`systemCode` and `transferredByteCount` are `null`",
+                "Failed validation submits no work and consumes no stored transfer Error",
+                "Actual transfer failures propagate unchanged through getNextCompletion",
+            ] {
+                assert!(documentation.contains(expected), "{documentation}");
+            }
+            assert!(documentation.contains(observed));
+            assert!(!documentation.contains(absent));
+            assert!(documentation.contains("without retaining group, storage, or source loans"));
+            assert!(documentation
+                .contains("Tooling validation and pinned-compiler integration remain pending"));
+            assert!(!documentation.contains("`path`"));
+            assert!(!documentation.contains(other));
+            assert!(!documentation.contains(analysis::REGISTRATION_KEY_DOCUMENTATION));
+            assert!(!documentation.contains("__construct"));
+        }
+        let documentation = compiler_known_type_documentation(TRANSFER_PLAN).unwrap();
+        for signature in [
+            "static function read<",
+            "consuming function andReadFrom<",
+            "static function writeTo<",
+            "consuming function andWriteTo<",
+            "function getReadKey(int $position): Doria\\Std\\Io\\ReadTransferKey throws Doria\\Std\\Io\\IoError",
+            "function getWriteKey(int $position): Doria\\Std\\Io\\WriteTransferKey throws Doria\\Std\\Io\\IoError",
+        ] {
+            assert!(documentation.contains(signature), "{documentation}");
+        }
+        assert!(!documentation.contains("writable function getReadKey"));
+        assert!(!documentation.contains("writable function getWriteKey"));
+        assert!(!documentation.contains("consuming function getReadKey"));
+        assert!(!documentation.contains("consuming function getWriteKey"));
+        for removed in [
+            "function andRead<",
+            "function readFrom<",
+            "function write<",
+            "function andWrite<",
+        ] {
+            assert!(!documentation.contains(removed), "{documentation}");
+        }
+    }
+
+    #[test]
+    fn transfer_group_reuse_names_come_from_compiler_declarations() {
+        let name = "Doria\\Std\\Io\\TransferGroup";
+        let (source, span, _) = compiler_known_declaration(name)
+            .expect("approved group requires a real compiler-owned declaration");
+        let declaration = &source[span.start..span.end];
+        let documentation = compiler_known_type_documentation(name).unwrap();
+        let completions = completion_items();
+        let item = completions["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["label"] == name)
+            .unwrap();
+        assert!(documentation.contains(declaration));
+        assert!(item["documentation"]
+            .as_str()
+            .unwrap()
+            .contains(declaration));
+        let class = doriac::compiler_known_stream::declarations()
+            .items
+            .iter()
+            .find_map(|item| match item {
+                doriac::ast::Item::Class(class) if class.name == name => Some(class),
+                _ => None,
+            })
+            .unwrap();
+        let methods = class
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                doriac::ast::ClassMember::Method(method) => Some(method.name.as_str()),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        for approved in ["getNextCompletion", "resubmitRead", "resubmitWrite"] {
+            assert!(methods.contains(approved), "{declaration}");
+        }
+        for rejected in ["submitRead", "submitWrite"] {
+            assert!(!methods.contains(rejected), "{declaration}");
+        }
+    }
+
+    #[test]
+    fn transfer_key_misuse_retains_compiler_diagnostics() {
+        use doriac::compiler_known_stream::{READ_TRANSFER_KEY, WRITE_TRANSFER_KEY};
+
+        let uri = "file:///transfer-key-misuse.doria";
+        for (key, other) in [
+            (READ_TRANSFER_KEY, WRITE_TRANSFER_KEY),
+            (WRITE_TRANSFER_KEY, READ_TRANSFER_KEY),
+        ] {
+            for (result, value) in [
+                ("int", "$key"),
+                (other, "$key"),
+                (
+                    "Doria\\Std\\Io\\RegistrationKey<Doria\\Std\\Io\\ReadableFile>",
+                    "$key",
+                ),
+                (key, "1"),
+            ] {
+                let source = format!("function wrong({key} $key): {result} {{ return {value}; }}");
+                let (_, compiler) = doriac::analyze_source_for_ide(uri, &source).unwrap();
+                assert!(!compiler.diagnostics.is_empty(), "{source}");
+                assert_eq!(
+                    diagnostics_for_document(uri, &source),
+                    diagnostics_to_lsp(uri, &source, &compiler.diagnostics)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn byte_type_and_incomplete_factory_hovers_use_compiler_metadata() {
+        for kind in [
+            doriac::types::ByteRegionKind::Readonly,
+            doriac::types::ByteRegionKind::Writable,
+        ] {
+            let name = kind.source_name();
+            let source = format!("{name} $region;");
+            let hover = hover_at_offset(&source, name.len() - 1).unwrap();
+            let expected = doriac::byte_intrinsics::type_documentation(
+                &doriac::types::ResolvedType::ByteRegion(kind),
+            )
+            .unwrap();
+            assert!(hover["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains(expected));
+        }
+        let source = "function inspect(): void { let $bytes = Bytes::allocate(";
+        let hover = hover_at_offset(source, source.find("allocate").unwrap()).unwrap();
+        assert!(hover["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("static function Bytes::allocate(int $length): Bytes"));
+        let unrelated = "App\\Bytes::allocate(";
+        assert!(hover_at_offset(unrelated, unrelated.find("allocate").unwrap()).is_none());
     }
 
     #[test]
@@ -6475,7 +6940,7 @@ function main(): void
         );
 
         for (offset, replacement, expected_edits) in [
-            (text.find("Widget").unwrap(), "Replacement", 2),
+            (text.find("Widget").unwrap(), "Replacement", 3),
             (text.find("invoke").unwrap(), "dispatch", 2),
             (text.find("render").unwrap(), "display", 2),
         ] {
@@ -8092,6 +8557,883 @@ function inspect(Model $model): void
             }))),
             Value::Null
         );
+    }
+
+    #[test]
+    fn byte_region_diagnostics_clear_after_source_edits() {
+        let uri = "file:///byte-region.doria";
+        let valid = r#"function inspect(): void {
+    writable Bytes $bytes = Bytes::allocate(2);
+    {
+        let $region = $bytes->getRegion(0, 2);
+        echo $region[0];
+    }
+    $bytes[0] = 1;
+}
+"#;
+        let invalid = valid.replace("echo $region[0];", "$bytes[0] = 1; echo $region[0];");
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document::new(uri, valid.to_string(), Some(1)),
+        );
+        assert!(server.documents[uri].analysis.diagnostics().is_empty());
+        for (version, text, has_error) in [(2, invalid.as_str(), true), (3, valid, false)] {
+            let mut output = Vec::new();
+            server
+                .did_change(
+                    Some(&json!({
+                        "textDocument": { "uri": uri, "version": version },
+                        "contentChanges": [{ "text": text }],
+                    })),
+                    &mut output,
+                )
+                .unwrap();
+            let diagnostics = server.documents[uri].analysis.diagnostics();
+            assert_eq!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "E0763"),
+                has_error,
+                "{diagnostics:#?}"
+            );
+            if !has_error {
+                assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+                assert!(String::from_utf8(output)
+                    .unwrap()
+                    .contains("\"diagnostics\":[]"));
+            }
+        }
+    }
+
+    #[test]
+    fn nullable_byte_member_diagnostics_clear_after_null_safe_and_narrowing_edits() {
+        let uri = "file:///nullable-byte-members.doria";
+        for ty in [
+            "Bytes",
+            "Doria\\Std\\Io\\ByteRegion",
+            "Doria\\Std\\Io\\WritableByteRegion",
+        ] {
+            let mut members = vec!["length", "getRegion(0, 0)"];
+            if ty != "Doria\\Std\\Io\\ByteRegion" {
+                members.push("getWritableRegion(0, 0)");
+            }
+            for member in members {
+                let invalid = format!(
+                    "function inspect(writable ?{ty} $value): void {{ let $part = $value->{member}; }}"
+                );
+                let null_safe = invalid.replace("$value->", "$value?->");
+                let narrowed = format!("function inspect(writable ?{ty} $value): void {{ if ($value != null) {{ let $part = $value->{member}; }} }}");
+                let mut server = Server::default();
+                server.documents.insert(
+                    uri.to_string(),
+                    Document::new(uri, null_safe.clone(), Some(1)),
+                );
+                assert!(server.documents[uri].analysis.diagnostics().is_empty());
+                for (version, text, has_error) in [
+                    (2, &invalid, true),
+                    (3, &null_safe, false),
+                    (4, &invalid, true),
+                    (5, &narrowed, false),
+                ] {
+                    let mut output = Vec::new();
+                    server
+                        .did_change(
+                            Some(&json!({
+                                "textDocument": { "uri": uri, "version": version },
+                                "contentChanges": [{ "text": text }],
+                            })),
+                            &mut output,
+                        )
+                        .unwrap();
+                    let diagnostics = server.documents[uri].analysis.diagnostics();
+                    assert_eq!(
+                        diagnostics
+                            .iter()
+                            .any(|diagnostic| diagnostic.code == "E0506"),
+                        has_error,
+                        "{ty}::{member}: {diagnostics:#?}"
+                    );
+                    if !has_error {
+                        assert!(diagnostics.is_empty(), "{ty}::{member}: {diagnostics:#?}");
+                        assert!(String::from_utf8(output)
+                            .unwrap()
+                            .contains("\"diagnostics\":[]"));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ambiguous_byte_region_return_diagnostics_clear_after_same_source_edit() {
+        let uri = "file:///ambiguous-byte-return.doria";
+        let source = r#"use Doria\Std\Io\ByteRegion;
+function choose(bool $first, Bytes $left, Bytes $right): ByteRegion {
+    if ($first) { return $left->getRegion(0, 1); }
+    return $right->getRegion(1, 1);
+}
+"#;
+        let corrected = source.replace("$right->", "$left->");
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document::new(uri, source.to_string(), Some(1)),
+        );
+        let diagnostics = server.documents[uri].analysis.diagnostics();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "E0478"),
+            "{diagnostics:#?}"
+        );
+        for (version, text, has_error) in [
+            (2, corrected.as_str(), false),
+            (3, source, true),
+            (4, corrected.as_str(), false),
+        ] {
+            let mut output = Vec::new();
+            server
+                .did_change(
+                    Some(&json!({
+                        "textDocument": { "uri": uri, "version": version },
+                        "contentChanges": [{ "text": text }],
+                    })),
+                    &mut output,
+                )
+                .unwrap();
+            let mut reader = std::io::Cursor::new(output);
+            let mut published = None;
+            while let Some(message) = read_message(&mut reader).unwrap() {
+                let message: Value = serde_json::from_slice(&message).unwrap();
+                if message["method"] == "textDocument/publishDiagnostics"
+                    && message["params"]["uri"] == uri
+                {
+                    published = Some(message["params"].clone());
+                }
+            }
+            let published = published.expect("the edited document must publish diagnostics");
+            assert_eq!(published["version"], version);
+            let diagnostics = published["diagnostics"].as_array().unwrap();
+            assert_eq!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic["code"] == "E0478"),
+                has_error,
+                "{diagnostics:#?}"
+            );
+            if !has_error {
+                assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+                assert!(server.documents[uri].analysis.diagnostics().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn opened_enum_payload_calls_use_resolved_identity() {
+        let uri = "file:///private/tmp/enum-payload-use.doria";
+        let declaration_uri = "file:///private/tmp/enum-payload-declaration.doria";
+        for (qualified, declaration) in [
+            ("Doria\\Std\\Io\\ReadOutcome", None),
+            (
+                "Acme\\Result",
+                Some("namespace Acme; enum Result { case Data(int $byteCount); case Empty; }"),
+            ),
+        ] {
+            for (import, spelling) in [
+                (String::new(), qualified.to_string()),
+                (
+                    format!("use {qualified};"),
+                    qualified.rsplit('\\').next().unwrap().to_string(),
+                ),
+                (
+                    format!("use {qualified} as Response;"),
+                    "Response".to_string(),
+                ),
+                (
+                    format!(
+                        "use {}\\{{{} as Response}};",
+                        qualified.rsplit_once('\\').unwrap().0,
+                        qualified.rsplit_once('\\').unwrap().1
+                    ),
+                    "Response".to_string(),
+                ),
+            ] {
+                for argument in ["0", "byteCount: 0"] {
+                    let mut server = Server::default();
+                    let mut output = Vec::new();
+                    server.handle_message(json!({
+                        "id": 1, "method": "initialize",
+                        "params": { "rootUri": declaration.map(|_| "file:///private/tmp"), "workspaceFolders": [], "capabilities": {} },
+                    }), &mut output).unwrap();
+                    server
+                        .handle_message(
+                            json!({ "method": "initialized", "params": {} }),
+                            &mut output,
+                        )
+                        .unwrap();
+                    if let Some(text) = declaration {
+                        server.did_open(Some(&json!({ "textDocument": {
+                            "uri": declaration_uri, "languageId": "doria", "version": 1, "text": text,
+                        } })), &mut output).unwrap();
+                    }
+                    let source = format!("{import}\n/* 😀 */ function inspect(): void {{ let $result = {spelling}::Data({argument}); }}");
+                    server
+                        .did_open(
+                            Some(&json!({ "textDocument": {
+                        "uri": uri, "languageId": "doria", "version": 1, "text": source,
+                    } })),
+                            &mut output,
+                        )
+                        .unwrap();
+                    assert!(
+                        server.documents[uri].analysis.diagnostics().is_empty(),
+                        "{}",
+                        String::from_utf8_lossy(&output)
+                    );
+                    let call = source.find("::Data(").unwrap() + 2;
+                    let signature = format!("{qualified}::Data(int $byteCount): {qualified}");
+                    for offset in [call + "Data(".len(), source.find(argument).unwrap()] {
+                        let help = server.signature_help(Some(&params_at(uri, &source, offset)));
+                        assert_eq!(
+                            help["signatures"][0]["label"], signature,
+                            "{source}\n{help}"
+                        );
+                        assert_eq!(help["activeParameter"], 0);
+                    }
+                    let hover = server.hover(Some(&params_at(uri, &source, call))).unwrap();
+                    assert!(
+                        hover["contents"]["value"]
+                            .as_str()
+                            .unwrap()
+                            .contains(&signature),
+                        "{hover}"
+                    );
+                    if !import.is_empty() {
+                        let imported = qualified.rsplit('\\').next().unwrap();
+                        let offset = source.find(imported).unwrap();
+                        let hover = server
+                            .hover(Some(&params_at(uri, &source, offset)))
+                            .unwrap();
+                        assert!(
+                            hover["contents"]["value"]
+                                .as_str()
+                                .unwrap()
+                                .contains(&format!("enum {qualified}")),
+                            "{hover}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn opened_io_policy_and_operation_cases_use_resolved_enum_identity() {
+        let uri = "file:///private/tmp/io-enum-cases.doria";
+        let declarations = doriac::compiler_known_io::augment_program(
+            doriac::compiler_known_stream::declarations(),
+        );
+        for name in [
+            "Doria\\Std\\Io\\FileCreation",
+            "Doria\\Std\\Io\\FileWriteMode",
+            doriac::compiler_known_io::IO_OPERATION,
+        ] {
+            let declaration = declarations
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    doriac::ast::Item::Enum(declaration) if declaration.name == name => {
+                        Some(declaration)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let short = name.rsplit('\\').next().unwrap();
+            for (import, spelling) in [
+                (String::new(), name),
+                (format!("use {name};"), short),
+                (format!("use {name} as Choice;"), "Choice"),
+                (
+                    format!("use Doria\\Std\\Io\\{{{short} as Choice}};"),
+                    "Choice",
+                ),
+            ] {
+                let functions = declaration.cases.iter().enumerate().map(|(index, case)| {
+                    format!("/* 😀 */ function make{index}(): {spelling} {{ return {spelling}::{}; }}", case.name)
+                }).collect::<Vec<_>>().join("\n");
+                let source = format!("{import}\n{functions}");
+                let mut server = Server::default();
+                let mut output = Vec::new();
+                server
+                    .did_open(
+                        Some(&json!({ "textDocument": {
+                    "uri": uri, "languageId": "doria", "version": 1, "text": source,
+                } })),
+                        &mut output,
+                    )
+                    .unwrap();
+                assert!(
+                    server.documents[uri].analysis.diagnostics().is_empty(),
+                    "{source}\n{}",
+                    String::from_utf8_lossy(&output)
+                );
+                for case in &declaration.cases {
+                    let offset = source.find(&format!("::{};", case.name)).unwrap() + 2;
+                    let params = params_at(uri, &source, offset);
+                    let hover = server.hover(Some(&params)).unwrap();
+                    assert!(
+                        hover["contents"]["value"]
+                            .as_str()
+                            .unwrap()
+                            .contains(&format!("{name}::{}: {name}", case.name)),
+                        "{hover}"
+                    );
+                    assert_eq!(
+                        hover["range"],
+                        span_to_range(&source, Span::new(offset, offset + case.name.len()))
+                    );
+                    let completions = server.completion(Some(&params));
+                    let labels = completions["items"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|item| item["label"].as_str().unwrap())
+                        .collect::<HashSet<_>>();
+                    assert_eq!(
+                        labels,
+                        declaration
+                            .cases
+                            .iter()
+                            .map(|case| case.name.as_str())
+                            .collect()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn opened_file_calls_share_compiler_signatures_and_access_facts() {
+        let uri = "file:///private/tmp/file-help.doria";
+        let declarations = doriac::compiler_known_stream::declarations();
+        let public_members = |owner: &str, is_static: bool| {
+            let class = declarations
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    doriac::ast::Item::Class(class) if class.name == owner => Some(class),
+                    _ => None,
+                })
+                .unwrap();
+            class
+                .members
+                .iter()
+                .filter_map(|member| match member {
+                    doriac::ast::ClassMember::Method(method)
+                        if method.is_static == is_static
+                            && method.access == doriac::ast::MemberAccess::External =>
+                    {
+                        Some(method.name.as_str())
+                    }
+                    doriac::ast::ClassMember::Property(property)
+                        if property.is_static == is_static
+                            && property.access == doriac::ast::MemberAccess::External =>
+                    {
+                        Some(property.name.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<HashSet<_>>()
+        };
+        let read = r#"    {
+        let writable $destination = $buffer->getWritableRegion(0, 1);
+        let $outcome = $file->read(destination: $destination);
+    }
+"#;
+        let write = r#"    {
+        let $source = $buffer->getRegion(0, 1);
+        let $outcome = $file->write(source: $source);
+    }
+"#;
+        for (factory, file_type) in [
+            ("openRead", doriac::compiler_known_stream::READABLE_FILE),
+            ("openWrite", doriac::compiler_known_stream::WRITABLE_FILE),
+            ("openReadWrite", doriac::compiler_known_stream::DUPLEX_FILE),
+        ] {
+            let arguments = if factory == "openRead" {
+                "path: \"input.txt\""
+            } else {
+                "mode: Doria\\Std\\Io\\FileWriteMode::Append, path: \"input.txt\", creation: Doria\\Std\\Io\\FileCreation::OpenOrCreate"
+            };
+            let operations = format!(
+                "{}{}",
+                if factory == "openWrite" { "" } else { read },
+                if factory == "openRead" { "" } else { write }
+            );
+            let body = format!(
+                r#"function inspect(): void {{
+    /* 😀 */ let writable $file = FACTORY::{factory}({arguments});
+    writable Bytes $buffer = Bytes::allocate(1);
+{operations}
+    $file->close();
+}}
+"#
+            );
+            for (import, spelling) in [
+                ("", "Doria\\Std\\Io\\File"),
+                ("use Doria\\Std\\Io\\File;", "File"),
+                ("use Doria\\Std\\Io\\File as Files;", "Files"),
+                ("use Doria\\Std\\Io\\{File as Files};", "Files"),
+            ] {
+                let source = format!("{import}\n{}", body.replace("FACTORY", spelling));
+                let mut server = Server::default();
+                let mut output = Vec::new();
+                server
+                    .did_open(
+                        Some(&json!({ "textDocument": {
+                "uri": uri, "languageId": "doria", "version": 1, "text": source,
+            } })),
+                        &mut output,
+                    )
+                    .unwrap();
+                assert!(
+                    server.documents[uri].analysis.diagnostics().is_empty(),
+                    "{source}\n{}",
+                    String::from_utf8_lossy(&output)
+                );
+                let parameters = if factory == "openRead" {
+                    "string $path"
+                } else {
+                    "string $path, Doria\\Std\\Io\\FileCreation $creation, Doria\\Std\\Io\\FileWriteMode $mode"
+                };
+                let mut contracts = vec![
+                (factory, format!("static function Doria\\Std\\Io\\File::{factory}({parameters}): {file_type}"), "Doria\\Std\\Io\\File", true),
+                ("close", format!("consuming function {file_type}::close(): void"), file_type, false),
+            ];
+                if factory != "openWrite" {
+                    contracts.push(("read", format!("writable function {file_type}::read(writable Doria\\Std\\Io\\WritableByteRegion $destination): Doria\\Std\\Io\\ReadOutcome"), file_type, false));
+                }
+                if factory != "openRead" {
+                    contracts.push(("write", format!("writable function {file_type}::write(Doria\\Std\\Io\\ByteRegion $source): Doria\\Std\\Io\\WriteOutcome"), file_type, false));
+                }
+                for (method, signature, owner, is_static) in contracts {
+                    let offset = source.find(&format!("{method}(")).unwrap();
+                    let hover = server
+                        .hover(Some(&params_at(uri, &source, offset)))
+                        .unwrap();
+                    assert!(
+                        hover["contents"]["value"]
+                            .as_str()
+                            .unwrap()
+                            .contains(&signature),
+                        "{source}\n{hover}"
+                    );
+                    assert_eq!(
+                        hover["range"],
+                        span_to_range(&source, Span::new(offset, offset + method.len()))
+                    );
+                    let help = server.signature_help(Some(&params_at(
+                        uri,
+                        &source,
+                        offset + method.len() + 1,
+                    )));
+                    assert_eq!(
+                        help["signatures"][0]["label"], signature,
+                        "{source}\n{help}"
+                    );
+                    let completions = server.completion(Some(&params_at(uri, &source, offset)));
+                    let items = completions["items"].as_array().unwrap();
+                    let labels = items
+                        .iter()
+                        .map(|item| item["label"].as_str().unwrap())
+                        .collect::<HashSet<_>>();
+                    assert_eq!(labels, public_members(owner, is_static));
+                    if !is_static {
+                        let readiness = items
+                            .iter()
+                            .find(|item| item["label"] == "readinessSource")
+                            .unwrap();
+                        assert_eq!(readiness["kind"], 10);
+                        assert_eq!(
+                            readiness["detail"],
+                            "$readinessSource { get: Doria\\Std\\Io\\ReadinessSource }"
+                        );
+                        let documentation = readiness["documentation"].as_str().unwrap();
+                        assert!(
+                            documentation
+                                .contains("Returns a readonly borrow rooted in the receiver."),
+                            "{documentation}"
+                        );
+                        assert!(
+                            documentation.contains(
+                                "The source must remain available through the result's last use."
+                            ),
+                            "{documentation}"
+                        );
+                        assert!(
+                            !documentation.contains("**Ambient I/O:**"),
+                            "{documentation}"
+                        );
+                        for (supported, suffix, request, region, result) in [
+                            (
+                                factory != "openWrite",
+                                "Read",
+                                "ReadRequest",
+                                "writable Doria\\Std\\Io\\WritableByteRegion $destination",
+                                "?Doria\\Std\\Io\\ReadOutcome",
+                            ),
+                            (
+                                factory != "openRead",
+                                "Write",
+                                "WriteRequest",
+                                "Doria\\Std\\Io\\ByteRegion $source",
+                                "?Doria\\Std\\Io\\WriteOutcome",
+                            ),
+                        ] {
+                            if !supported {
+                                continue;
+                            }
+                            for (phase, request_mode, result) in
+                                [("prepare", "writable ", "void"), ("complete", "", result)]
+                            {
+                                let member = items
+                                    .iter()
+                                    .find(|item| item["label"] == format!("{phase}{suffix}"))
+                                    .unwrap();
+                                assert_eq!(
+                                    member["detail"],
+                                    format!("writable function {file_type}::{phase}{suffix}({request_mode}Doria\\Std\\Io\\{request} $request, {region}): {result}")
+                                );
+                                assert!(member["documentation"]
+                                    .as_str()
+                                    .unwrap()
+                                    .contains("**Ambient I/O:**"));
+                            }
+                        }
+                    }
+                    let completion = items.iter().find(|item| item["label"] == method).unwrap();
+                    assert_eq!(completion["detail"], signature);
+                    for documentation in [&hover["contents"]["value"], &completion["documentation"]]
+                    {
+                        let documentation = documentation.as_str().unwrap();
+                        assert!(
+                            documentation.contains("**Ambient I/O:**"),
+                            "{documentation}"
+                        );
+                        assert!(
+                            documentation.contains(doriac::compiler_known_io::IO_ERROR),
+                            "{documentation}"
+                        );
+                        assert!(
+                            documentation.contains("without requiring source `throws`"),
+                            "{documentation}"
+                        );
+                    }
+                    assert!(server.documents[uri]
+                        .analysis
+                        .declaration_span_at_offset(offset)
+                        .is_none());
+                }
+                if factory != "openRead" {
+                    for (argument, active_parameter) in
+                        [("mode:", 2), ("path:", 0), ("creation:", 1)]
+                    {
+                        let help = server.signature_help(Some(&params_at(
+                            uri,
+                            &source,
+                            source.find(argument).unwrap(),
+                        )));
+                        assert_eq!(help["activeParameter"], active_parameter, "{help}");
+                        assert!(
+                            !help["signatures"][0]["label"]
+                                .as_str()
+                                .unwrap()
+                                .contains(" = "),
+                            "write policies must have no defaults: {help}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn opened_stream_imports_show_nominal_contracts() {
+        let uri = "file:///private/tmp/stream-imports.doria";
+        let source = "use Doria\\Std\\Io\\{ReadableStream, WritableStream, DuplexStream, FlushableStream, FlushOutcome, PendingReadableStream, PendingWritableStream, ReadRequest, WriteRequest};\nfunction inspect(): void {}";
+        let mut server = Server::default();
+        let mut output = Vec::new();
+        server
+            .did_open(
+                Some(&json!({ "textDocument": {
+            "uri": uri, "languageId": "doria", "version": 1, "text": source,
+        } })),
+                &mut output,
+            )
+            .unwrap();
+        assert!(server.documents[uri].analysis.diagnostics().is_empty());
+        for (name, kind) in [
+            ("ReadableStream", "interface"),
+            ("WritableStream", "interface"),
+            ("DuplexStream", "interface"),
+            ("FlushableStream", "interface"),
+            ("FlushOutcome", "enum"),
+            ("PendingReadableStream", "interface"),
+            ("PendingWritableStream", "interface"),
+            ("ReadRequest", "class"),
+            ("WriteRequest", "class"),
+        ] {
+            let offset = source.find(name).unwrap();
+            let hover = server.hover(Some(&params_at(uri, source, offset))).unwrap();
+            assert!(
+                hover["contents"]["value"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("{kind} Doria\\Std\\Io\\{name}")),
+                "{hover}"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_receiver_diagnostics_clear_after_access_mode_edits() {
+        let uri = "file:///stream-refresh.doria";
+        let valid = r#"use Doria\Std\Io\{ReadableStream, ReadOutcome, WritableByteRegion, IoError};
+function inspect(writable ReadableStream $stream, writable WritableByteRegion $destination): ReadOutcome throws IoError {
+    return $stream->read($destination);
+}
+"#;
+        let readonly = valid.replace("writable ReadableStream", "ReadableStream");
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document::new(uri, valid.to_string(), Some(1)),
+        );
+        assert!(server.documents[uri].analysis.diagnostics().is_empty());
+        for (version, text, has_error) in [(2, readonly.as_str(), true), (3, valid, false)] {
+            let mut output = Vec::new();
+            server
+                .did_change(
+                    Some(&json!({
+                        "textDocument": { "uri": uri, "version": version },
+                        "contentChanges": [{ "text": text }],
+                    })),
+                    &mut output,
+                )
+                .unwrap();
+            let diagnostics = server.documents[uri].analysis.diagnostics();
+            assert_eq!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "E0203"),
+                has_error,
+                "{diagnostics:#?}"
+            );
+            if !has_error {
+                assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+                assert!(String::from_utf8(output)
+                    .unwrap()
+                    .contains("\"diagnostics\":[]"));
+            }
+        }
+    }
+
+    #[test]
+    fn byte_lifetime_diagnostics_clear_after_receiver_and_last_use_corrections() {
+        let uri = "file:///byte-lifetime.doria";
+        let consumed = r#"use Doria\Std\Io\ByteRegion;
+class Packet {
+    Bytes $bytes = Bytes::allocate(2);
+    consuming function view(): ByteRegion { return $this->bytes->getRegion(0, 1); }
+}
+"#;
+        let last_use = r#"function inspect(): void {
+    writable Bytes $bytes = Bytes::allocate(2);
+    let $view = $bytes->getRegion(0, 1);
+    $bytes[0] = 7;
+    echo $view[0];
+}
+"#;
+        for (invalid, fixed, code) in [
+            (
+                consumed,
+                consumed.replace("consuming function", "function"),
+                "E0762",
+            ),
+            (
+                last_use,
+                last_use.replace(
+                    "$bytes[0] = 7;\n    echo $view[0];",
+                    "echo $view[0];\n    $bytes[0] = 7;",
+                ),
+                "E0763",
+            ),
+        ] {
+            let mut server = Server::default();
+            server.documents.insert(
+                uri.to_string(),
+                Document::new(uri, invalid.to_string(), Some(1)),
+            );
+            let diagnostics = server.documents[uri].analysis.diagnostics();
+            assert!(
+                diagnostics.iter().any(|diagnostic| diagnostic.code == code),
+                "{diagnostics:#?}"
+            );
+            let mut output = Vec::new();
+            server
+                .did_change(
+                    Some(&json!({
+                        "textDocument": { "uri": uri, "version": 2 },
+                        "contentChanges": [{ "text": fixed }],
+                    })),
+                    &mut output,
+                )
+                .unwrap();
+            let diagnostics = server.documents[uri].analysis.diagnostics();
+            assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+            let mut reader = std::io::Cursor::new(output);
+            let mut cleared = false;
+            while let Some(message) = read_message(&mut reader).unwrap() {
+                let message: Value = serde_json::from_slice(&message).unwrap();
+                if message["method"] == "textDocument/publishDiagnostics"
+                    && message["params"]["uri"] == uri
+                {
+                    assert_eq!(message["params"]["version"], 2);
+                    assert_eq!(message["params"]["diagnostics"], json!([]));
+                    cleared = true;
+                }
+            }
+            assert!(
+                cleared,
+                "the correction must publish an empty diagnostic list"
+            );
+        }
+    }
+
+    #[test]
+    fn readiness_source_loan_diagnostics_clear_after_last_use_correction() {
+        let uri = "file:///readiness-source-refresh.doria";
+        let valid = include_str!("../../editors/fixtures/stage36a-readiness-sources.doria");
+        let invalid = valid
+            .replace("inspectSource($alias);", "")
+            .replace("$file->close();", "$file->close(); inspectSource($alias);");
+        let mut server = Server::default();
+        server
+            .documents
+            .insert(uri.to_string(), Document::new(uri, invalid, Some(1)));
+        let diagnostics = server.documents[uri].analysis.diagnostics();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error),
+            "{diagnostics:#?}"
+        );
+        let mut output = Vec::new();
+        server
+            .did_change(
+                Some(&json!({
+                    "textDocument": { "uri": uri, "version": 2 },
+                    "contentChanges": [{ "text": valid }],
+                })),
+                &mut output,
+            )
+            .unwrap();
+        let diagnostics = server.documents[uri].analysis.diagnostics();
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let mut reader = std::io::Cursor::new(output);
+        let mut published = false;
+        while let Some(message) = read_message(&mut reader).unwrap() {
+            let message: Value = serde_json::from_slice(&message).unwrap();
+            if message["method"] == "textDocument/publishDiagnostics"
+                && message["params"]["uri"] == uri
+            {
+                assert_eq!(message["params"]["version"], 2);
+                assert_eq!(message["params"]["diagnostics"], json!([]));
+                published = true;
+            }
+        }
+        assert!(
+            published,
+            "correction must clear published readiness source diagnostics"
+        );
+    }
+
+    #[test]
+    fn consuming_retained_receiver_diagnostics_clear_after_source_edits() {
+        let uri = "file:///consuming-retained-refresh.doria";
+        let valid =
+            include_str!("../../editors/fixtures/stage36a-consuming-retained-receiver.doria");
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document::new(uri, valid.to_string(), Some(1)),
+        );
+        assert!(server.documents[uri].analysis.diagnostics().is_empty());
+        let mut version = 1;
+        for (invalid, code) in [
+            (
+                valid.replace("echo \"value", "$left[0] = 0; echo \"value"),
+                "E0763",
+            ),
+            (
+                valid.replace("echo \"value", "$right[0] = 0; echo \"value"),
+                "E0763",
+            ),
+            (
+                valid.replace(
+                    "return $this;",
+                    "return new Cursor($this->owned, $this->right);",
+                ),
+                "E0762",
+            ),
+        ] {
+            for (text, has_error) in [(invalid.as_str(), true), (valid, false)] {
+                version += 1;
+                let mut output = Vec::new();
+                server
+                    .did_change(
+                        Some(&json!({
+                            "textDocument": { "uri": uri, "version": version },
+                            "contentChanges": [{ "text": text }],
+                        })),
+                        &mut output,
+                    )
+                    .unwrap();
+                let diagnostics = server.documents[uri].analysis.diagnostics();
+                assert_eq!(
+                    diagnostics.iter().any(|diagnostic| diagnostic.code == code),
+                    has_error,
+                    "{diagnostics:#?}"
+                );
+                if !has_error {
+                    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+                }
+                let mut reader = std::io::Cursor::new(output);
+                let mut published = false;
+                while let Some(message) = read_message(&mut reader).unwrap() {
+                    let message: Value = serde_json::from_slice(&message).unwrap();
+                    if message["method"] == "textDocument/publishDiagnostics"
+                        && message["params"]["uri"] == uri
+                    {
+                        assert_eq!(message["params"]["version"], version);
+                        let diagnostics = message["params"]["diagnostics"].as_array().unwrap();
+                        assert_eq!(
+                            diagnostics
+                                .iter()
+                                .any(|diagnostic| diagnostic["code"] == code),
+                            has_error,
+                            "{diagnostics:#?}"
+                        );
+                        if !has_error {
+                            assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+                        }
+                        published = true;
+                    }
+                }
+                assert!(published, "each edit must publish current diagnostics");
+            }
+        }
     }
 
     #[test]

@@ -1663,7 +1663,17 @@ impl OpenDocumentIndex {
         let occurrence = self.occurrences.iter().find(|occurrence| {
             occurrence.uri == uri && span_contains_offset(occurrence.span, offset)
         })?;
-        let mut markdown = format!("{} `{}`", kind_name(*kind), symbol.qualified_name);
+        let mut markdown = format!(
+            "{} `{}`",
+            kind_name(*kind, &symbol.qualified_name),
+            symbol.qualified_name
+        );
+        if let Some(ty) = doriac::inline_value::InlineValueKind::for_name(&symbol.qualified_name) {
+            markdown.push_str(&format!(
+                "\n\n{}",
+                crate::analysis::inline_value_documentation(ty)
+            ));
+        }
         if let Some(declaration) = self.declaration_hovers.get(&symbol) {
             if !declaration.is_empty() && !markdown.contains(declaration) {
                 markdown.push_str("\n\n");
@@ -1746,13 +1756,24 @@ impl OpenDocumentIndex {
             }
             let detail = target.as_ref().map_or_else(
                 || format!("Unresolved import `{source_target}`"),
-                |target| format!("Imported {} `{}`", kind_name(kind), target.qualified_name),
+                |target| {
+                    format!(
+                        "Imported {} `{}`",
+                        kind_name(kind, &target.qualified_name),
+                        target.qualified_name
+                    )
+                },
             );
             completions.insert(
                 alias.clone(),
                 IndexedCompletion {
                     label: alias.clone(),
-                    kind: completion_kind(kind),
+                    kind: completion_kind(
+                        kind,
+                        target.as_ref().map_or(source_target.as_str(), |target| {
+                            target.qualified_name.as_str()
+                        }),
+                    ),
                     detail,
                     documentation: None,
                     insert_text: None,
@@ -2296,7 +2317,10 @@ fn is_identifier(name: &str) -> bool {
         && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
-fn kind_name(kind: GlobalSymbolKind) -> &'static str {
+fn kind_name(kind: GlobalSymbolKind, qualified_name: &str) -> &'static str {
+    if doriac::inline_value::InlineValueKind::for_name(qualified_name).is_some() {
+        return "Inline Copy Value";
+    }
     match kind {
         GlobalSymbolKind::Class => "Class",
         GlobalSymbolKind::Enum => "Enum",
@@ -2311,7 +2335,10 @@ fn kind_name(kind: GlobalSymbolKind) -> &'static str {
     }
 }
 
-fn completion_kind(kind: GlobalSymbolKind) -> u32 {
+fn completion_kind(kind: GlobalSymbolKind, qualified_name: &str) -> u32 {
+    if doriac::inline_value::InlineValueKind::for_name(qualified_name).is_some() {
+        return 22;
+    }
     match kind {
         GlobalSymbolKind::Class => 7,
         GlobalSymbolKind::Enum => 13,
@@ -2328,8 +2355,8 @@ fn completion_kind(kind: GlobalSymbolKind) -> u32 {
 fn completion(label: String, kind: GlobalSymbolKind, qualified_name: &str) -> IndexedCompletion {
     IndexedCompletion {
         label,
-        kind: completion_kind(kind),
-        detail: format!("{} `{qualified_name}`", kind_name(kind)),
+        kind: completion_kind(kind, qualified_name),
+        detail: format!("{} `{qualified_name}`", kind_name(kind, qualified_name)),
         documentation: None,
         insert_text: None,
         snippet: false,
@@ -2396,6 +2423,43 @@ mod tests {
     use crate::workspace_graph::{analyze_open_graph, OpenSource};
     use doriac::incremental::CompilationSession;
     use doriac::source::{ExpansionId, SourceId};
+
+    #[test]
+    fn inline_copy_presentations_preserve_imports_and_user_classes() {
+        for (name, arguments) in [
+            (doriac::compiler_known_time::DURATION, ""),
+            (doriac::compiler_known_time::DEADLINE, ""),
+            (
+                doriac::compiler_known_stream::REGISTRATION_KEY,
+                "<Doria\\Std\\Io\\ReadableFile>",
+            ),
+        ] {
+            let short = name.rsplit('\\').next().unwrap();
+            let source = format!(
+                "namespace App; use {name} as TimeValue; class {short} {{}} \
+                function inspect(TimeValue{arguments} $value): void {{}}"
+            );
+            let uri = "file:///workspace/time-values.doria";
+            let snapshot = AnalysisSnapshot::analyze(uri, &source);
+            assert!(
+                snapshot.diagnostics().is_empty(),
+                "{:?}",
+                snapshot.diagnostics()
+            );
+            let index =
+                OpenDocumentIndex::rebuild(std::iter::once(("graph".to_string(), uri, &snapshot)));
+            let completions = index.completions(uri);
+            let alias = completions
+                .iter()
+                .find(|item| item.label == "TimeValue")
+                .unwrap();
+            assert_eq!(alias.kind, 22);
+            assert!(alias.detail.contains("Inline Copy Value"));
+            let user_class = completions.iter().find(|item| item.label == short).unwrap();
+            assert_eq!(user_class.kind, 7);
+            assert!(user_class.detail.contains("Class"));
+        }
+    }
 
     #[test]
     fn composition_references_do_not_require_a_rename_proof() {

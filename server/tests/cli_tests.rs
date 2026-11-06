@@ -28,10 +28,11 @@ fn reports_machine_readable_compiler_identity() {
     assert_eq!(value["component"], "doria-lsp");
     assert_eq!(value["version"], "2026.3.1-canary");
     assert_eq!(value["toolchainVersion"], "2026.03.1-canary");
-    assert_eq!(doriac::BUILD_COMMIT.len(), 40);
-    assert!(doriac::BUILD_COMMIT
-        .bytes()
-        .all(|byte| byte.is_ascii_hexdigit()));
+    let (digest, length) = doriac::BUILD_COMMIT
+        .strip_prefix("dev-")
+        .map_or((doriac::BUILD_COMMIT, 40), |digest| (digest, 64));
+    assert_eq!(digest.len(), length);
+    assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
     assert_eq!(value["compilerCommit"], doriac::BUILD_COMMIT);
 }
 

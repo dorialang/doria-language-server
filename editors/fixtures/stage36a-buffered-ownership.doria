@@ -1,0 +1,38 @@
+use Doria\Std\Io\{BorrowedBufferedReader, BorrowedBufferedWriter, BorrowedFinishOutcome,
+    BufferedReader, BufferedWriter, FinishOutcome, IoError, ReadableFile, WritableFile};
+
+class ReadView {
+    function __construct(borrow ReadableFile $source) {}
+}
+
+class WriteView {
+    function __construct(borrow writable WritableFile $sink) {}
+}
+
+class Owner {
+    function __construct(take ReadableFile $source) {}
+    consuming function release(): ReadableFile { return take $this->source; }
+}
+
+function inspect(take ReadableFile $input, take WritableFile $output): void throws IoError {
+    let writable $source = $input;
+    let writable $sink = $output;
+    {
+        let $view = new ReadView($source);
+    }
+    {
+        let $reader = new BorrowedBufferedReader<ReadableFile>($source, 16);
+    }
+    {
+        let $view = new WriteView($sink);
+    }
+    {
+        let $writer = new BorrowedBufferedWriter<WritableFile>($sink, 16);
+        BorrowedFinishOutcome<BorrowedBufferedWriter<WritableFile>> $outcome = $writer->finish();
+    }
+    let $owner = new Owner($source);
+    let $reader = new BufferedReader<ReadableFile>($owner->release(), 16);
+    let $released = $reader->finish();
+    let $writer = new BufferedWriter<WritableFile>($sink, 16);
+    FinishOutcome<WritableFile, BufferedWriter<WritableFile>> $outcome = $writer->finish();
+}

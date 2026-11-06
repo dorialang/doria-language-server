@@ -1,0 +1,47 @@
+function firstNested(List<List<int>> $source): ?List<int> { return $source->first; }
+function lastNested(List<List<int>> $source): ?List<int> { return $source->last; }
+function firstNullableNested(List<?List<int>> $source): ?List<int> { return $source->first; }
+function lastNullableNested(List<?List<int>> $source): ?List<int> { return $source->last; }
+function getNested(Dictionary<string, List<int>> $source): ?List<int> { return $source->get("slot"); }
+function getNullableNested(Dictionary<string, ?List<int>> $source): ?List<int> { return $source->get("slot"); }
+
+function firstMixed(List<mixed> $source): ?mixed { return $source->first; }
+function lastMixed(List<mixed> $source): ?mixed { return $source->last; }
+function firstNullableMixed(List<?mixed> $source): ?mixed { return $source->first; }
+function lastNullableMixed(List<?mixed> $source): ?mixed { return $source->last; }
+function getMixed(Dictionary<string, mixed> $source): ?mixed { return $source->get("slot"); }
+function getNullableMixed(Dictionary<string, ?mixed> $source): ?mixed { return $source->get("slot"); }
+
+function peekFrontNested(Deque<List<int>> $source): ?List<int> { return $source->peekFront; }
+function peekBackNested(Deque<List<int>> $source): ?List<int> { return $source->peekBack; }
+function peekFrontNullableNested(Deque<?List<int>> $source): ?List<int> { return $source->peekFront; }
+function peekBackNullableNested(Deque<?List<int>> $source): ?List<int> { return $source->peekBack; }
+function peekFrontMixed(Deque<mixed> $source): ?mixed { return $source->peekFront; }
+function peekBackMixed(Deque<mixed> $source): ?mixed { return $source->peekBack; }
+function peekFrontNullableMixed(Deque<?mixed> $source): ?mixed { return $source->peekFront; }
+function peekBackNullableMixed(Deque<?mixed> $source): ?mixed { return $source->peekBack; }
+
+function popNested(writable List<List<int>> $source): ?List<int> { return $source->pop(); }
+function popNullableNested(writable List<?List<int>> $source): ?List<int> { return $source->pop(); }
+function removeNested(writable Dictionary<string, List<int>> $source): ?List<int> { return $source->remove("slot"); }
+function removeNullableNested(writable Dictionary<string, ?List<int>> $source): ?List<int> { return $source->remove("slot"); }
+function removeAtNested(writable List<List<int>> $source): List<int> { return $source->removeAt(0); }
+function removeAtNullableNested(writable List<?List<int>> $source): ?List<int> { return $source->removeAt(0); }
+
+function popMixed(writable List<mixed> $source): ?mixed { return $source->pop(); }
+function popNullableMixed(writable List<?mixed> $source): ?mixed { return $source->pop(); }
+function removeMixed(writable Dictionary<string, mixed> $source): ?mixed { return $source->remove("slot"); }
+function removeNullableMixed(writable Dictionary<string, ?mixed> $source): ?mixed { return $source->remove("slot"); }
+function removeAtMixed(writable List<mixed> $source): mixed { return $source->removeAt(0); }
+function removeAtNullableMixed(writable List<?mixed> $source): ?mixed { return $source->removeAt(0); }
+
+function popFrontNested(writable Deque<List<int>> $source): ?List<int> { return $source->popFront(); }
+function popBackNested(writable Deque<List<int>> $source): ?List<int> { return $source->popBack(); }
+function popFrontNullableNested(writable Deque<?List<int>> $source): ?List<int> { return $source->popFront(); }
+function popBackNullableNested(writable Deque<?List<int>> $source): ?List<int> { return $source->popBack(); }
+function popFrontMixed(writable Deque<mixed> $source): ?mixed { return $source->popFront(); }
+function popBackMixed(writable Deque<mixed> $source): ?mixed { return $source->popBack(); }
+function popFrontNullableMixed(writable Deque<?mixed> $source): ?mixed { return $source->popFront(); }
+function popBackNullableMixed(writable Deque<?mixed> $source): ?mixed { return $source->popBack(); }
+
+function main(): void {}

@@ -1,0 +1,54 @@
+use Doria\Std\Io\{ReadinessSet as Registry, ReadinessStream, ReadinessSource,
+    RegistrationKey as Key, ReadableFile, IoError};
+
+class ReadyOnly implements ReadinessStream
+{
+    internal ReadableFile $source;
+
+    function __construct(parameter take ReadableFile $source)
+    {
+        $this->source = $source;
+    }
+
+    ReadinessSource $readinessSource { borrowed get => $this->source->readinessSource; }
+}
+
+function create(): Registry throws IoError
+{
+    return new Registry();
+}
+
+function concrete(writable Registry $set, take ReadableFile $stream): ReadableFile throws IoError
+{
+    let $key = $set->register(stream: $stream);
+    let $copy = $key;
+    let $returned = $set->unregister(key: $copy);
+    return $returned;
+}
+
+function erased(writable Registry $set, take ReadinessStream $stream): ReadinessStream throws IoError
+{
+    let $key = $set->register($stream);
+    return $set->unregister($key);
+}
+
+function relay<T implements ReadinessStream>(writable Registry $set, take T $stream): T throws IoError
+{
+    let $key = $set->register($stream);
+    return $set->unregister($key);
+}
+
+function readinessOnly(writable Registry $set, take ReadyOnly $stream): ReadyOnly throws IoError
+{
+    let $key = $set->register($stream);
+    return $set->unregister($key);
+}
+
+function recover(writable Doria\Std\Io\ReadinessSet $set, Key<ReadableFile> $key): ReadableFile throws IoError
+{
+    return $set->unregister($key);
+}
+
+function main(): void
+{
+}

@@ -1,0 +1,40 @@
+class Counter
+{
+    writable int $value = 0;
+    writable function selfRef(): self { return $this; }
+    writable function bump(): void { $this->value++; }
+}
+
+class Holder
+{
+    writable Counter $stored = new Counter();
+    Counter $current { writable borrowed get => $this->stored; }
+}
+
+function lend(writable Counter $counter): Counter { return $counter; }
+function peek(Counter $counter): Counter { return $counter; }
+function generic<T>(writable T $value): T { return $value; }
+function consume(take Counter $counter): void {}
+
+function main(): void
+{
+    let writable $owner = new Counter();
+    let writable $method = $owner->selfRef();
+    $method->bump();
+
+    let writable $function = lend($owner);
+    let writable $alias = $function;
+    $alias->bump();
+    $function->bump();
+
+    let writable $generic = generic($owner);
+    $generic->bump();
+
+    let writable $holder = new Holder();
+    let $property = $holder->current;
+    echo $property->value;
+
+    let $readonly = peek($owner);
+    echo $readonly->value;
+    $owner->bump();
+}

@@ -4,13 +4,14 @@ use std::collections::{HashMap, HashSet};
 use doriac::ast::{
     Block, ClassDecl, ClassMember, ConstructorParameterRole, ControlFlowFinally, DoWhileStmt,
     ElseBranch, EnumDecl, Expr, ForIncrement, ForInitializer, FunctionDecl, GivenPrelude, IfStmt,
-    Item, MatchMode, MatchOrigin, MatchPattern, MemberAccess, Param, Program, StaticQualifier,
-    Stmt, TryStmt, VarDecl, WhenExpression, WhileStmt,
+    Item, MatchMode, MatchOrigin, MatchPattern, MemberAccess, NominalCondition, Param, Program,
+    StaticQualifier, Stmt, TryStmt, VarDecl, WhenExpression, WhileStmt,
 };
 use doriac::attributes::{
     AttributeApplication, AttributeClassIdentity, AttributeClassSchema, AttributeSemanticInfo,
     AttributeTarget, AttributeValue, AttributeValueKind,
 };
+use doriac::byte_intrinsics::{self, ByteIntrinsic, ByteMemberKind};
 use doriac::diagnostics::{Diagnostic, DiagnosticSeverity, LabelRole};
 use doriac::enums::{EnumBackingType, EnumBackingValue};
 use doriac::lexer::{Token, TokenKind};
@@ -22,12 +23,17 @@ use doriac::ownership::{
     BorrowRoot, CaptureAcquisitionKind, ClosureEscapeClassification, InvocationConsumption,
     ValueProvenance,
 };
-use doriac::semantics::composition::{ClassMemberSurface, ClassMemberSurfaceEntry};
-use doriac::semantics::contracts::{ContractFacts, InterfaceSpecializationFacts, RequirementFacts};
+use doriac::semantics::composition::{
+    ClassMemberAvailability, ClassMemberSurface, ClassMemberSurfaceEntry, MemberAvailability,
+};
+use doriac::semantics::contracts::{
+    ConformanceStatus, ContractFacts, InterfaceSpecializationFacts, RequirementFacts,
+};
 use doriac::semantics::{
     CallableSignatureSemanticInfo, CallableTarget, ConstructorParameterSemanticRole,
-    EnumSemanticInfo, ForeachIterationKind, ForeachValueAccess, ListAlgorithmCallInfo,
-    ListAlgorithmKind, ListCallbackAccess, ObjectPathAccess, SemanticInfo,
+    EnumCaseDeclarationSemanticInfo, EnumDeclarationSemanticInfo, ForeachIterationKind,
+    ForeachValueAccess, ListAlgorithmCallInfo, ListAlgorithmKind, ListCallbackAccess,
+    ObjectPathAccess, SemanticInfo,
 };
 use doriac::source::{SourceFile, SourceId, Span};
 use doriac::symbols::{
@@ -38,7 +44,7 @@ use doriac::types::{
     ClassType, FunctionInvocationMode, ResolvedType, SharedHandleKind, TypeRef, TypeRegistry,
 };
 
-use crate::string_surface::{string_companion_method, string_property};
+use crate::string_surface::{string_companion_method, string_property, STRING_PROPERTIES};
 
 mod property_hooks;
 use doriac::property_hooks::{member_callables, PropertyHookContext};
@@ -351,6 +357,7 @@ pub(crate) struct AnalysisSnapshot {
     composition_origins: Vec<doriac::trait_composition::EffectiveMemberOrigin>,
     composition_obligations: Vec<doriac::trait_composition::MethodObligation>,
     class_member_surfaces: Vec<ClassMemberSurface>,
+    class_member_availability: HashMap<Span, ClassMemberAvailability>,
     property_backing_fields: HashMap<Span, doriac::property_hooks::PropertyBackingField>,
     trait_adaptations: Vec<doriac::ast::TraitAdaptation>,
     trait_adaptation_surfaces: Vec<doriac::semantics::composition::TraitAdaptationSurface>,
@@ -517,6 +524,8 @@ struct Occurrence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SymbolKind {
     Plain,
+    Type,
+    TypeParameter,
     Variable,
     Keyword,
 }
@@ -540,12 +549,14 @@ struct MemberReceiver {
 #[derive(Debug, Clone)]
 struct StaticReceiver {
     span: Span,
+    receiver_span: Span,
     receiver: StaticReceiverKind,
     current_class: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 enum StaticReceiverKind {
+    Byte(ResolvedType),
     Enum(String),
     Class {
         receiver: ClassType<ResolvedType>,
@@ -1509,6 +1520,12 @@ impl AnalysisSnapshot {
         if let Some(completions) = list_algorithm_completions(receiver) {
             return completions;
         }
+        if matches!(receiver, ResolvedType::String) {
+            return string_property_completions();
+        }
+        if matches!(receiver, ResolvedType::Bytes | ResolvedType::ByteRegion(_)) {
+            return byte_completions(receiver, context.writable_payload_access, false);
+        }
         let ResolvedType::SharedHandle(kind, payload) = receiver else {
             return Vec::new();
         };
@@ -1550,6 +1567,12 @@ impl AnalysisSnapshot {
             interface_member_completions(&self.contracts, payload, context.receiver_span, writable)
         {
             completions.extend(members);
+        } else if kind.is_access() {
+            if matches!(payload.as_ref(), ResolvedType::String) {
+                completions.extend(string_property_completions());
+            } else {
+                completions.extend(byte_completions(payload, writable, false));
+            }
         }
         let mut labels = HashSet::new();
         completions.retain(|completion| labels.insert(completion.label.clone()));
@@ -1580,7 +1603,11 @@ impl AnalysisSnapshot {
                         ""
                     },
                     if candidate.is_static { "static " } else { "" },
-                    if candidate.writable { "writable " } else { "" }
+                    match candidate.receiver_mode {
+                        Some(ReceiverMode::Writable) => "writable ",
+                        Some(ReceiverMode::Consuming) => "consuming ",
+                        Some(ReceiverMode::Readonly) | None => "",
+                    }
                 );
                 let signature = semantic_callable_signature(
                     &format!("{}::{}", candidate.trait_type, candidate.name),
@@ -1656,6 +1683,7 @@ impl AnalysisSnapshot {
         method: Option<HierarchyMethodContext>,
     ) -> Vec<SemanticCompletion> {
         match &context.receiver {
+            StaticReceiverKind::Byte(receiver) => byte_completions(receiver, false, true),
             StaticReceiverKind::Enum(name) => self
                 .enum_case_completions
                 .get(name)
@@ -1690,7 +1718,9 @@ impl AnalysisSnapshot {
                             || context.current_class.as_deref()
                                 == Some(member.declaring_class.name.as_str()))
                 })
-                .map(|member| self.surface_member_completion(member))
+                .filter_map(|member| {
+                    self.available_member_completion(receiver, member, context.receiver_span)
+                })
                 .collect(),
         }
     }
@@ -1723,14 +1753,16 @@ impl AnalysisSnapshot {
                         && member.hooks.as_ref().is_none_or(|hooks| {
                             writable
                                 || hooks.getter.as_ref().is_some_and(|getter| {
-                                    getter.receiver_mode == ReceiverMode::Readonly
+                                    getter.receiver_mode == Some(ReceiverMode::Readonly)
                                 })
                         })
                         && (member.access == MemberAccess::External
                             || context.current_class.as_deref()
                                 == Some(member.declaring_class.name.as_str()))
                 })
-                .map(|member| self.surface_member_completion(member))
+                .filter_map(|member| {
+                    self.available_member_completion(receiver, member, context.receiver_span)
+                })
                 .collect();
         }
         let mut completions = Vec::new();
@@ -1760,12 +1792,56 @@ impl AnalysisSnapshot {
         completions
     }
 
-    fn surface_member_completion(&self, member: &ClassMemberSurfaceEntry) -> SemanticCompletion {
+    fn available_member_completion(
+        &self,
+        receiver: &ClassType<ResolvedType>,
+        member: &ClassMemberSurfaceEntry,
+        receiver_span: Span,
+    ) -> Option<SemanticCompletion> {
+        let availability = self
+            .class_member_availability
+            .get(&receiver_span)
+            .filter(|facts| &facts.receiver == receiver)
+            .map_or(Some(member.availability), |facts| {
+                facts.members.get(&member.name).copied()
+            })?;
+        if availability == MemberAvailability::Unproved {
+            return None;
+        }
         let mut completion = class_surface_member_completion(
             member,
             &HashMap::new(),
             self.property_backing_fields.get(&member.declaration),
         );
+        if availability == MemberAvailability::RequiresTypeArguments {
+            let condition = self
+                .contracts
+                .conditions
+                .get(&member.declaration)
+                .or_else(|| {
+                    self.contracts
+                        .callable_conditions
+                        .get(&member.declaration)
+                        .and_then(|owner| self.contracts.conditions.get(owner))
+                })?;
+            let bounds = condition
+                .obligations
+                .iter()
+                .map(|bound| {
+                    format!(
+                        "{} implements {}",
+                        display_resolved_type(&bound.subject_type),
+                        display_resolved_type(&ResolvedType::Interface(bound.interface.clone()))
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            completion.detail.push_str(&format!(" where ({bounds})"));
+            append_documentation(
+                &mut completion.documentation,
+                "Availability depends on the inferred method type arguments. The condition must be proved for the invocation.",
+            );
+        }
         if let Some(documentation) = self
             .class_members
             .get(&member.declaring_class.name)
@@ -1791,7 +1867,7 @@ impl AnalysisSnapshot {
                 ),
             );
         }
-        completion
+        Some(completion)
     }
 
     pub(crate) fn local_completions_at_offset(&self, offset: usize) -> Vec<LocalCompletion> {
@@ -1899,6 +1975,10 @@ impl AnalysisSnapshot {
         let Some(symbol) = self.symbol_at_offset(offset) else {
             return Vec::new();
         };
+        // Clause subjects do not enumerate every use of a generic parameter.
+        if self.symbols[symbol].kind == SymbolKind::TypeParameter {
+            return Vec::new();
+        }
         let mut spans = self
             .occurrences
             .iter()
@@ -1977,10 +2057,10 @@ impl AnalysisSnapshot {
         let symbol = self.symbols.get(occurrence.symbol)?;
         let bare_name = new_name.strip_prefix('$').unwrap_or(new_name);
         Some(match (symbol.kind, occurrence.role) {
-            (SymbolKind::Plain, _) => new_name.to_string(),
+            (SymbolKind::Plain | SymbolKind::Type, _) => new_name.to_string(),
             (SymbolKind::Variable, OccurrenceRole::NamedArgument) => bare_name.to_string(),
             (SymbolKind::Variable, _) => format!("${bare_name}"),
-            (SymbolKind::Keyword, _) => return None,
+            (SymbolKind::Keyword | SymbolKind::TypeParameter, _) => return None,
         })
     }
 
@@ -2018,7 +2098,7 @@ impl AnalysisSnapshot {
         new_name: &str,
     ) -> Option<Vec<(Span, String)>> {
         let kind = self.symbols.get(symbol)?.kind;
-        if kind == SymbolKind::Keyword {
+        if matches!(kind, SymbolKind::Keyword | SymbolKind::TypeParameter) {
             return None;
         }
         let bare_name = new_name.strip_prefix('$').unwrap_or(new_name);
@@ -2177,6 +2257,9 @@ fn directive_semantic_tokens(program: &Program) -> Vec<(Span, u32)> {
 }
 
 fn semantic_token_type(symbol: &Symbol) -> Option<u32> {
+    if matches!(symbol.kind, SymbolKind::Type | SymbolKind::TypeParameter) {
+        return Some(1);
+    }
     if symbol.kind == SymbolKind::Keyword {
         return Some(4);
     }
@@ -2431,6 +2514,8 @@ impl<'a> SnapshotBuilder<'a> {
         self.collect_declarations(program);
         self.collect_semantic_only_declarations();
         self.collect_references(program);
+        self.collect_resolved_type_references();
+        self.collect_condition_subject_references();
         self.collect_composed_references();
         self.resolve_named_argument_references();
         self.collect_attribute_facts(program);
@@ -2499,6 +2584,10 @@ impl<'a> SnapshotBuilder<'a> {
             class_member_surfaces: self
                 .semantic_info
                 .map(|info| info.class_member_surfaces.clone())
+                .unwrap_or_default(),
+            class_member_availability: self
+                .semantic_info
+                .map(|info| info.class_member_availability.clone())
                 .unwrap_or_default(),
             property_backing_fields: self.semantic_info.map(|info| info.property_backing_fields.clone()).unwrap_or_default(),
             trait_adaptations: program.items.iter().filter_map(|item| match item {
@@ -2834,8 +2923,12 @@ impl<'a> SnapshotBuilder<'a> {
             .filter_map(|declaration| {
                 let span = declaration.span?;
                 let ty = declaration.source_type.as_ref()?;
+                let documentation = doriac::compiler_known_stream::is_call_scoped_request(ty)
+                    .then(|| PENDING_REQUEST_DOCUMENTATION.to_string())
+                    .or_else(|| inline_copy_documentation(ty));
                 (span.source == self.source_id
-                    && matches!(non_nullable_type(ty), ResolvedType::Function(_)))
+                    && (documentation.is_some()
+                        || matches!(non_nullable_type(ty), ResolvedType::Function(_))))
                 .then_some((
                     declaration.id,
                     span,
@@ -2843,22 +2936,45 @@ impl<'a> SnapshotBuilder<'a> {
                     declaration.kind,
                     declaration.ownership,
                     declaration.name.as_str(),
+                    documentation,
                 ))
             })
             .collect::<Vec<_>>();
-        bindings.sort_by_key(|(id, span, _, _, _, _)| (span.start, span.end, *id));
-        for (binding_id, declaration_span, ty, kind, ownership, declaration_name) in bindings {
+        bindings.sort_by_key(|(id, span, _, _, _, _, _)| (span.start, span.end, *id));
+        for (binding_id, declaration_span, ty, kind, ownership, declaration_name, documentation) in
+            bindings
+        {
             let name = binding_source_name(info, binding_id);
-            let mut markdown = format!(
-                "```doria\n{} {name}\n```\n\nSemantically resolved function-typed binding.",
-                display_resolved_type(ty),
-            );
-            if matches!(
-                kind,
-                BindingKind::FunctionParameter
-                    | BindingKind::MethodParameter
-                    | BindingKind::ClosureParameter
-            ) {
+            let mut markdown = if let Some(documentation) = documentation.as_deref() {
+                let access = if ownership == BindingOwnership::WritableBorrow
+                    || info
+                        .binding_resolution
+                        .declarations_by_id
+                        .get(&binding_id)
+                        .is_some_and(|declaration| declaration.writable)
+                {
+                    "writable "
+                } else {
+                    ""
+                };
+                format!(
+                    "```doria\n{access}{} {name}\n```\n\n{documentation}",
+                    display_resolved_type(ty),
+                )
+            } else {
+                format!(
+                    "```doria\n{} {name}\n```\n\nSemantically resolved function-typed binding.",
+                    display_resolved_type(ty),
+                )
+            };
+            if documentation.is_none()
+                && matches!(
+                    kind,
+                    BindingKind::FunctionParameter
+                        | BindingKind::MethodParameter
+                        | BindingKind::ClosureParameter
+                )
+            {
                 markdown.push_str(match ownership {
                     BindingOwnership::Owned => "\n\n**Ownership:** Owned Callback Parameter",
                     BindingOwnership::ReadonlyBorrow | BindingOwnership::WritableBorrow => {
@@ -3101,7 +3217,7 @@ impl<'a> SnapshotBuilder<'a> {
                     );
                     let mut documentation = phpdoc_before(self.text, function.span.start);
                     self.append_callable_effect_documentation(&mut documentation, function.span);
-                    self.append_retained_source_documentation(&mut documentation, function);
+                    self.append_callable_source_documentation(&mut documentation, function);
                     let symbol = self.add_declaration_symbol(
                         selection_span,
                         function_signature(function, None),
@@ -3125,17 +3241,7 @@ impl<'a> SnapshotBuilder<'a> {
         parameters: &[doriac::ast::TypeParamDecl],
         parents: &[TypeRef],
     ) {
-        let mut signature = format!("{kind} {name}{}", type_parameter_signature(parameters));
-        if !parents.is_empty() {
-            signature.push_str(&format!(
-                " extends {}",
-                parents
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
+        let signature = contract_signature(kind, name, parameters, parents);
         let documentation = if kind == "interface" {
             "Nominal interface declaration. Checked requirements govern owned and borrowed interface values, erased calls, narrowing, and shared payload views. Selected trait members can satisfy interface requirements; conformance is checked after composition."
         } else {
@@ -3155,9 +3261,9 @@ impl<'a> SnapshotBuilder<'a> {
             return;
         };
         let enums = info
-            .enums
+            .enum_declarations
             .iter()
-            .filter(|info| !self.enums.contains_key(&info.name))
+            .filter(|info| !self.enums.contains_key(&info.source_type.name))
             .cloned()
             .collect::<Vec<_>>();
         let classes = info
@@ -3166,26 +3272,67 @@ impl<'a> SnapshotBuilder<'a> {
             .filter(|info| !self.classes.contains_key(&info.declaration_name))
             .cloned()
             .collect::<Vec<_>>();
+        let interfaces = info
+            .contracts
+            .interfaces
+            .iter()
+            .filter(|fact| fact.valid && !self.contract_types.contains_key(&fact.name))
+            .cloned()
+            .collect::<Vec<_>>();
+        let conformances = &info.contracts.conformances;
 
-        for info in enums {
+        for interface in interfaces {
+            let parents = interface
+                .parents
+                .iter()
+                .map(|parent| parent.authored_type.clone())
+                .collect::<Vec<_>>();
             let symbol = self.add_metadata_symbol(
-                format!("enum {}", info.name),
-                Some(enum_documentation(&info)),
+                contract_signature(
+                    "interface",
+                    &interface.name,
+                    &interface.type_parameters,
+                    &parents,
+                ),
+                Some(
+                    crate::hover_description(&TokenKind::Identifier(interface.name.clone()))
+                        .unwrap_or(
+                            "Nominal interface contract supplied by compiler semantic analysis.",
+                        )
+                        .to_string(),
+                ),
                 SymbolKind::Plain,
             );
-            self.enums.insert(info.name.clone(), symbol);
+            self.contract_types.insert(interface.name, symbol);
+        }
+
+        for info in enums {
+            let name = &info.source_type.name;
+            let applied = display_resolved_type(&ResolvedType::Enum(info.source_type.clone()));
+            let copy = self.enum_copy(&info.source_type);
+            let symbol = self.add_metadata_symbol(
+                format!("enum {applied}"),
+                Some(enum_documentation(name, copy)),
+                SymbolKind::Plain,
+            );
+            self.enums.insert(name.clone(), symbol);
 
             let mut completions = Vec::new();
             for case in &info.cases {
-                let signature = enum_case_signature(&info.name, &case.name, Some(case));
-                let documentation = enum_case_documentation(Some(&info), Some(case));
+                let signature = enum_case_signature(name, &applied, &case.name, Some(case));
+                let documentation = enum_case_documentation(Some(&info), Some(case), copy);
                 let case_symbol = self.add_metadata_symbol(
                     signature.clone(),
                     documentation.clone(),
                     SymbolKind::Plain,
                 );
+                self.symbols[case_symbol].parameter_names = case
+                    .payload
+                    .iter()
+                    .map(|field| field.name.clone())
+                    .collect();
                 self.enum_cases
-                    .insert((info.name.clone(), case.name.clone()), case_symbol);
+                    .insert((name.clone(), case.name.clone()), case_symbol);
                 completions.push(SemanticCompletion {
                     label: case.name.clone(),
                     kind: 20,
@@ -3193,13 +3340,12 @@ impl<'a> SnapshotBuilder<'a> {
                     documentation,
                 });
             }
-            self.enum_case_completions
-                .insert(info.name.clone(), completions);
+            self.enum_case_completions.insert(name.clone(), completions);
 
             if let Some(backing_type) = info.backing_type {
                 let backing = enum_backing_name(backing_type).to_string();
                 self.enum_member_completions.insert(
-                    info.name,
+                    name.clone(),
                     vec![SemanticCompletion {
                         label: "value".to_string(),
                         kind: 10,
@@ -3214,13 +3360,72 @@ impl<'a> SnapshotBuilder<'a> {
 
         for info in classes {
             let class_name = info.declaration_name;
+            let inline_copy =
+                ClassType::new(class_name.clone(), info.arguments.clone()).inline_copy_type();
+            let mut documentation = Some(
+                inline_copy
+                    .map(inline_value_documentation)
+                    .unwrap_or_else(|| {
+                        "Compiler-known Doria class supplied by semantic analysis.".to_string()
+                    }),
+            );
+            let mut interfaces = conformances
+                .iter()
+                .filter(|fact| {
+                    fact.status == ConformanceStatus::Checked
+                        && matches!(&fact.implementing_type, ResolvedType::Class(class)
+                            if class.name == class_name && class.arguments == info.arguments)
+                })
+                .map(|fact| {
+                    format!(
+                        "`{}`",
+                        display_resolved_type(&ResolvedType::Interface(fact.interface.clone()))
+                    )
+                })
+                .collect::<Vec<_>>();
+            interfaces.sort();
+            interfaces.dedup();
+            if !interfaces.is_empty() {
+                append_documentation(
+                    &mut documentation,
+                    &format!("**Implemented Interfaces:** {}", interfaces.join(", ")),
+                );
+            }
+            if let Some(request) = pending_request_documentation(&class_name) {
+                append_documentation(&mut documentation, request);
+            }
+            if class_name == doriac::compiler_known_stream::TRANSFER_GROUP {
+                append_documentation(&mut documentation, TRANSFER_GROUP_CONTROL_DOCUMENTATION);
+            }
+            if let Some(position) = file_position_documentation(&class_name) {
+                append_documentation(&mut documentation, position);
+            }
+            if let Some(writable) = writable_file_documentation(&class_name) {
+                append_documentation(&mut documentation, writable);
+            }
+            if class_name == doriac::compiler_known_stream::STANDARD_STREAMS {
+                append_documentation(&mut documentation, STANDARD_STREAM_DOCUMENTATION);
+            }
             let symbol = self.add_metadata_symbol(
-                format!("class {class_name}"),
-                Some("Compiler-known Doria class supplied by semantic analysis.".to_string()),
-                SymbolKind::Plain,
+                if inline_copy.is_some() {
+                    class_name.clone()
+                } else {
+                    format!("class {class_name}")
+                },
+                documentation,
+                if inline_copy.is_some() {
+                    SymbolKind::Type
+                } else {
+                    SymbolKind::Plain
+                },
             );
             self.classes.insert(class_name.clone(), symbol);
 
+            // These fallback tables are keyed by name, not by application.
+            // Generic members must come from the checked receiver surface.
+            if !info.arguments.is_empty() {
+                continue;
+            }
             for property in info.properties {
                 let detail = format!("{} ${}", display_resolved_type(&property.ty), property.name);
                 let mutability = if property.writable {
@@ -3254,15 +3459,37 @@ impl<'a> SnapshotBuilder<'a> {
         }
     }
 
+    fn enum_copy(&self, ty: &doriac::enums::EnumType) -> Option<bool> {
+        self.semantic_info?
+            .enums
+            .iter()
+            .find(|info| &info.source_type == ty)
+            .map(|info| info.capabilities.copy)
+    }
+
     fn collect_enum(&mut self, declaration: &EnumDecl) {
         let semantic = self
             .semantic_info
-            .and_then(|info| info.enums.iter().find(|info| info.name == declaration.name))
+            .and_then(|info| {
+                info.enum_declarations
+                    .iter()
+                    .find(|info| info.name_span == declaration.name_span)
+            })
             .cloned();
+        let copy = semantic
+            .as_ref()
+            .and_then(|info| self.enum_copy(&info.source_type));
+        let applied = format!(
+            "{}{}",
+            declaration.name,
+            type_parameter_signature(&declaration.type_params)
+        );
         let symbol = self.add_declaration_symbol(
             declaration.name_span,
-            format!("enum {}", declaration.name),
-            semantic.as_ref().map(enum_documentation),
+            format!("enum {applied}"),
+            semantic
+                .as_ref()
+                .map(|_| enum_documentation(&declaration.name, copy)),
             SymbolKind::Plain,
         );
         self.enums.insert(declaration.name.clone(), symbol);
@@ -3272,14 +3499,20 @@ impl<'a> SnapshotBuilder<'a> {
             let semantic_case = semantic
                 .as_ref()
                 .and_then(|info| info.cases.iter().find(|info| info.name == case.name));
-            let signature = enum_case_signature(&declaration.name, &case.name, semantic_case);
-            let documentation = enum_case_documentation(semantic.as_ref(), semantic_case);
+            let signature =
+                enum_case_signature(&declaration.name, &applied, &case.name, semantic_case);
+            let documentation = enum_case_documentation(semantic.as_ref(), semantic_case, copy);
             let case_symbol = self.add_declaration_symbol(
                 case.name_span,
                 signature.clone(),
                 documentation.clone(),
                 SymbolKind::Plain,
             );
+            self.symbols[case_symbol].parameter_names = case
+                .payload
+                .iter()
+                .map(|field| field.name.clone())
+                .collect();
             self.enum_cases
                 .insert((declaration.name.clone(), case.name.clone()), case_symbol);
             self.record_member_occurrence(
@@ -3332,7 +3565,66 @@ impl<'a> SnapshotBuilder<'a> {
         }
     }
 
+    fn collect_condition_subject_references(&mut self) {
+        let Some(info) = self.semantic_info else {
+            return;
+        };
+        let mut conditions = info.contracts.conditions.values().collect::<Vec<_>>();
+        conditions.sort_by_key(|condition| condition.clause.start);
+        let mut symbols = HashMap::new();
+        let mut references = HashSet::new();
+        for condition in conditions {
+            for obligation in &condition.obligations {
+                let parameter = &obligation.subject;
+                if obligation.subject_span.source != self.source_id
+                    || parameter.declaration.source != self.source_id
+                {
+                    continue;
+                }
+                let symbol = if let Some(symbol) = symbols.get(&parameter.declaration) {
+                    *symbol
+                } else {
+                    let Some(selection) =
+                        find_identifier_span(self.tokens, parameter.declaration, &parameter.name)
+                    else {
+                        continue;
+                    };
+                    let symbol = self.add_declaration_symbol(
+                        selection,
+                        format!("type parameter {}", parameter.name),
+                        Some("Lexical type parameter selected by the compiler for this declaration condition. This predicate does not establish an active member or conformance witness.".to_string()),
+                        SymbolKind::TypeParameter,
+                    );
+                    symbols.insert(parameter.declaration, symbol);
+                    symbol
+                };
+                if references.insert(obligation.subject_span) {
+                    self.record_reference(obligation.subject_span, symbol);
+                }
+            }
+        }
+    }
+
+    fn collect_nominal_condition(&mut self, condition: Option<&NominalCondition>) {
+        let Some(condition) = condition else {
+            return;
+        };
+        self.hierarchy_semantic_tokens
+            .push((condition.keyword_span, SEMANTIC_TOKEN_KEYWORD, 0));
+        for bound in &condition.bounds {
+            self.hierarchy_semantic_tokens
+                .push((bound.implements_span, SEMANTIC_TOKEN_KEYWORD, 0));
+        }
+        self.semantic_hovers.push(SemanticHover::new(
+            condition.keyword_span,
+            "Local nominal capability condition. All bounds must hold after generic substitution before this conformance or member is available.".to_string(),
+        ));
+    }
+
     fn collect_class(&mut self, class: &ClassDecl) {
+        for conformance in &class.implements {
+            self.collect_nominal_condition(conformance.condition.as_ref());
+        }
         let selection_span = self.declaration_name_span(class.span, &class.name, TokenKind::Class);
         if let Some(span) = class.open_span {
             self.hierarchy_semantic_tokens
@@ -3349,7 +3641,7 @@ impl<'a> SnapshotBuilder<'a> {
         let conforms_to_error = class
             .implements
             .iter()
-            .any(|interface| interface.name == "Error");
+            .any(|interface| interface.condition.is_none() && interface.ty.name == "Error");
         let mut documentation = phpdoc_before(self.text, class.span.start);
         if let Some(hierarchy) = self
             .semantic_info
@@ -3412,6 +3704,9 @@ impl<'a> SnapshotBuilder<'a> {
                 ClassMember::Uses(_) => {}
                 ClassMember::Method(method) => {
                     self.collect_method(&class.name, method);
+                    if method.availability.is_some() {
+                        continue;
+                    }
                     self.class_members
                         .entry(class.name.clone())
                         .or_default()
@@ -3439,6 +3734,9 @@ impl<'a> SnapshotBuilder<'a> {
                         documentation.clone(),
                         PropertyHookContext::Class,
                     );
+                    if property.availability.is_some() {
+                        continue;
+                    }
                     self.class_members
                         .entry(class.name.clone())
                         .or_default()
@@ -3533,20 +3831,28 @@ impl<'a> SnapshotBuilder<'a> {
         mut documentation: Option<String>,
         context: PropertyHookContext,
     ) {
+        self.collect_nominal_condition(property.availability.as_ref());
         self.collect_property_hooks(owner, property, context, &mut documentation);
         let selection_span =
             find_variable_span(self.tokens, property.span, &property.name).unwrap_or(property.span);
         let symbol = self.add_declaration_symbol(
             selection_span,
-            format!("{} ${}", property.ty, property.name),
+            format!(
+                "{} ${}{}",
+                property.ty,
+                property.name,
+                nominal_condition_signature(property.availability.as_ref())
+            ),
             documentation,
             SymbolKind::Variable,
         );
-        self.class_property_symbols
-            .insert((owner.to_string(), property.name.clone()), symbol);
-        if property.is_static {
-            self.class_static_property_symbols
+        if property.availability.is_none() {
+            self.class_property_symbols
                 .insert((owner.to_string(), property.name.clone()), symbol);
+            if property.is_static {
+                self.class_static_property_symbols
+                    .insert((owner.to_string(), property.name.clone()), symbol);
+            }
         }
         self.record_member_occurrence(
             owner,
@@ -3565,8 +3871,8 @@ impl<'a> SnapshotBuilder<'a> {
     }
 
     fn collect_method(&mut self, class_name: &str, method: &FunctionDecl) {
-        let selection_span =
-            self.declaration_name_span(method.span, &method.name, TokenKind::Function);
+        self.collect_nominal_condition(method.availability.as_ref());
+        let selection_span = method.name_span;
         if let Some(span) = method.open_span {
             self.hierarchy_semantic_tokens
                 .push((span, SEMANTIC_TOKEN_KEYWORD, 0));
@@ -3578,7 +3884,7 @@ impl<'a> SnapshotBuilder<'a> {
         self.collect_constructor_parameter_roles(class_name, method);
         let mut documentation = phpdoc_before(self.text, method.span.start);
         self.append_callable_effect_documentation(&mut documentation, method.span);
-        self.append_retained_source_documentation(&mut documentation, method);
+        self.append_callable_source_documentation(&mut documentation, method);
         if method.body.as_block().is_none() {
             append_documentation(
                 &mut documentation,
@@ -3603,8 +3909,10 @@ impl<'a> SnapshotBuilder<'a> {
         );
         self.record_callable_parameters(symbol, method);
         self.callable_declarations.insert(method.span, symbol);
-        self.methods
-            .insert((class_name.to_string(), method.name.clone()), symbol);
+        if method.availability.is_none() {
+            self.methods
+                .insert((class_name.to_string(), method.name.clone()), symbol);
+        }
         self.record_method_declaration_occurrence(class_name, method, selection_span);
         if let (Some(owner), Some(hierarchy)) = (
             self.member_owner(class_name, method.span, true),
@@ -3792,11 +4100,22 @@ impl<'a> SnapshotBuilder<'a> {
         }
     }
 
-    fn append_retained_source_documentation(
+    fn append_callable_source_documentation(
         &self,
         documentation: &mut Option<String>,
         function: &FunctionDecl,
     ) {
+        if let Some(info) = self.semantic_info {
+            if let Some(signature) = info.callable_signatures.get(&function.span) {
+                let returned = callable_return_documentation(
+                    signature,
+                    info.return_borrows.get(&function.span).copied(),
+                );
+                if !returned.is_empty() {
+                    append_documentation(documentation, returned.trim());
+                }
+            }
+        }
         let Some(plan) = self
             .semantic_info
             .and_then(|info| info.retained_callables.get(&function.span))
@@ -3824,7 +4143,8 @@ impl<'a> SnapshotBuilder<'a> {
                 append_documentation(
                     documentation,
                     &format!(
-                        "**{label}:** Retains {access} {source}. The source must outlive the result."
+                        "**{label}:** Retains {access} {source}. {}",
+                        retained_lifetime_documentation(retained.lifetime),
                     ),
                 );
             }
@@ -4136,33 +4456,81 @@ impl<'a> SnapshotBuilder<'a> {
         });
     }
 
-    fn record_interface_call(
+    fn record_byte_call(
+        &mut self,
+        member_span: Span,
+        span: Span,
+        args: &[doriac::ast::Argument],
+        receiver: &ResolvedType,
+        mut member: ByteIntrinsic,
+    ) {
+        if let Some(result) = self
+            .semantic_info
+            .and_then(|info| info.expression_type(span))
+        {
+            if !matches!(result, ResolvedType::Unsupported) {
+                member.return_type = result.clone();
+            }
+        }
+        let symbol = self.add_reference_symbol(
+            member_span,
+            byte_signature(receiver, &member),
+            Some(member.documentation.to_string()),
+            SymbolKind::Plain,
+        );
+        self.symbols[symbol].parameter_names = member
+            .parameters
+            .iter()
+            .map(|parameter| parameter.name.to_string())
+            .collect();
+        self.record_call_signature(span, args, symbol);
+    }
+
+    fn record_contract_call(
         &mut self,
         span: Span,
+        receiver_span: Span,
         member_span: Span,
         args: &[doriac::ast::Argument],
     ) -> bool {
         let Some(info) = self.semantic_info else {
             return false;
         };
-        let Some(CallableTarget::InterfaceMethod {
-            interface,
-            method_name,
-            requirement: declaration,
-        }) = info.call_target(span)
-        else {
-            return false;
-        };
-        let Some(requirement) = info
-            .contracts
-            .interface_specializations
-            .iter()
-            .find(|fact| fact.valid && &fact.specialization == interface)
-            .and_then(|fact| {
-                fact.requirements
+        let (requirements, method_name, declaration) = match info.call_target(span) {
+            Some(CallableTarget::InterfaceMethod {
+                interface,
+                method_name,
+                requirement,
+            }) => {
+                let Some(fact) = info
+                    .contracts
+                    .interface_specializations
                     .iter()
-                    .find(|required| required.accessor.is_none() && &required.name == method_name)
-            })
+                    .find(|fact| fact.valid && &fact.specialization == interface)
+                else {
+                    return false;
+                };
+                (&fact.requirements, method_name, requirement)
+            }
+            Some(CallableTarget::ConstrainedMethod {
+                method_name,
+                requirement,
+                ..
+            }) => {
+                let Some(surface) = info
+                    .contracts
+                    .constrained_member_surfaces
+                    .get(&receiver_span)
+                else {
+                    return false;
+                };
+                (&surface.requirements, method_name, requirement)
+            }
+            _ => return false,
+        };
+        let Some(requirement) = requirements
+            .iter()
+            .find(|required| required.accessor.is_none() && &required.name == method_name)
         else {
             return false;
         };
@@ -4209,7 +4577,7 @@ impl<'a> SnapshotBuilder<'a> {
         self.record_call_signature(span, args, symbol);
         self.call_signatures
             .last_mut()
-            .expect("recorded interface call")
+            .expect("recorded contract call")
             .signature = Some(signature);
         true
     }
@@ -4217,7 +4585,7 @@ impl<'a> SnapshotBuilder<'a> {
     fn record_class_call(
         &mut self,
         span: Span,
-        member_span: Span,
+        member_span: Option<Span>,
         args: &[doriac::ast::Argument],
     ) -> bool {
         let Some(info) = self.semantic_info else {
@@ -4246,6 +4614,12 @@ impl<'a> SnapshotBuilder<'a> {
         let Some(signature) = &member.signature else {
             return false;
         };
+        if member_span.is_none()
+            && class_type.inline_copy_type().is_some()
+            && member.access == MemberAccess::Internal
+        {
+            return false;
+        }
         let bindings = info
             .generic_call_specializations
             .get(&span)
@@ -4303,20 +4677,22 @@ impl<'a> SnapshotBuilder<'a> {
         if let Some(documentation) = documentation {
             markdown.push_str(&format!("\n\n{documentation}"));
         }
-        if let Some(parent_hover) = self.semantic_hovers.iter_mut().find(|hover| {
-            hover.span == member_span
-                && info
-                    .method_call_targets
-                    .get(&span)
-                    .is_some_and(|target| target.direct_parent)
-        }) {
-            markdown.push_str(&format!("\n\n{}", parent_hover.markdown));
-            parent_hover.markdown = markdown;
-        } else {
-            self.semantic_hovers
-                .push(SemanticHover::new(member_span, markdown));
+        if let Some(member_span) = member_span {
+            if let Some(parent_hover) = self.semantic_hovers.iter_mut().find(|hover| {
+                hover.span == member_span
+                    && info
+                        .method_call_targets
+                        .get(&span)
+                        .is_some_and(|target| target.direct_parent)
+            }) {
+                markdown.push_str(&format!("\n\n{}", parent_hover.markdown));
+                parent_hover.markdown = markdown;
+            } else {
+                self.semantic_hovers
+                    .push(SemanticHover::new(member_span, markdown));
+            }
+            self.record_reference(member_span, symbol);
         }
-        self.record_reference(member_span, symbol);
         self.record_call_signature(span, args, symbol);
         self.call_signatures
             .last_mut()
@@ -4369,6 +4745,9 @@ impl<'a> SnapshotBuilder<'a> {
             occurrence.exact_declaration = Some(member.declaration);
         }
         let mut markdown = format!("```doria\n{}\n```", completion.detail);
+        if let Some(documentation) = completion.documentation {
+            markdown.push_str(&format!("\n\n{documentation}"));
+        }
         if let Some(origin) = info.composition.origin(member.declaration) {
             markdown.push_str(&format!(
                 "\n\nComposed from `{}` into `{}`.",
@@ -4406,11 +4785,9 @@ impl<'a> SnapshotBuilder<'a> {
         for item in &program.items {
             match item {
                 Item::Class(class) => {
-                    if class
-                        .implements
-                        .iter()
-                        .any(|interface| interface.name == "Error")
-                    {
+                    if class.implements.iter().any(|interface| {
+                        interface.condition.is_none() && interface.ty.name == "Error"
+                    }) {
                         if let Some(span) = find_identifier_span(self.tokens, class.span, "Error") {
                             self.add_error_type_reference(span);
                         }
@@ -4539,6 +4916,25 @@ impl<'a> SnapshotBuilder<'a> {
         parent_class: Option<&str>,
     ) {
         let block = &function.body;
+        if let Some(signature) = self
+            .semantic_info
+            .and_then(|info| info.callable_signatures.get(&function.span))
+        {
+            for (parameter, checked) in function.params.iter().zip(&signature.parameters) {
+                if let Some(span) =
+                    find_identifier_span(self.tokens, parameter.type_span, &parameter.ty.name)
+                {
+                    self.record_applied_enum_hover(span, &checked.r#type);
+                }
+            }
+            if let (Some(ty), Some(span)) =
+                (&function.return_type, function.syntax.return_type_span)
+            {
+                if let Some(span) = find_identifier_span(self.tokens, span, &ty.name) {
+                    self.record_applied_enum_hover(span, &signature.return_type);
+                }
+            }
+        }
         self.push_local_scope(block.span().end);
         if let Some(throws) = &function.throws {
             self.add_reference_symbol(
@@ -5032,6 +5428,7 @@ impl<'a> SnapshotBuilder<'a> {
             Expr::MethodCall {
                 object,
                 method,
+                member_span,
                 args,
                 span,
                 null_safe,
@@ -5041,8 +5438,7 @@ impl<'a> SnapshotBuilder<'a> {
                 for argument in args {
                     self.visit_expr(&argument.value, current_class, parent_class);
                 }
-                let method_span =
-                    self.member_name_span(span.at(object.span().end, span.end), method);
+                let method_span = Some(*member_span);
                 self.record_member_receiver(method_span, object, current_class);
                 if let (Some(member_span), Some(callee_span)) = (
                     method_span,
@@ -5069,6 +5465,15 @@ impl<'a> SnapshotBuilder<'a> {
                     }
                     return;
                 }
+                let byte_method = self.semantic_info.and_then(|info| {
+                    let receiver = collection_receiver_type(info.expression_type(object.span())?);
+                    let member = byte_intrinsics::member(receiver, method)?;
+                    (member.kind == ByteMemberKind::Method).then(|| (receiver.clone(), member))
+                });
+                if let (Some(method_span), Some((receiver, member))) = (method_span, byte_method) {
+                    self.record_byte_call(method_span, *span, args, &receiver, member);
+                    return;
+                }
                 let builtin_hover = self.semantic_info.and_then(|info| {
                     if let Some(algorithm) = info.list_algorithm_calls.get(span) {
                         return Some(list_algorithm_hover(algorithm));
@@ -5091,9 +5496,9 @@ impl<'a> SnapshotBuilder<'a> {
                     return;
                 }
 
-                if method_span
-                    .is_some_and(|method_span| self.record_interface_call(*span, method_span, args))
-                {
+                if method_span.is_some_and(|method_span| {
+                    self.record_contract_call(*span, object.span(), method_span, args)
+                }) {
                     return;
                 }
                 let target = self.semantic_info.and_then(|info| info.call_target(*span));
@@ -5130,9 +5535,9 @@ impl<'a> SnapshotBuilder<'a> {
                 {
                     self.record_method_call_occurrence(class_name, method, *span, method_span);
                 }
-                if method_span
-                    .is_some_and(|member_span| self.record_class_call(*span, member_span, args))
-                {
+                if method_span.is_some_and(|member_span| {
+                    self.record_class_call(*span, Some(member_span), args)
+                }) {
                     return;
                 }
                 if let Some(class_name) = resolved_class.as_deref() {
@@ -5209,21 +5614,30 @@ impl<'a> SnapshotBuilder<'a> {
                     *qualifier_span,
                     method,
                     *member_span,
+                    Some(*span),
+                    Some((*span, args)),
                 ) {
                     return;
                 }
                 if matches!(qualifier, StaticQualifier::Class(class) if class == "String") {
-                    if let (Some(member), Some(method_span)) = (
-                        string_companion_method(method),
-                        self.member_name_span(span.at(qualifier_span.end, span.end), method),
-                    ) {
+                    if let Some(member) = string_companion_method(method) {
                         self.add_reference_symbol(
-                            method_span,
+                            *member_span,
                             member.signature.to_string(),
                             Some(member.documentation.to_string()),
                             SymbolKind::Plain,
                         );
                         return;
+                    }
+                }
+                if let StaticQualifier::Class(name) = qualifier {
+                    if let Some(receiver) = byte_intrinsics::type_from_source_name(name) {
+                        if let Some(member) = byte_intrinsics::member(&receiver, method)
+                            .filter(|member| member.kind == ByteMemberKind::StaticMethod)
+                        {
+                            self.record_byte_call(*member_span, *span, args, &receiver, member);
+                            return;
+                        }
                     }
                 }
                 let target = self.semantic_info.and_then(|info| info.call_target(*span));
@@ -5248,13 +5662,10 @@ impl<'a> SnapshotBuilder<'a> {
                         StaticQualifier::Parent => parent_class.map(ToOwned::to_owned),
                         StaticQualifier::InvalidStatic => None,
                     };
-                    if let (Some(method_span), Some(class_name)) = (
-                        self.member_name_span(span.at(qualifier_span.end, span.end), method),
-                        class_name,
-                    ) {
+                    if let Some(class_name) = class_name {
                         self.record_missing_callable(
                             method,
-                            method_span,
+                            *member_span,
                             args,
                             *span,
                             MissingCallableTarget::Method {
@@ -5264,24 +5675,15 @@ impl<'a> SnapshotBuilder<'a> {
                         );
                     }
                 }
-                let method_span =
-                    self.member_name_span(span.at(qualifier_span.end, span.end), method);
-                if let (Some(class_name), Some(method_span)) = (class_name.as_deref(), method_span)
-                {
-                    self.record_method_call_occurrence(class_name, method, *span, method_span);
+                if let Some(class_name) = class_name.as_deref() {
+                    self.record_method_call_occurrence(class_name, method, *span, *member_span);
                 }
-                if method_span
-                    .is_some_and(|member_span| self.record_class_call(*span, member_span, args))
-                {
+                if self.record_class_call(*span, Some(*member_span), args) {
                     return;
                 }
                 if let Some(class_name) = class_name.as_deref() {
                     if let Some(symbol) = self.resolve_method(class_name, method) {
-                        if let Some(method_span) =
-                            self.member_name_span(span.at(qualifier_span.end, span.end), method)
-                        {
-                            self.record_reference(method_span, symbol);
-                        }
+                        self.record_reference(*member_span, symbol);
                         self.record_call_signature(*span, args, symbol);
                     }
                 }
@@ -5304,17 +5706,19 @@ impl<'a> SnapshotBuilder<'a> {
                 }
                 if let Some(symbol) = self.resolve_method(&class_type.name, "__construct") {
                     self.record_call_signature(*span, args, symbol);
+                } else {
+                    self.record_class_call(*span, None, args);
                 }
             }
             Expr::PropertyAccess {
                 object,
                 property,
+                member_span,
                 span,
                 ..
             } => {
                 self.visit_expr(object, current_class, parent_class);
-                let property_span =
-                    self.member_name_span(span.at(object.span().end, span.end), property);
+                let property_span = Some(*member_span);
                 if let Some(property_span) = property_span {
                     self.record_property_accessor_reference(*span, property_span, property);
                 }
@@ -5445,8 +5849,8 @@ impl<'a> SnapshotBuilder<'a> {
                             Some(member.documentation.to_string()),
                             SymbolKind::Variable,
                         );
+                        return;
                     }
-                    return;
                 }
                 if let (Some(receiver), Some(property_span)) = (receiver, property_span) {
                     if let Some(documentation) = collection_property(receiver, property) {
@@ -5472,6 +5876,7 @@ impl<'a> SnapshotBuilder<'a> {
                 span,
                 ..
             } => {
+                self.record_property_accessor_reference(*span, *member_span, member);
                 self.record_class_static_receiver(
                     qualifier,
                     *qualifier_span,
@@ -5490,6 +5895,8 @@ impl<'a> SnapshotBuilder<'a> {
                     *qualifier_span,
                     member,
                     *member_span,
+                    Some(*span),
+                    None,
                 ) {
                     if let Some(receiver) = self
                         .semantic_info
@@ -5619,6 +6026,8 @@ impl<'a> SnapshotBuilder<'a> {
                                 *qualifier_span,
                                 case,
                                 *case_span,
+                                None,
+                                None,
                             );
                             if let (Some(bindings), Some(arm_info)) = (
                                 bindings.as_ref(),
@@ -5856,6 +6265,35 @@ impl<'a> SnapshotBuilder<'a> {
         }
     }
 
+    fn collect_resolved_type_references(&mut self) {
+        let Some(info) = self.semantic_info else {
+            return;
+        };
+        let source_id = self.source_id;
+        let occupied = self
+            .occurrences
+            .iter()
+            .map(|occurrence| occurrence.span)
+            .collect::<HashSet<_>>();
+        for reference in info.global_symbols.references.iter().filter(|reference| {
+            reference.source_span.source == source_id
+                && (class_like_reference_role(reference.role)
+                    || reference.role == GlobalReferenceRole::ImportTarget)
+                && !occupied.contains(&reference.source_span)
+        }) {
+            let name = &reference.symbol_id.qualified_name;
+            if let Some(symbol) = self
+                .enums
+                .get(name)
+                .or_else(|| self.classes.get(name))
+                .or_else(|| self.contract_types.get(name))
+                .copied()
+            {
+                self.record_reference(reference.source_span, symbol);
+            }
+        }
+    }
+
     fn record_type_reference(&mut self, ty: &TypeRef, span: Span) {
         let Some(type_span) = find_identifier_span(self.tokens, span, &ty.name) else {
             return;
@@ -5969,16 +6407,35 @@ impl<'a> SnapshotBuilder<'a> {
         qualifier_span: Span,
         member: &str,
         member_span: Span,
+        expression_span: Option<Span>,
+        call: Option<(Span, &[doriac::ast::Argument])>,
     ) -> bool {
         let StaticQualifier::Class(enum_name) = qualifier else {
             return false;
         };
-        let Some(enum_symbol) = self.enums.get(enum_name).copied() else {
+        let enum_name = self
+            .semantic_info
+            .and_then(|info| {
+                info.global_symbols.references.iter().find(|reference| {
+                    reference.source_span == qualifier_span
+                        && class_like_reference_role(reference.role)
+                })
+            })
+            .map_or_else(
+                || enum_name.clone(),
+                |reference| reference.symbol_id.qualified_name.clone(),
+            );
+        let Some(enum_symbol) = self.enums.get(&enum_name).copied() else {
             return false;
         };
         self.record_reference(qualifier_span, enum_symbol);
+        if let Some(ty) = expression_span.and_then(|span| self.semantic_info?.expression_type(span))
+        {
+            self.record_applied_enum_hover(qualifier_span, ty);
+        }
         self.static_receivers.push(StaticReceiver {
             span: member_span,
+            receiver_span: qualifier_span,
             receiver: StaticReceiverKind::Enum(enum_name.clone()),
             current_class: None,
         });
@@ -5988,9 +6445,27 @@ impl<'a> SnapshotBuilder<'a> {
             .copied()
         {
             self.record_reference(member_span, case_symbol);
+            if let Some((span, args)) = call {
+                self.record_call_signature(span, args, case_symbol);
+            }
         }
-        self.record_member_occurrence(enum_name, member, MemberKind::EnumCase, member_span, false);
+        self.record_member_occurrence(&enum_name, member, MemberKind::EnumCase, member_span, false);
         true
+    }
+
+    fn record_applied_enum_hover(&mut self, span: Span, ty: &ResolvedType) {
+        let ResolvedType::Enum(enum_type) = non_nullable_type(ty) else {
+            return;
+        };
+        if enum_type.arguments.is_empty() {
+            return;
+        }
+        let applied = display_resolved_type(ty);
+        let documentation = enum_documentation(&enum_type.name, self.enum_copy(enum_type));
+        self.semantic_hovers.push(SemanticHover::new(
+            span,
+            format!("```doria\nenum {applied}\n```\n\n{documentation}"),
+        ));
     }
 
     fn record_class_static_receiver(
@@ -6000,6 +6475,17 @@ impl<'a> SnapshotBuilder<'a> {
         member_span: Span,
         current_class: Option<&str>,
     ) {
+        if let StaticQualifier::Class(name) = qualifier {
+            if let Some(receiver) = byte_intrinsics::type_from_source_name(name) {
+                self.static_receivers.push(StaticReceiver {
+                    span: member_span,
+                    receiver_span: qualifier_span,
+                    receiver: StaticReceiverKind::Byte(receiver),
+                    current_class: None,
+                });
+                return;
+            }
+        }
         if let Some(receiver) = self
             .semantic_info
             .and_then(|info| info.static_receiver_types.get(&qualifier_span))
@@ -6009,6 +6495,7 @@ impl<'a> SnapshotBuilder<'a> {
                 .map(|owner| owner.qualified_name);
             self.static_receivers.push(StaticReceiver {
                 span: member_span,
+                receiver_span: qualifier_span,
                 receiver: StaticReceiverKind::Class {
                     receiver: receiver.clone(),
                     parent: matches!(qualifier, StaticQualifier::Parent),
@@ -6016,10 +6503,6 @@ impl<'a> SnapshotBuilder<'a> {
                 current_class,
             });
         }
-    }
-
-    fn member_name_span(&self, search_span: Span, name: &str) -> Option<Span> {
-        find_identifier_span(self.tokens, search_span, name)
     }
 
     fn record_member_receiver(
@@ -6193,7 +6676,7 @@ fn interface_member_completions(
                         && other.accessor == Some(doriac::ast::PropertyHookKind::Get)
                 })
         })
-        .filter(|requirement| writable || !requirement.writable_receiver)
+        .filter(|requirement| writable || requirement.receiver_mode != ReceiverMode::Writable)
         .map(|requirement| SemanticCompletion {
             label: requirement.name.clone(),
             kind: if requirement.accessor.is_some() {
@@ -6250,21 +6733,17 @@ fn interface_requirement_signature(
             &requirement.name,
             kind,
             &requirement.signature,
-            if requirement.writable_receiver {
-                ReceiverMode::Writable
-            } else {
-                ReceiverMode::Readonly
-            },
+            Some(requirement.receiver_mode),
             &requirement.checked_effects,
             bindings,
         );
     }
     format!(
         "{}{}",
-        if requirement.writable_receiver {
-            "writable "
-        } else {
-            ""
+        match requirement.receiver_mode {
+            ReceiverMode::Readonly => "",
+            ReceiverMode::Writable => "writable ",
+            ReceiverMode::Consuming => "consuming ",
         },
         semantic_callable_signature(
             &requirement.name,
@@ -6340,10 +6819,13 @@ fn class_surface_member_completion(
     if matches!(
         member.kind,
         CompilerMemberKind::StaticMethod | CompilerMemberKind::StaticProperty
-    ) {
+    ) && member.hooks.is_none()
+    {
         modifiers.push("static");
     }
-    if member.writable {
+    if member.receiver_mode == Some(ReceiverMode::Consuming) {
+        modifiers.push("consuming");
+    } else if member.writable {
         modifiers.push("writable");
     }
     let prefix = if modifiers.is_empty() {
@@ -6360,6 +6842,29 @@ fn class_surface_member_completion(
                 &member.generic_parameters,
                 signature,
                 &member.checked_effects,
+                bindings,
+            ),
+        )
+    } else if let Some((kind, accessor)) = member.hooks.as_ref().and_then(|hooks| {
+        hooks
+            .getter
+            .as_ref()
+            .map(|getter| (doriac::ast::PropertyHookKind::Get, getter))
+            .or_else(|| {
+                hooks
+                    .setter
+                    .as_ref()
+                    .map(|setter| (doriac::ast::PropertyHookKind::Set, setter))
+            })
+    }) {
+        (
+            10,
+            property_hooks::accessor_signature(
+                &member.name,
+                kind,
+                &accessor.signature,
+                accessor.receiver_mode,
+                &accessor.checked_effects,
                 bindings,
             ),
         )
@@ -6380,6 +6885,23 @@ fn class_surface_member_completion(
         member.return_borrow,
         &member.automatic_effects,
     );
+    if member.hooks.is_none()
+        && matches!(
+            member.kind,
+            CompilerMemberKind::InstanceProperty
+                | CompilerMemberKind::PromotedProperty
+                | CompilerMemberKind::StaticProperty
+        )
+    {
+        append_documentation(
+            &mut documentation,
+            if member.writable {
+                "This stored property is writable."
+            } else {
+                "This stored property is readonly."
+            },
+        );
+    }
     if let Some(hooks) = &member.hooks {
         append_documentation(
             &mut documentation,
@@ -6438,11 +6960,123 @@ fn interface_requirement_documentation(requirement: &RequirementFacts) -> String
     documentation
 }
 
+const PENDING_REQUEST_DOCUMENTATION: &str = "**Lifetime:** Call-Scoped Request View\n\nBorrowed group-slot view. It cannot be constructed, consumed, retained, or escape its preparation/completion call.";
+
+pub(crate) const INLINE_COPY_DOCUMENTATION: &str = "**Representation:** Inline Copy Value\n\nAssignment copies the value; the original remains usable. Its nullable form is also Copy. Copy capability does not imply absence of retained ownership or owned cleanup. Its internal representation and constructors are not public APIs. This does not make ordinary user-defined classes Copy.";
+
+const NON_OWNING_INLINE_DOCUMENTATION: &str =
+    "This value carries no heap ownership; copying it allocates nothing.";
+
+pub(crate) const STANDARD_STREAM_DOCUMENTATION: &str = "**Ownership:** Process-Owned Standard Device\n\nStandardStreams exposes readonly static input, output, and error properties returning StandardInput, StandardOutput, and StandardError. These non-owning, nonclosable inline Copy views share the intrinsic device owner, redirection, injection, and access/mode coordination. Access and copying allocate no native handle, control block, buffer, or heap object. Copies grant no independent exclusive access; mode changes require exclusive control and a restoring guard.\n\n**Interface Borrowing:** Copy-to-interface conversion creates an independent owning erased snapshot. A returned borrow stored beyond the call statement requires a named interface owner. The original Copy binding remains independently usable and assignable. Nullable erasure follows the same compiler-owned lifetime rules.";
+
+const CANCELLATION_TOKEN_DOCUMENTATION: &str = "**Ownership:** Shared Cancellation State\n\nEach independently owned token copy retains one shared state claim and releases it during ordinary cleanup. Borrowed arguments acquire no ownership claim. Token creation and copying allocate no second state or native signal. Tokens may outlive their source. Copying or dropping a token, and destroying its CancellationSource, do not request cancellation.\n\n**Equality:** `==` compares shared cancellation-state identity; `!=` is its inverse. Tokens and copies from the same source compare equal; distinct live states differ. Cancellation and source destruction do not change identity while tokens survive. Ordinary nullable equality applies. Borrowed comparison acquires no ownership claim and performs no signal or clock work. This grants no ordering, hashing, integer conversion, or address API.";
+
+pub(crate) const DURATION_NUMERIC_DOCUMENTATION: &str = "**Numeric Domain:** Signed 64-bit (`int64`, canonically `int`) nanoseconds. Negative intervals are valid. Duration remains a distinct nominal value, not an integer. No implicit integer conversions.";
+
+pub(crate) const DEADLINE_DOCUMENTATION: &str = "**Expiry:** Preserves the exact instant, including past instants. Distinct past deadlines remain distinguishable; expiry does not replace them with a shared expired marker. When used to bound a completion-observation wait, expiry stops only that wait, not the underlying transfer.";
+
+pub(crate) const REGISTRATION_KEY_DOCUMENTATION: &str = "**Ownership:** Non-owning, type-preserving registration key. Copying a key does not copy or borrow the registered stream; the readiness set owns that stream. Its type argument remains part of its identity. Unregistering returns the original stream type.";
+
+pub(crate) const READ_TRANSFER_KEY_DOCUMENTATION: &str = "**Identity:** Opaque, non-owning identifier for a read transfer, not a registered stream. Distinct from WriteTransferKey, RegistrationKey<T>, and integers; no integer conversions or public constructor. Copying it does not copy, borrow, or own a stream or buffer. Retrieved by TransferPlan's getReadKey(int $position), using zero-based positions across the entire mixed plan; an invalid or wrong-direction position throws IoError. Operation identity remains stable through consuming appends. The approved TransferGroup contract also exposes it through readonly observedReadKey: ?ReadTransferKey, without retaining group, storage, or source loans. Tooling validation and pinned-compiler integration remain pending.";
+
+pub(crate) const WRITE_TRANSFER_KEY_DOCUMENTATION: &str = "**Identity:** Opaque, non-owning identifier for a write transfer, not a registered stream. Distinct from ReadTransferKey, RegistrationKey<T>, and integers; no integer conversions or public constructor. Copying it does not copy, borrow, or own a stream or buffer. Retrieved by TransferPlan's getWriteKey(int $position), using zero-based positions across the entire mixed plan; an invalid or wrong-direction position throws IoError. Operation identity remains stable through consuming appends. The approved TransferGroup contract also exposes it through readonly observedWriteKey: ?WriteTransferKey, without retaining group, storage, or source loans. Tooling validation and pinned-compiler integration remain pending.";
+
+pub(crate) const TRANSFER_KEY_LOOKUP_FAILURE_DOCUMENTATION: &str = "**Lookup Failure:** Negative, out-of-range, or wrong-direction positions throw `Doria\\Std\\Io\\IoError` with `operation = IoOperation::Access`, `target = IoTarget::TransferPlan`, and `reason = IoErrorReason::InvalidInput`. The TransferPlan target has no payload. `systemCode` and `transferredByteCount` are `null`.";
+
+pub(crate) const TRANSFER_GROUP_CONTROL_DOCUMENTATION: &str = "**Approved Group Lifetime Controls:** ReadinessSet::begin accepts optional named deadline: ?Doria\\Std\\Time\\Deadline and cancellation: ?Doria\\Std\\Concurrency\\CancellationToken parameters, both defaulting to null. Null omits that lifetime control; there is no TransferControl type. Controls persist for the group, distinct from getNextCompletion's wait-only budget. The group retains shared cancellation-token state, not a CancellationSource loan. Cancellation or group-deadline expiry drains outstanding transfers before storage release. Tooling validation and pinned-compiler integration remain pending.";
+
+const FILE_POSITION_DOCUMENTATION: &str = "**Approved File Position Contract:** ReadableFile, WritableFile, and DuplexFile implement Doria\\Std\\Io\\SeekableStream. Writable seek(int $offset, SeekOrigin $origin): int returns the new position with checked IoError; origin is required and has Start, Current, and End cases. Owned files expose readonly getPosition(): int throws IoError and getLength(): int throws IoError methods, not position/length properties. Fresh inspection can block and remains forbidden in property hooks, including through helpers, under the unchanged nonblocking hook rule. Seek failures use IoOperation::Seek, appended after Access without changing earlier tags; inspection failures use Access. Both retain the opening-path IoTarget::File, null transferredByteCount, and an optional systemCode. Append writes still write at the then-current EOF despite seeking. Tooling validation and pinned-compiler integration remain pending.";
+
+pub(crate) fn file_position_documentation(name: &str) -> Option<&'static str> {
+    matches!(
+        name,
+        doriac::compiler_known_stream::READABLE_FILE
+            | doriac::compiler_known_stream::WRITABLE_FILE
+            | doriac::compiler_known_stream::DUPLEX_FILE
+            | "Doria\\Std\\Io\\SeekableStream"
+    )
+    .then_some(FILE_POSITION_DOCUMENTATION)
+}
+
+const WRITABLE_FILE_DOCUMENTATION: &str = "**Approved File Synchronization Contract:** WritableFile and DuplexFile expose writable synchronizeData(): void throws IoError and synchronizeMetadata(): void throws IoError. Data synchronization synchronizes file data; metadata synchronization synchronizes full data plus metadata. ReadableFile exposes neither method. No synchronization interface or abbreviated alias is introduced. Failures use distinct IoOperation::SynchronizeData and SynchronizeMetadata cases appended after Seek, preserving earlier identities, with the original opening-path IoTarget::File, optional systemCode, and null transferredByteCount. Tooling validation and pinned-compiler integration remain pending.\n\n**Approved File Resize Contract:** WritableFile and DuplexFile expose writable setLength(int $length): void throws IoError, not a truncate alias or interface expansion. The required byte length is nonnegative. Shrinking discards the tail; supported growth exposes zero-readable extension. Resizing leaves the cursor unchanged and does not consume the owner. ReadableFile has no setLength method. Filesystem/platform failures use IoOperation::Resize appended after SynchronizeMetadata, preserving earlier tags, with the opening-path IoTarget::File, optional systemCode, and null transferredByteCount. Tooling validation and pinned-compiler integration remain pending.";
+
+pub(crate) fn writable_file_documentation(name: &str) -> Option<&'static str> {
+    matches!(
+        name,
+        doriac::compiler_known_stream::WRITABLE_FILE | doriac::compiler_known_stream::DUPLEX_FILE
+    )
+    .then_some(WRITABLE_FILE_DOCUMENTATION)
+}
+
+pub(crate) const TRANSFER_GROUP_RESUBMISSION_FAILURE_DOCUMENTATION: &str = "**Approved Resubmission Contract:** Invalid keys or ranges and active or unobserved operations passed to resubmitRead/resubmitWrite throw existing `Doria\\Std\\Io\\IoError` with `operation = IoOperation::Configure`, `target = IoTarget::TransferGroup`, and `reason = IoErrorReason::InvalidInput`. The TransferGroup target has no payload; `systemCode` and `transferredByteCount` are `null`. Failed validation submits no work and consumes no stored transfer Error. Valid reuse preserves the original directional key and retained buffer. Actual transfer failures propagate unchanged through getNextCompletion. Tooling validation and pinned-compiler integration remain pending.";
+
+pub(crate) fn inline_value_documentation(ty: doriac::inline_value::InlineValueKind) -> String {
+    let mut documentation = INLINE_COPY_DOCUMENTATION.to_string();
+    if !ty.requires_owned_cleanup() {
+        documentation.push_str("\n\n");
+        documentation.push_str(NON_OWNING_INLINE_DOCUMENTATION);
+    }
+    documentation.push_str("\n\n");
+    documentation.push_str(match ty {
+        doriac::inline_value::InlineValueKind::Duration => DURATION_NUMERIC_DOCUMENTATION,
+        doriac::inline_value::InlineValueKind::Deadline => DEADLINE_DOCUMENTATION,
+        doriac::inline_value::InlineValueKind::RegistrationKey => REGISTRATION_KEY_DOCUMENTATION,
+        doriac::inline_value::InlineValueKind::ReadTransferKey => READ_TRANSFER_KEY_DOCUMENTATION,
+        doriac::inline_value::InlineValueKind::WriteTransferKey => WRITE_TRANSFER_KEY_DOCUMENTATION,
+        doriac::inline_value::InlineValueKind::CancellationToken => {
+            CANCELLATION_TOKEN_DOCUMENTATION
+        }
+        doriac::inline_value::InlineValueKind::StandardInput
+        | doriac::inline_value::InlineValueKind::StandardOutput
+        | doriac::inline_value::InlineValueKind::StandardError => STANDARD_STREAM_DOCUMENTATION,
+    });
+    if matches!(
+        ty,
+        doriac::inline_value::InlineValueKind::ReadTransferKey
+            | doriac::inline_value::InlineValueKind::WriteTransferKey
+    ) {
+        documentation.push_str("\n\n");
+        documentation.push_str(TRANSFER_KEY_LOOKUP_FAILURE_DOCUMENTATION);
+        documentation.push_str("\n\n");
+        documentation.push_str(TRANSFER_GROUP_RESUBMISSION_FAILURE_DOCUMENTATION);
+    }
+    documentation
+}
+
+fn inline_copy_documentation(ty: &ResolvedType) -> Option<String> {
+    match non_nullable_type(ty) {
+        ResolvedType::Class(class) => class.inline_copy_type().map(inline_value_documentation),
+        _ => None,
+    }
+}
+
+pub(crate) fn pending_request_documentation(name: &str) -> Option<&'static str> {
+    doriac::compiler_known_stream::is_pending_request(name).then_some(PENDING_REQUEST_DOCUMENTATION)
+}
+
+pub(crate) fn transfer_result_documentation(name: &str) -> Option<&'static str> {
+    match name {
+        doriac::compiler_known_stream::TRANSFER_COMPLETION => Some(
+            "Identifies a retired read or write with its matching typed transfer key and nullable outcome. A null outcome means no transfer outcome on that completed operation, not absence of a completion. Zero-byte success, WouldBlock, EndOfStream, and a read's TimedOut remain actual applicable outcomes. Construction and copying do not retire work, release loans, or grant buffer access.",
+        ),
+        doriac::compiler_known_stream::TRANSFER_WAIT_RESULT => Some(
+            "Completed carries a TransferCompletion, distinct from the wait observations TimedOut and Exhausted. Neither observation permanently stops the group or prevents later resubmission. Transfer failures throw the original owned checked Error rather than returning an error case. If wait infrastructure fails alongside a preserved transfer completion or owned transfer error, the infrastructure error is reported first. The original completion or owned error remains available for a subsequent fetch; it is not discarded, relabeled, or reconstructed. The approved reusable owner is Doria\\Std\\Io\\TransferGroup, with readonly observedReadKey: ?ReadTransferKey and readonly observedWriteKey: ?WriteTransferKey. Only the fetched operation's direction is present; both are null before the first fetch and after timeout or exhaustion. The observed key preserves the consumed plan's original opaque stamp and mixed-plan operation position, published before an original owned checked Error propagates and preserved across resubmission. Key copies retain no group, storage, or source loans or resources. Observed keys do not replace successful completion payload keys. A retired read's known completed prefix may be available through getReadRegion before fetching; observed keys are published only by fetching. Fetching and cleanup do not repeat retired adapter callbacks. An original queued IoError remains owned until fetched or group destruction. Group setup through begin consumes the plan on success and failure. Its own plan-validation and native-setup IoError use IoOperation::Configure / IoTarget::TransferGroup, preserving reason and system-code details. An adapter's original owned checked Error propagates unchanged, not relabeled or reconstructed. Failed setup releases plan loans, leaves no active group, and submits no work. Construction and copying do not retire work, release loans, or grant buffer access. The compiler declares writable getNextCompletion(Wait $wait): TransferWaitResult, with ambient IoError transport. Tooling validation and pinned-compiler integration remain pending.",
+        ),
+        _ => None,
+    }
+}
+
 fn callable_return_documentation(
     signature: &CallableSignatureSemanticInfo,
     borrow: Option<doriac::symbols::ReturnBorrow>,
 ) -> String {
     let mut documentation = String::new();
+    if let ResolvedType::Enum(outcome) = &signature.return_type {
+        if let Some(result) = flush_outcome_documentation(&outcome.name) {
+            documentation.push_str("\n\n");
+            documentation.push_str(result);
+        }
+    }
     if let Some(borrow) = borrow {
         let source = match borrow.source {
             doriac::symbols::BorrowSource::Receiver => "the receiver".to_string(),
@@ -6462,15 +7096,26 @@ fn callable_return_documentation(
                 "\n\nReturns a {access} borrow rooted in {source}.",
             )),
             doriac::types::ReturnBorrowKind::Retained => documentation.push_str(&format!(
-                "\n\nReturns an owned value that retains a {access} borrow rooted in {source}. The source must outlive the result.",
+                "\n\nReturns an owned value that retains a {access} borrow rooted in {source}.",
             )),
         }
+        documentation.push(' ');
+        documentation.push_str(retained_lifetime_documentation(borrow.lifetime));
     } else if matches!(signature.return_type, ResolvedType::InterfaceSelf(_)) {
         documentation.push_str(
             "\n\nReturns a new owned value of the same exact dynamic implementing class.",
         );
     }
     documentation
+}
+
+fn retained_lifetime_documentation(lifetime: doriac::types::RetainedLifetime) -> &'static str {
+    match lifetime {
+        doriac::types::RetainedLifetime::LastUse =>
+            "The source must remain available through the result's last use.",
+        doriac::types::RetainedLifetime::Cleanup =>
+            "The source must remain available through the result's cleanup, even after its last use.",
+    }
 }
 
 fn list_algorithm_completions(receiver: &ResolvedType) -> Option<Vec<SemanticCompletion>> {
@@ -6666,7 +7311,7 @@ fn collection_method(
         ),
         (ResolvedType::List(value), "pop") => (
             String::new(),
-            format!("?{}", display_resolved_type(value)),
+            display_nullable_resolved_type(value),
             "Removes and returns the final value, or `null` when the list is empty.",
         ),
         (ResolvedType::List(value), "contains") => (
@@ -6716,7 +7361,7 @@ fn collection_method(
             "get",
         ) => (
             format!("{} $key", display_resolved_type(key)),
-            format!("?{}", display_resolved_type(value)),
+            display_nullable_resolved_type(value),
             "Returns the value for the key, or `null` when the key is absent.",
         ),
         (
@@ -6740,7 +7385,7 @@ fn collection_method(
             "remove",
         ) => (
             format!("{} $key", display_resolved_type(key)),
-            format!("?{}", display_resolved_type(value)),
+            display_nullable_resolved_type(value),
             "Removes and returns the value for the key, or `null` when the key is absent.",
         ),
         (ResolvedType::Set(value) | ResolvedType::SortedSet(value), "add") => (
@@ -6785,7 +7430,7 @@ fn collection_method(
         ),
         (ResolvedType::PriorityQueue(value), "pop") => (
             String::new(),
-            format!("?{}", display_resolved_type(value)),
+            display_nullable_resolved_type(value),
             "Removes and returns the minimum value, or `null` when the queue is empty.",
         ),
         (ResolvedType::Deque(value), "pushFront" | "pushBack") => (
@@ -6795,7 +7440,7 @@ fn collection_method(
         ),
         (ResolvedType::Deque(value), "popFront" | "popBack") => (
             String::new(),
-            format!("?{}", display_resolved_type(value)),
+            display_nullable_resolved_type(value),
             "Removes and returns the value at the selected end, or `null` when the deque is empty.",
         ),
         (
@@ -6812,21 +7457,18 @@ fn collection_method(
             "void".to_string(),
             "Empties this writable collection in place while preserving the collection for reuse.",
         ),
-        (ResolvedType::Bytes, "toArray") => (
-            String::new(),
-            "uint8[]".to_string(),
-            "Copies this byte buffer into a fixed-length `uint8[]`.",
-        ),
         _ => return None,
     };
     Some((parameters, return_type, documentation))
 }
 
 fn collection_property(receiver: &ResolvedType, property: &str) -> Option<&'static str> {
-    let collection = match non_nullable_type(receiver) {
-        ResolvedType::SharedHandle(kind, payload) if kind.is_access() => payload.as_ref(),
-        receiver => receiver,
-    };
+    let collection = collection_receiver_type(receiver);
+    if let Some(member) = byte_intrinsics::member(collection, property)
+        .filter(|member| member.kind == ByteMemberKind::Property)
+    {
+        return Some(member.documentation);
+    }
     match (collection, property) {
         (
             ResolvedType::List(_)
@@ -6871,6 +7513,82 @@ fn collection_property(receiver: &ResolvedType, property: &str) -> Option<&'stat
         }
         _ => None,
     }
+}
+
+fn collection_receiver_type(receiver: &ResolvedType) -> &ResolvedType {
+    match non_nullable_type(receiver) {
+        ResolvedType::SharedHandle(kind, payload) if kind.is_access() => payload.as_ref(),
+        receiver => receiver,
+    }
+}
+
+pub(crate) fn byte_signature(receiver: &ResolvedType, member: &ByteIntrinsic) -> String {
+    let result = display_resolved_type(&member.return_type);
+    if member.kind == ByteMemberKind::Property {
+        return format!("{result} ${}", member.name);
+    }
+    let parameters = member
+        .parameters
+        .iter()
+        .map(|parameter| {
+            format!(
+                "{} ${}",
+                display_resolved_type(&parameter.ty),
+                parameter.name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let prefix = match member.receiver_mode {
+        None => "static ",
+        Some(ReceiverMode::Writable) => "writable ",
+        Some(ReceiverMode::Consuming) => "consuming ",
+        Some(ReceiverMode::Readonly) => "",
+    };
+    format!(
+        "{prefix}function {}::{}({parameters}): {result}",
+        display_resolved_type(receiver),
+        member.name
+    )
+}
+
+fn byte_completions(
+    receiver: &ResolvedType,
+    writable: bool,
+    is_static: bool,
+) -> Vec<SemanticCompletion> {
+    let kinds: &[ByteMemberKind] = if is_static {
+        &[ByteMemberKind::StaticMethod]
+    } else {
+        &[ByteMemberKind::Method, ByteMemberKind::Property]
+    };
+    kinds
+        .iter()
+        .flat_map(|kind| byte_intrinsics::members(receiver, *kind))
+        .filter(|member| writable || member.receiver_mode != Some(ReceiverMode::Writable))
+        .map(|member| SemanticCompletion {
+            label: member.name.to_string(),
+            kind: if member.kind == ByteMemberKind::Property {
+                10
+            } else {
+                2
+            },
+            detail: byte_signature(receiver, &member),
+            documentation: Some(member.documentation.to_string()),
+        })
+        .collect()
+}
+
+pub(crate) fn string_property_completions() -> Vec<SemanticCompletion> {
+    byte_completions(&ResolvedType::String, false, false)
+        .into_iter()
+        .chain(STRING_PROPERTIES.iter().map(|property| SemanticCompletion {
+            label: property.name.to_string(),
+            kind: 10,
+            detail: property.signature.to_string(),
+            documentation: Some(property.documentation.to_string()),
+        }))
+        .collect()
 }
 
 fn non_nullable_type(ty: &ResolvedType) -> &ResolvedType {
@@ -6988,8 +7706,9 @@ fn enum_backing_name(backing: EnumBackingType) -> &'static str {
 
 fn enum_case_signature(
     enum_name: &str,
+    result_type: &str,
     case_name: &str,
-    case: Option<&doriac::semantics::EnumCaseSemanticInfo>,
+    case: Option<&EnumCaseDeclarationSemanticInfo>,
 ) -> String {
     let parameters = case
         .map(|case| {
@@ -7000,54 +7719,75 @@ fn enum_case_signature(
         })
         .unwrap_or_default();
     if parameters.is_empty() {
-        format!("{enum_name}::{case_name}: {enum_name}")
+        format!("{enum_name}::{case_name}: {result_type}")
     } else {
         format!(
-            "{enum_name}::{case_name}({}): {enum_name}",
+            "{enum_name}::{case_name}({}): {result_type}",
             parameters.join(", ")
         )
     }
 }
 
 fn enum_case_documentation(
-    enum_info: Option<&EnumSemanticInfo>,
-    case: Option<&doriac::semantics::EnumCaseSemanticInfo>,
+    enum_info: Option<&EnumDeclarationSemanticInfo>,
+    case: Option<&EnumCaseDeclarationSemanticInfo>,
+    copy: Option<bool>,
 ) -> Option<String> {
     let case = case?;
-    if !case.payload.is_empty() {
-        let ownership = enum_info.map_or("enum", |info| {
-            if info.capabilities.copy {
-                "Copy enum"
-            } else {
-                "Move enum"
+    let mut documentation = if !case.payload.is_empty() {
+        let ownership = match copy {
+            Some(true) => "Copy enum",
+            Some(false) => "Move enum",
+            None => "enum",
+        };
+        format!("Constructs a {ownership} value with readonly payload fields.")
+    } else {
+        match (
+            &case.backing_value,
+            enum_info.and_then(|info| info.backing_type),
+        ) {
+            (Some(EnumBackingValue::Int(value)), Some(EnumBackingType::Int)) => {
+                format!("Enum case with readonly `int` backing value `{value}`.")
             }
-        });
-        return Some(format!(
-            "Constructs a {ownership} value with readonly payload fields."
-        ));
+            (Some(EnumBackingValue::String(value)), Some(EnumBackingType::String)) => format!(
+                "Enum case with readonly `string` backing value `{:?}`.",
+                value
+            ),
+            _ => "Unit enum case.".to_string(),
+        }
+    };
+    if let Some(result) = enum_info.and_then(|info| {
+        transfer_result_documentation(&info.source_type.name)
+            .or_else(|| flush_outcome_documentation(&info.source_type.name))
+    }) {
+        documentation.push_str("\n\n");
+        documentation.push_str(result);
     }
-    match (
-        &case.backing_value,
-        enum_info.and_then(|info| info.backing_type),
-    ) {
-        (Some(EnumBackingValue::Int(value)), Some(EnumBackingType::Int)) => Some(format!(
-            "Enum case with readonly `int` backing value `{value}`."
-        )),
-        (Some(EnumBackingValue::String(value)), Some(EnumBackingType::String)) => Some(format!(
-            "Enum case with readonly `string` backing value `{:?}`.",
-            value
-        )),
-        _ => Some("Unit enum case.".to_string()),
-    }
+    Some(documentation)
 }
 
-fn enum_documentation(info: &EnumSemanticInfo) -> String {
-    let ownership = if info.capabilities.copy {
-        "Copy"
-    } else {
-        "Move"
+fn enum_documentation(name: &str, copy: Option<bool>) -> String {
+    let ownership = match copy {
+        Some(true) => "Copy ",
+        Some(false) => "Move ",
+        None => "",
     };
-    format!("Nominal {ownership} enum. Each value records one declared case and that case's data.")
+    let mut documentation = format!(
+        "Nominal {ownership}enum. Each value records one declared case and that case's data."
+    );
+    if let Some(result) =
+        transfer_result_documentation(name).or_else(|| flush_outcome_documentation(name))
+    {
+        documentation.push_str("\n\n");
+        documentation.push_str(result);
+    }
+    documentation
+}
+
+fn flush_outcome_documentation(name: &str) -> Option<&'static str> {
+    (name == "Doria\\Std\\Io\\FlushOutcome").then_some(
+        "Complete means the flush completed. Pending preserves the unwritten remainder for a later flush call. Flushing does not implicitly wait for readiness; checked failures throw IoError. Both cases are payload-free Copy values.",
+    )
 }
 
 fn attribute_schema_documentation(schema: &AttributeClassSchema) -> String {
@@ -7193,6 +7933,10 @@ fn display_resolved_type(ty: &ResolvedType) -> String {
     let mut types = TypeRegistry::new();
     let id = types.intern_resolved(ty);
     types.display(id)
+}
+
+fn display_nullable_resolved_type(ty: &ResolvedType) -> String {
+    display_resolved_type(&ResolvedType::Nullable(Box::new(ty.clone())))
 }
 
 fn assertion_matcher_completion(
@@ -7517,6 +8261,30 @@ fn binding_source_name(info: &SemanticInfo, binding_id: doriac::symbols::Binding
     format!("${name}")
 }
 
+fn nominal_condition_signature(condition: Option<&NominalCondition>) -> String {
+    let Some(condition) = condition else {
+        return String::new();
+    };
+    let bounds = condition
+        .bounds
+        .iter()
+        .map(|bound| {
+            format!(
+                "{} implements {}",
+                bound.subject.text,
+                bound
+                    .interfaces
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(" where ({bounds})")
+}
+
 fn function_signature(function: &FunctionDecl, container: Option<&str>) -> String {
     let mut modifiers = Vec::new();
     if matches!(function.access, MemberAccess::Internal) {
@@ -7528,8 +8296,10 @@ fn function_signature(function: &FunctionDecl, container: Option<&str>) -> Strin
     if function.is_override {
         modifiers.push("override");
     }
-    if function.writable_this {
-        modifiers.push("writable");
+    match ReceiverMode::from_declaration(function) {
+        ReceiverMode::Writable => modifiers.push("writable"),
+        ReceiverMode::Consuming => modifiers.push("consuming"),
+        ReceiverMode::Readonly => {}
     }
     if function.is_static {
         modifiers.push("static");
@@ -7571,13 +8341,18 @@ fn function_signature(function: &FunctionDecl, container: Option<&str>) -> Strin
         })
         .unwrap_or_default();
 
-    format!("{prefix}function {name}{type_parameters}({parameters}){return_type}{throws}")
+    format!(
+        "{prefix}function {name}{type_parameters}({parameters}){return_type}{throws}{}",
+        nominal_condition_signature(function.availability.as_ref())
+    )
 }
 
 fn override_stub(function: &FunctionDecl) -> String {
     let mut modifiers = vec!["override"];
-    if function.writable_this {
-        modifiers.push("writable");
+    match ReceiverMode::from_declaration(function) {
+        ReceiverMode::Writable => modifiers.push("writable"),
+        ReceiverMode::Consuming => modifiers.push("consuming"),
+        ReceiverMode::Readonly => {}
     }
     if function.is_static {
         modifiers.push("static");
@@ -7718,7 +8493,7 @@ fn promoted_property_documentation(
 ) -> String {
     if parameter.borrow_span.is_some() {
         return format!(
-            "**Retained Readonly Source**\n\nDeclares `{class_name}::{}` as a source loan, not an owned field. The source stays with its owner and must outlive the cursor. It cannot be mutated while the loan is active.",
+            "**Retained Readonly Source**\n\nDeclares `{class_name}::{}` as a source loan, not an owned field. The source stays with its owner. It cannot be mutated while the loan is active.",
             parameter.name,
         );
     }
@@ -7781,6 +8556,26 @@ fn type_parameter_signature(parameters: &[doriac::ast::TypeParamDecl]) -> String
     format!("<{parameters}>")
 }
 
+fn contract_signature(
+    kind: &str,
+    name: &str,
+    parameters: &[doriac::ast::TypeParamDecl],
+    parents: &[TypeRef],
+) -> String {
+    let mut signature = format!("{kind} {name}{}", type_parameter_signature(parameters));
+    if !parents.is_empty() {
+        signature.push_str(&format!(
+            " extends {}",
+            parents
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    signature
+}
+
 fn type_parameter_override_signature(parameters: &[doriac::ast::TypeParamDecl]) -> String {
     if parameters.is_empty() {
         return String::new();
@@ -7825,7 +8620,11 @@ fn class_signature(class: &ClassDecl) -> String {
             class
                 .implements
                 .iter()
-                .map(ToString::to_string)
+                .map(|entry| format!(
+                    "{}{}",
+                    entry.ty,
+                    nominal_condition_signature(entry.condition.as_ref())
+                ))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
@@ -7874,7 +8673,7 @@ fn method_hierarchy_documentation(
     let receiver = match hierarchy.receiver_mode {
         Some(ReceiverMode::Writable) => "Writable",
         Some(ReceiverMode::Readonly) | None => "Readonly",
-        Some(ReceiverMode::UnsupportedConsuming) => "Consuming (Unsupported)",
+        Some(ReceiverMode::Consuming) => "Consuming",
     };
     let dispatch = if hierarchy.virtual_root.is_some() {
         "Virtual"
@@ -8022,6 +8821,208 @@ mod tests {
     use super::*;
 
     #[test]
+    fn nullable_collection_method_fallbacks_use_compiler_canonical_types() {
+        let int = ResolvedType::Integer(doriac::numeric::IntegerType::Int64);
+        let nested = ResolvedType::List(Box::new(int.clone()));
+        for (element, expected) in [
+            (nested.clone(), "?List<int>"),
+            (ResolvedType::Nullable(Box::new(nested)), "?List<int>"),
+            (ResolvedType::Mixed, "?mixed"),
+            (
+                ResolvedType::Nullable(Box::new(ResolvedType::Mixed)),
+                "?mixed",
+            ),
+        ] {
+            let list = ResolvedType::List(Box::new(element.clone()));
+            let dictionary =
+                ResolvedType::Dictionary(Box::new(ResolvedType::String), Box::new(element.clone()));
+            let sorted = ResolvedType::SortedDictionary(
+                Box::new(ResolvedType::String),
+                Box::new(element.clone()),
+            );
+            let deque = ResolvedType::Deque(Box::new(element));
+            for (receiver, method) in [
+                (&list, "pop"),
+                (&dictionary, "get"),
+                (&dictionary, "remove"),
+                (&sorted, "get"),
+                (&sorted, "remove"),
+                (&deque, "popFront"),
+                (&deque, "popBack"),
+            ] {
+                let hover = compiler_known_method_hover(receiver, method, false, None).unwrap();
+                assert!(
+                    hover.signature.ends_with(&format!(": {expected}")),
+                    "{}",
+                    hover.signature
+                );
+                assert!(!hover.signature.contains("??"));
+            }
+        }
+        let queue = ResolvedType::PriorityQueue(Box::new(ResolvedType::Nullable(Box::new(int))));
+        let hover = compiler_known_method_hover(&queue, "pop", false, None).unwrap();
+        assert!(hover.signature.ends_with(": ?int"), "{}", hover.signature);
+    }
+
+    #[test]
+    fn collection_return_hovers_distinguish_borrowed_reads_from_owned_removals() {
+        let source =
+            include_str!("../../editors/fixtures/stage36a-nullable-collection-returns.doria");
+        let snapshot = AnalysisSnapshot::analyze("nullable-collection-returns.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        for name in [
+            "firstNested",
+            "lastNested",
+            "firstNullableNested",
+            "lastNullableNested",
+            "getNested",
+            "getNullableNested",
+            "firstMixed",
+            "lastMixed",
+            "firstNullableMixed",
+            "lastNullableMixed",
+            "getMixed",
+            "getNullableMixed",
+            "peekFrontNested",
+            "peekBackNested",
+            "peekFrontNullableNested",
+            "peekBackNullableNested",
+            "peekFrontMixed",
+            "peekBackMixed",
+            "peekFrontNullableMixed",
+            "peekBackNullableMixed",
+        ] {
+            let hover = snapshot
+                .hover_at_offset(source.find(name).unwrap())
+                .unwrap();
+            assert!(
+                hover
+                    .markdown
+                    .contains("Returns a readonly borrow rooted in `$source`."),
+                "{name}: {}",
+                hover.markdown
+            );
+            assert!(!hover.markdown.contains("??"));
+        }
+        for name in [
+            "popNested",
+            "popNullableNested",
+            "removeNested",
+            "removeNullableNested",
+            "removeAtNested",
+            "removeAtNullableNested",
+            "popMixed",
+            "popNullableMixed",
+            "removeMixed",
+            "removeNullableMixed",
+            "removeAtMixed",
+            "removeAtNullableMixed",
+            "popFrontNested",
+            "popBackNested",
+            "popFrontNullableNested",
+            "popBackNullableNested",
+            "popFrontMixed",
+            "popBackMixed",
+            "popFrontNullableMixed",
+            "popBackNullableMixed",
+        ] {
+            let hover = snapshot
+                .hover_at_offset(source.find(name).unwrap())
+                .unwrap();
+            assert!(
+                !hover.markdown.contains("borrow rooted"),
+                "{name}: {}",
+                hover.markdown
+            );
+            assert!(!hover.markdown.contains("??"));
+        }
+    }
+
+    #[test]
+    fn owned_source_carrier_hovers_do_not_claim_ordinary_borrowed_returns() {
+        let source = include_str!("../../editors/fixtures/stage36a-owned-source-carriers.doria");
+        let snapshot = AnalysisSnapshot::analyze("owned-source-carriers.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        for name in ["pass", "obtain", "popIterator", "popCallback", "popNested"] {
+            let hover = snapshot
+                .hover_at_offset(source.find(name).unwrap())
+                .unwrap();
+            assert!(
+                !hover.markdown.contains("Returns a readonly borrow"),
+                "{name}: {}",
+                hover.markdown
+            );
+            assert!(
+                !hover.markdown.contains("Returns a writable borrow"),
+                "{name}: {}",
+                hover.markdown
+            );
+            assert!(!hover.markdown.contains("??"), "{name}: {}", hover.markdown);
+            if name == "obtain" {
+                assert!(
+                    hover
+                        .markdown
+                        .contains("Retains a readonly source loan from `$shelf`."),
+                    "{}",
+                    hover.markdown
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn callable_source_documentation_reaches_function_and_method_references() {
+        let source = r#"
+/** Reads the first nested list. */
+function first(List<List<int>> $source): ?List<int> { return $source->first; }
+class Reader {
+    function first(List<List<int>> $source): ?List<int> { return $source->first; }
+}
+function main(): void {
+    List<List<int>> $source = [[1]];
+    let $reader = new Reader();
+    { let $value = first($source); }
+    { let $value = $reader->first($source); }
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("callable-source-documentation.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        let occurrences = source.match_indices("first(").collect::<Vec<_>>();
+        assert_eq!(occurrences.len(), 4);
+        for (offset, _) in occurrences {
+            let hover = snapshot.hover_at_offset(offset).unwrap();
+            assert_eq!(
+                hover
+                    .markdown
+                    .matches("Returns a readonly borrow rooted in `$source`.")
+                    .count(),
+                1,
+                "{}",
+                hover.markdown
+            );
+            assert!(hover
+                .markdown
+                .contains("The source must remain available through the result's last use."));
+        }
+        let hover = snapshot
+            .hover_at_offset(source.find("first(").unwrap())
+            .unwrap();
+        assert!(hover.markdown.contains("Reads the first nested list."));
+    }
+
+    #[test]
     fn callable_calls_preserve_callee_and_argument_references() {
         let source = "function invoke(function(int): int $callback, int $value): int { return ($callback)($value); }";
         let snapshot = AnalysisSnapshot::analyze("callable-references.doria", source);
@@ -8043,9 +9044,9 @@ mod tests {
     }
 
     #[test]
-    fn return_documentation_preserves_compiler_loan_kind_source_and_access() {
+    fn return_documentation_preserves_compiler_loan_kind_source_access_and_lifetime() {
         use doriac::symbols::{BorrowSource, ReturnBorrow};
-        use doriac::types::ReturnBorrowKind;
+        use doriac::types::{RetainedLifetime, ReturnBorrowKind};
 
         let signature = CallableSignatureSemanticInfo {
             generic_parameter_count: 0,
@@ -8066,19 +9067,31 @@ mod tests {
             for writable in [false, true] {
                 let access = if writable { "writable" } else { "readonly" };
                 for kind in [ReturnBorrowKind::Value, ReturnBorrowKind::Retained] {
-                    let actual = callable_return_documentation(
-                        &signature,
-                        Some(ReturnBorrow {
-                            source,
-                            writable,
-                            kind,
-                        }),
-                    );
-                    let expected = match kind {
-                        ReturnBorrowKind::Value => format!("Returns a {access} borrow rooted in {label}."),
-                        ReturnBorrowKind::Retained => format!("Returns an owned value that retains a {access} borrow rooted in {label}. The source must outlive the result."),
-                    };
-                    assert_eq!(actual.trim(), expected);
+                    for (lifetime, obligation) in [
+                        (
+                            RetainedLifetime::LastUse,
+                            "The source must remain available through the result's last use.",
+                        ),
+                        (
+                            RetainedLifetime::Cleanup,
+                            "The source must remain available through the result's cleanup, even after its last use.",
+                        ),
+                    ] {
+                        let actual = callable_return_documentation(
+                            &signature,
+                            Some(ReturnBorrow {
+                                source,
+                                writable,
+                                kind,
+                                lifetime,
+                            }),
+                        );
+                        let expected = match kind {
+                            ReturnBorrowKind::Value => format!("Returns a {access} borrow rooted in {label}."),
+                            ReturnBorrowKind::Retained => format!("Returns an owned value that retains a {access} borrow rooted in {label}."),
+                        };
+                        assert_eq!(actual.trim(), format!("{expected} {obligation}"));
+                    }
                 }
             }
         }
@@ -8337,6 +9350,10 @@ function main(): void
             details.get("systemCode").map(String::as_str),
             Some("?int $systemCode")
         );
+        assert_eq!(
+            details.get("transferredByteCount").map(String::as_str),
+            Some("?int $transferredByteCount")
+        );
         assert!(snapshot
             .hover_at_offset(property_offset)
             .expect("compiler-known property hover")
@@ -8350,21 +9367,1978 @@ function main(): void
             .into_iter()
             .map(|completion| completion.label)
             .collect::<HashSet<_>>();
+        let empty = doriac::parse_source("io-inventory.doria", "").unwrap();
+        let declarations = doriac::compiler_known_io::augment_program(&empty);
+        let operation = declarations
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Enum(declaration)
+                    if declaration.name == doriac::compiler_known_io::IO_OPERATION =>
+                {
+                    Some(declaration)
+                }
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(
             cases,
-            HashSet::from([
-                "Open".to_string(),
-                "Read".to_string(),
-                "Write".to_string(),
-                "Append".to_string(),
-                "Flush".to_string(),
-            ])
+            operation
+                .cases
+                .iter()
+                .map(|case| case.name.clone())
+                .collect()
         );
         assert!(snapshot
             .hover_at_offset(case_offset)
             .expect("compiler-known enum case hover")
             .markdown
             .contains("Doria\\Std\\Io\\IoOperation::Read: Doria\\Std\\Io\\IoOperation"));
+        for (ty, case) in [
+            (doriac::compiler_known_io::IO_OPERATION, "Register"),
+            (doriac::compiler_known_io::IO_OPERATION, "Unregister"),
+            (doriac::compiler_known_io::IO_OPERATION, "Wait"),
+            (doriac::compiler_known_io::IO_OPERATION, "Configure"),
+            (doriac::compiler_known_io::IO_OPERATION, "Access"),
+            (doriac::compiler_known_io::IO_TARGET, "ReadinessSet"),
+            (doriac::compiler_known_io::IO_TARGET, "TransferPlan"),
+        ] {
+            let source = format!("function inspect(): void {{ {ty} $value = {ty}::{case}; }}");
+            let snapshot = AnalysisSnapshot::analyze("readiness-io-case.doria", &source);
+            assert!(
+                snapshot.diagnostics().is_empty(),
+                "{:?}",
+                snapshot.diagnostics()
+            );
+            let offset = source.rfind(case).unwrap();
+            assert!(snapshot
+                .static_completions_at_offset(offset)
+                .unwrap()
+                .iter()
+                .any(|completion| completion.label == case));
+            assert!(snapshot
+                .hover_at_offset(offset)
+                .unwrap()
+                .markdown
+                .contains(&format!("{ty}::{case}: {ty}")));
+        }
+    }
+
+    #[test]
+    fn compiler_known_errors_preserve_nominal_and_member_facts() {
+        for name in [
+            doriac::compiler_known_time::CLOCK_ERROR,
+            doriac::compiler_known_concurrency::CANCELLATION_ERROR,
+        ] {
+            for (prefix, spelling) in [
+                (String::new(), name),
+                (format!("use {name} as TimeFailure; "), "TimeFailure"),
+            ] {
+                let source = format!(
+                    "{prefix}function inspect({spelling} $view): void {{ \
+                let $error = new {spelling}(\"failed\", systemCode: 0); \
+                let $code = $error->systemCode; let $message = $error->message; }}"
+                );
+                let snapshot = AnalysisSnapshot::analyze("clock-error-help.doria", &source);
+                assert!(
+                    snapshot.diagnostics().is_empty(),
+                    "{:?}",
+                    snapshot.diagnostics()
+                );
+                let type_offset = source.find(&format!("{spelling} $view")).unwrap();
+                let hover = snapshot.hover_at_offset(type_offset).unwrap();
+                assert!(
+                    hover.markdown.contains(&format!("class {name}")),
+                    "{hover:?}"
+                );
+                assert!(hover.markdown.contains("`Error`"), "{hover:?}");
+                assert!(snapshot.declaration_span_at_offset(type_offset).is_none());
+
+                let offset = source.find("->systemCode").unwrap() + 2;
+                let members = snapshot.member_completions_at_offset(offset).unwrap();
+                let properties = members
+                    .iter()
+                    .filter(|member| member.kind == 10)
+                    .map(|member| member.label.as_str())
+                    .collect::<HashSet<_>>();
+                assert_eq!(properties, HashSet::from(["message", "systemCode"]));
+                for (property, signature) in [
+                    ("message", "string $message"),
+                    ("systemCode", "?int $systemCode"),
+                ] {
+                    let member = members
+                        .iter()
+                        .find(|member| member.label == property)
+                        .unwrap();
+                    assert_eq!(member.detail, signature);
+                    assert!(member
+                        .documentation
+                        .as_deref()
+                        .unwrap()
+                        .contains("readonly"));
+                    let offset = source.find(&format!("->{property}")).unwrap() + 2;
+                    let hover = snapshot.hover_at_offset(offset).unwrap();
+                    assert!(hover.markdown.contains(signature), "{hover:?}");
+                    assert!(hover.markdown.contains("readonly"), "{hover:?}");
+                    assert!(snapshot.declaration_span_at_offset(offset).is_none());
+                }
+                let help = snapshot
+                    .signature_help_at_offset(source.find("systemCode:").unwrap())
+                    .unwrap();
+                assert!(help[0].label.contains(&format!("{name}::__construct(")));
+                assert!(help[0].label.contains("string $message, ?int $systemCode"));
+                assert_eq!(help[0].active_parameter, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn compiler_known_constructors_share_signature_and_named_argument_help() {
+        for (name, arguments, last_parameter, active_parameter) in [
+            (doriac::compiler_known_time::CLOCK_ERROR, "\"failed\", systemCode: 0", "systemCode", 1),
+            (doriac::compiler_known_concurrency::CANCELLATION_ERROR, "\"failed\", systemCode: 0", "systemCode", 1),
+            (doriac::compiler_known_io::INVALID_UTF8_ERROR,
+                "\"invalid\", Doria\\Std\\Io\\Utf8InputSource::StandardInput, validByteCount: 0", "validByteCount", 2),
+            (doriac::compiler_known_io::IO_ERROR,
+                "\"failed\", Doria\\Std\\Io\\IoOperation::Read, Doria\\Std\\Io\\IoTarget::StandardInput, reason: Doria\\Std\\Io\\IoErrorReason::Other", "reason", 3),
+        ] {
+            for (prefix, spelling) in [
+                (String::new(), name),
+                (format!("use {name} as Failure; "), "Failure"),
+            ] {
+                let source = format!("{prefix}function inspect(): void {{ let $error = new {spelling}({arguments}); }}");
+                let snapshot = AnalysisSnapshot::analyze("constructor-help.doria", &source);
+                assert!(snapshot.diagnostics().is_empty(), "{:?}", snapshot.diagnostics());
+                let offset = source.find(&format!("{last_parameter}:")).unwrap();
+                let help = snapshot.signature_help_at_offset(offset).unwrap();
+                assert!(help[0].label.contains(&format!("{name}::__construct(")), "{help:?}");
+                assert_eq!(help[0].active_parameter, active_parameter);
+                assert!(snapshot.named_argument_completions_at_offset(offset).unwrap().iter()
+                    .any(|completion| completion.label == format!("{last_parameter}:")));
+                let class_offset = source.find(&format!("new {spelling}")).unwrap() + 4;
+                assert!(snapshot.hover_at_offset(class_offset).unwrap().markdown.contains(&format!("class {name}")));
+                assert!(snapshot.declaration_span_at_offset(class_offset).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn duration_factory_and_getter_help_uses_compiler_member_facts() {
+        let name = doriac::compiler_known_time::DURATION;
+        let integer =
+            display_resolved_type(&ResolvedType::Integer(doriac::numeric::IntegerType::Int64));
+        for (prefix, spelling) in [
+            (String::new(), name),
+            (format!("use {name} as Interval; "), "Interval"),
+        ] {
+            let source = format!(
+                "{prefix}function inspect(?{spelling} $optional): void {{ \
+                let $interval = {spelling}::fromNanoseconds(nanoseconds: -1); \
+                let $copy = $interval; let $number = $interval->nanoseconds; \
+                let $maybe = $optional?->nanoseconds; }}"
+            );
+            let snapshot = AnalysisSnapshot::analyze("duration-members.doria", &source);
+            assert!(
+                snapshot.diagnostics().is_empty(),
+                "{:?}",
+                snapshot.diagnostics()
+            );
+
+            let offset = source.find("fromNanoseconds").unwrap();
+            let members = snapshot.static_completions_at_offset(offset).unwrap();
+            let factory = members
+                .iter()
+                .find(|member| member.label == "fromNanoseconds")
+                .unwrap();
+            assert_eq!(factory.kind, 2);
+            assert!(
+                factory.detail.contains(&format!(
+                    "{name}::fromNanoseconds({integer} $nanoseconds): {name}"
+                )),
+                "{factory:?}"
+            );
+            assert!(!factory.detail.contains("throws"));
+            assert!(!members.iter().any(|member| member.label == "__construct"));
+            let hover = snapshot.hover_at_offset(offset).unwrap();
+            assert!(hover.markdown.contains(&factory.detail), "{hover:?}");
+            assert!(snapshot.declaration_span_at_offset(offset).is_none());
+
+            let argument = source.find("nanoseconds:").unwrap();
+            let help = snapshot.signature_help_at_offset(argument).unwrap();
+            assert_eq!(help[0].label, factory.detail);
+            assert_eq!(help[0].active_parameter, 0);
+            assert!(snapshot
+                .named_argument_completions_at_offset(argument)
+                .unwrap()
+                .iter()
+                .any(|completion| completion.label == "nanoseconds:"));
+
+            let offset = source.find("->nanoseconds").unwrap() + 2;
+            let members = snapshot.member_completions_at_offset(offset).unwrap();
+            let getter = members
+                .iter()
+                .find(|member| member.label == "nanoseconds")
+                .unwrap();
+            assert_eq!(getter.kind, 10);
+            assert_eq!(getter.detail, format!("$nanoseconds {{ get: {integer} }}"));
+            assert!(getter
+                .documentation
+                .as_deref()
+                .unwrap()
+                .contains("Readonly"));
+            assert!(!getter.detail.contains("set("));
+            for (start, _) in source.match_indices("->nanoseconds") {
+                let hover = snapshot.hover_at_offset(start + 2).unwrap();
+                assert!(
+                    hover.markdown.contains(&format!("get: {integer}"))
+                        || hover.markdown.contains(&format!("get: ?{integer}")),
+                    "{hover:?}"
+                );
+                assert!(hover.markdown.contains("Readonly"), "{hover:?}");
+                assert!(snapshot.declaration_span_at_offset(start + 2).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn deadline_factory_help_uses_compiler_signature_and_checked_effects() {
+        let name = doriac::compiler_known_time::DEADLINE;
+        let duration = doriac::compiler_known_time::DURATION;
+        let error = doriac::compiler_known_time::CLOCK_ERROR;
+        for (prefix, spelling) in [
+            (String::new(), name),
+            (format!("use {name} as Instant; "), "Instant"),
+        ] {
+            let source = format!(
+                "{prefix}function inspect({duration} $interval): void throws {error} {{ \
+                let $deadline = {spelling}::fromNow(duration: $interval); \
+                let $copy = $deadline; ?{spelling} $optional = $deadline; }}"
+            );
+            let snapshot = AnalysisSnapshot::analyze("deadline-factory.doria", &source);
+            assert!(
+                snapshot.diagnostics().is_empty(),
+                "{:?}",
+                snapshot.diagnostics()
+            );
+            let offset = source.find("fromNow").unwrap();
+            let members = snapshot.static_completions_at_offset(offset).unwrap();
+            let factory = members
+                .iter()
+                .find(|member| member.label == "fromNow")
+                .unwrap();
+            assert_eq!(factory.kind, 2);
+            assert_eq!(
+                factory.detail,
+                format!(
+                    "static function {name}::fromNow({duration} $duration): {name} throws {error}"
+                )
+            );
+            assert!(!members.iter().any(|member| member.label == "__construct"));
+            let hover = snapshot.hover_at_offset(offset).unwrap();
+            assert!(hover.markdown.contains(&factory.detail), "{hover:?}");
+            assert!(snapshot.declaration_span_at_offset(offset).is_none());
+            let argument = source.find("duration:").unwrap();
+            let help = snapshot.signature_help_at_offset(argument).unwrap();
+            assert_eq!(help[0].label, factory.detail);
+            assert_eq!(help[0].active_parameter, 0);
+            assert!(snapshot
+                .named_argument_completions_at_offset(argument)
+                .unwrap()
+                .iter()
+                .any(|completion| completion.label == "duration:"));
+            for binding in ["$deadline", "$copy", "$optional"] {
+                let hover = snapshot
+                    .hover_at_offset(source.rfind(binding).unwrap())
+                    .unwrap();
+                assert!(
+                    hover.markdown.contains(INLINE_COPY_DOCUMENTATION),
+                    "{hover:?}"
+                );
+                assert!(hover.markdown.contains(DEADLINE_DOCUMENTATION), "{hover:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn wait_enum_help_uses_compiler_copy_and_payload_facts() {
+        let name = "Doria\\Std\\Io\\Wait";
+        for (prefix, spelling) in [
+            (String::new(), name),
+            (format!("use {name} as Observation; "), "Observation"),
+        ] {
+            for (case, parameter, ty) in [
+                ("For", "duration", doriac::compiler_known_time::DURATION),
+                ("Until", "deadline", doriac::compiler_known_time::DEADLINE),
+            ] {
+                let source = format!(
+                    "{prefix}function pass({spelling} $wait): {spelling} {{ return $wait; }} \
+                    function inspect({ty} $value): void {{ \
+                    let $wait = {spelling}::{case}({parameter}: $value); \
+                    let $copy = pass($wait); ?{spelling} $optional = $wait; \
+                    pass($wait); if ($optional != null) {{ pass($optional); }} }}"
+                );
+                let snapshot = AnalysisSnapshot::analyze("wait-help.doria", &source);
+                assert!(
+                    snapshot.diagnostics().is_empty(),
+                    "{:?}",
+                    snapshot.diagnostics()
+                );
+                let type_offset = source.find(&format!("{spelling} $wait")).unwrap();
+                let hover = snapshot.hover_at_offset(type_offset).unwrap();
+                assert!(
+                    hover.markdown.contains(&format!("enum {name}")),
+                    "{hover:?}"
+                );
+                assert!(hover.markdown.contains("Nominal Copy enum"), "{hover:?}");
+                assert!(snapshot.declaration_span_at_offset(type_offset).is_none());
+
+                let offset = source.find(&format!("::{case}")).unwrap() + 2;
+                let signature = format!("{name}::{case}({ty} ${parameter}): {name}");
+                let hover = snapshot.hover_at_offset(offset).unwrap();
+                assert!(hover.markdown.contains(&signature), "{hover:?}");
+                assert!(
+                    hover.markdown.contains("Constructs a Copy enum value"),
+                    "{hover:?}"
+                );
+                assert!(snapshot.declaration_span_at_offset(offset).is_none());
+                let argument = source.find(&format!("{parameter}:")).unwrap();
+                let help = snapshot.signature_help_at_offset(argument).unwrap();
+                assert_eq!(help[0].label, signature);
+                assert_eq!(help[0].active_parameter, 0);
+                assert!(snapshot
+                    .named_argument_completions_at_offset(argument)
+                    .unwrap()
+                    .iter()
+                    .any(|completion| completion.label == format!("{parameter}:")));
+                let cases = snapshot.static_completions_at_offset(offset).unwrap();
+                let labels = cases
+                    .iter()
+                    .map(|item| item.label.as_str())
+                    .collect::<HashSet<_>>();
+                assert_eq!(
+                    labels,
+                    HashSet::from(["Immediate", "For", "Until", "Indefinite"])
+                );
+                assert!(cases.iter().all(|item| item.kind == 20));
+            }
+        }
+        let source = include_str!("../../editors/fixtures/stage36a-wait-values.doria");
+        let snapshot = AnalysisSnapshot::analyze("wait-values.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+    }
+
+    #[test]
+    fn transfer_group_observed_keys_preserve_readonly_nullable_copy_results() {
+        use doriac::compiler_known_stream::{
+            READ_TRANSFER_KEY, TRANSFER_GROUP, WRITE_TRANSFER_KEY,
+        };
+        for (property, key) in [
+            ("observedReadKey", READ_TRANSFER_KEY),
+            ("observedWriteKey", WRITE_TRANSFER_KEY),
+        ] {
+            for (prefix, group_name, key_name) in [
+                (String::new(), TRANSFER_GROUP, key),
+                (
+                    format!("use {TRANSFER_GROUP} as Group; use {key} as Key;"),
+                    "Group",
+                    "Key",
+                ),
+            ] {
+                let source = format!(
+                    "{prefix} function observe({group_name} $group): ?{key_name} {{ \
+                    let $key = $group->{property}; let $copy = $key; return $key; }}"
+                );
+                let snapshot = AnalysisSnapshot::analyze("observed-transfer-key.doria", &source);
+                assert!(
+                    snapshot.diagnostics().is_empty(),
+                    "{:?}",
+                    snapshot.diagnostics()
+                );
+                let offset = source.find(&format!("->{property}")).unwrap() + 2;
+                let hover = snapshot.hover_at_offset(offset).unwrap();
+                assert!(
+                    hover
+                        .markdown
+                        .contains(&format!("${property} {{ get: ?{key} }}")),
+                    "{hover:?}"
+                );
+                for variable in ["$key", "$copy"] {
+                    let binding = snapshot
+                        .hover_at_offset(source.rfind(variable).unwrap())
+                        .unwrap();
+                    assert!(
+                        binding.markdown.contains(&format!("?{key} {variable}")),
+                        "{binding:?}"
+                    );
+                    assert!(
+                        binding.markdown.contains(INLINE_COPY_DOCUMENTATION),
+                        "{binding:?}"
+                    );
+                }
+                let members = snapshot.member_completions_at_offset(offset).unwrap();
+                assert!(members.iter().any(|item| item.label == property));
+                let invalid = source
+                    .replace(
+                        &format!("{group_name} $group"),
+                        &format!("writable {group_name} $group"),
+                    )
+                    .replace(
+                        &format!("let $key = $group->{property};"),
+                        &format!("$group->{property} = null; let $key = $group->{property};"),
+                    );
+                let (_, compiler) =
+                    doriac::analyze_source_for_ide("readonly-observed-key.doria", &invalid)
+                        .unwrap();
+                assert!(!compiler.diagnostics.is_empty());
+                let rejected = AnalysisSnapshot::analyze("readonly-observed-key.doria", &invalid);
+                assert_eq!(rejected.diagnostics(), compiler.diagnostics);
+            }
+        }
+    }
+
+    #[test]
+    fn transfer_group_read_region_uses_compiler_owned_nullable_borrow() {
+        let group = "Doria\\Std\\Io\\TransferGroup";
+        let key = doriac::compiler_known_stream::READ_TRANSFER_KEY;
+        for (prefix, group_name, key_name) in [
+            (String::new(), group, key),
+            (
+                format!("use {group} as Group; use {key} as ReadKey;"),
+                "Group",
+                "ReadKey",
+            ),
+        ] {
+            let source = format!(
+                "{prefix} function inspect({group_name} $group, {key_name} $key): void throws Doria\\Std\\Io\\IoError {{ \
+                let $region = $group->getReadRegion(key: $key); \
+                if ($region != null) {{ echo $region->length; }} }}"
+            );
+            let snapshot = AnalysisSnapshot::analyze("transfer-group-read-region.doria", &source);
+            assert!(
+                snapshot.diagnostics().is_empty(),
+                "{:?}",
+                snapshot.diagnostics()
+            );
+            let offset = source.find("getReadRegion").unwrap();
+            let member = snapshot
+                .class_member_surfaces
+                .iter()
+                .find(|surface| surface.receiver.name == group)
+                .unwrap()
+                .members
+                .iter()
+                .find(|member| member.name == "getReadRegion")
+                .unwrap();
+            assert!(
+                member.return_borrow.is_some(),
+                "compiler member surface omitted getReadRegion's retained receiver loan: {member:?}"
+            );
+            let signature =
+                format!("function {group}::getReadRegion({key} $key): ?Doria\\Std\\Io\\ByteRegion");
+            let hover = snapshot.hover_at_offset(offset).unwrap();
+            assert!(hover.markdown.contains(&signature), "{hover:?}");
+            assert!(hover.markdown.contains("**Ambient I/O:**"), "{hover:?}");
+            assert!(
+                hover.markdown.contains(
+                    "Returns an owned value that retains a readonly borrow rooted in the receiver."
+                ),
+                "{hover:?}"
+            );
+            assert!(
+                hover
+                    .markdown
+                    .contains("The source must remain available through the result's last use."),
+                "{hover:?}"
+            );
+            let members = snapshot.member_completions_at_offset(offset).unwrap();
+            assert_eq!(
+                members
+                    .iter()
+                    .find(|item| item.label == "getReadRegion")
+                    .unwrap()
+                    .detail,
+                signature
+            );
+            let argument = source.find("key:").unwrap();
+            let help = snapshot.signature_help_at_offset(argument).unwrap();
+            assert_eq!(help[0].label, signature);
+            assert_eq!(help[0].active_parameter, 0);
+            assert!(snapshot
+                .named_argument_completions_at_offset(argument)
+                .unwrap()
+                .iter()
+                .any(|item| item.label == "key:"));
+            let binding = snapshot
+                .hover_at_offset(source.find("$region").unwrap())
+                .unwrap();
+            assert!(
+                binding
+                    .markdown
+                    .contains("?Doria\\Std\\Io\\ByteRegion $region"),
+                "{binding:?}"
+            );
+            let narrowed = snapshot
+                .member_completions_at_offset(source.find("length").unwrap())
+                .unwrap();
+            assert!(narrowed.iter().any(|item| item.label == "length"));
+            assert!(!narrowed
+                .iter()
+                .any(|item| item.label == "getWritableRegion"));
+            let last_use = format!(
+                "{prefix} function change(writable {group_name} $group): void {{}} \
+                function region({group_name} $group, {key_name} $key): ?Doria\\Std\\Io\\ByteRegion throws Doria\\Std\\Io\\IoError {{ return $group->getReadRegion($key); }} \
+                function inspect(writable {group_name} $group, {key_name} $key): void throws Doria\\Std\\Io\\IoError {{ \
+                let $region = region($group, $key); if ($region != null) {{ echo $region->length; }} change($group); }}"
+            );
+            let snapshot = AnalysisSnapshot::analyze("read-region-last-use.doria", &last_use);
+            assert!(
+                snapshot.diagnostics().is_empty(),
+                "{:?}",
+                snapshot.diagnostics()
+            );
+            for invalid in [
+                last_use.replace("if ($region != null) { echo $region->length; } change($group);", "change($group); if ($region != null) { echo $region->length; }"),
+                format!("{prefix} function escape(take {group_name} $group, {key_name} $key): ?Doria\\Std\\Io\\ByteRegion throws Doria\\Std\\Io\\IoError {{ return $group->getReadRegion($key); }}"),
+            ] {
+                let (_, compiler) = doriac::analyze_source_for_ide("invalid-read-region-loan.doria", &invalid).unwrap();
+                assert!(!compiler.diagnostics.is_empty(), "{invalid}");
+                let rejected = AnalysisSnapshot::analyze("invalid-read-region-loan.doria", &invalid);
+                assert_eq!(rejected.diagnostics(), compiler.diagnostics);
+            }
+        }
+    }
+
+    #[test]
+    fn transfer_group_fetch_preserves_writable_signatures_and_region_loans() {
+        use doriac::compiler_known_stream::{
+            READ_TRANSFER_KEY, TRANSFER_GROUP, TRANSFER_WAIT_RESULT,
+        };
+        let wait = "Doria\\Std\\Io\\Wait";
+        for (prefix, group, key, wait_name, result) in [
+            (String::new(), TRANSFER_GROUP, READ_TRANSFER_KEY, wait, TRANSFER_WAIT_RESULT),
+            (
+                format!("use {TRANSFER_GROUP} as Group; use {READ_TRANSFER_KEY} as Key; use {wait} as Wait; use {TRANSFER_WAIT_RESULT} as Result;"),
+                "Group", "Key", "Wait", "Result",
+            ),
+        ] {
+            let source = format!("{prefix} function inspect(writable {group} $group, {key} $key): {result} throws Doria\\Std\\Io\\IoError {{ \
+                if ($group->getReadRegion($key) == null || $group->getReadRegion($key) == null || $group->getNextCompletion({wait_name}::Immediate) == {result}::Exhausted) {{}} \
+                if ($group->getReadRegion($key) != null && $group->getReadRegion($key) != null && $group->getNextCompletion({wait_name}::Immediate) != {result}::Exhausted) {{}} \
+                let $completion = $group->getNextCompletion(wait: {wait_name}::Immediate); \
+                $group->resubmitRead($key, 0, 1); return $completion; }}");
+            let snapshot = AnalysisSnapshot::analyze("group-fetch.doria", &source);
+            assert!(snapshot.diagnostics().is_empty(), "{:?}", snapshot.diagnostics());
+            let offset = source.find("getNextCompletion").unwrap();
+            let signature = format!("writable function {TRANSFER_GROUP}::getNextCompletion({wait} $wait): {TRANSFER_WAIT_RESULT}");
+            assert!(snapshot.hover_at_offset(offset).unwrap().markdown.contains(&signature));
+            assert_eq!(
+                snapshot.member_completions_at_offset(offset).unwrap().iter()
+                    .find(|item| item.label == "getNextCompletion").unwrap().detail,
+                signature
+            );
+            let argument = source.find("wait:").unwrap();
+            let help = snapshot.signature_help_at_offset(argument).unwrap();
+            assert_eq!(help[0].label, signature);
+            assert_eq!(help[0].active_parameter, 0);
+            assert!(snapshot.named_argument_completions_at_offset(argument).unwrap().iter()
+                .any(|item| item.label == "wait:"));
+            assert!(snapshot.hover_at_offset(source.find("$completion").unwrap()).unwrap()
+                .markdown.contains(&format!("{TRANSFER_WAIT_RESULT} $completion")));
+            let readonly = source.replace(&format!("writable {group} $group"), &format!("{group} $group"));
+            let filtered = AnalysisSnapshot::analyze("readonly-group-fetch.doria", &readonly)
+                .member_completions_at_offset(readonly.find("getNextCompletion").unwrap()).unwrap();
+            assert!(!filtered.iter().any(|item| item.label == "getNextCompletion"));
+            let conflict = format!("{prefix} function inspect(writable {group} $group, {key} $key): {result} throws Doria\\Std\\Io\\IoError {{ \
+                let $region = $group->getReadRegion($key); let $completion = $group->getNextCompletion({wait_name}::Immediate); \
+                if ($region != null) {{ echo $region->length; }} return $completion; }}");
+            let argument_conflict = format!("{prefix} function consume(?Doria\\Std\\Io\\ByteRegion $region, bool $done): int {{ \
+                if ($region != null) {{ return $region->length; }} return 0; }} \
+                function inspect(writable {group} $group, {key} $key): void throws Doria\\Std\\Io\\IoError {{ \
+                consume($group->getReadRegion($key), $group->getReadRegion($key) == null || $group->getNextCompletion({wait_name}::Immediate) == {result}::Exhausted); }}");
+            for invalid in [readonly, conflict, argument_conflict] {
+                let (_, compiler) = doriac::analyze_source_for_ide("invalid-group-fetch.doria", &invalid).unwrap();
+                assert!(!compiler.diagnostics.is_empty(), "{invalid}");
+                assert_eq!(AnalysisSnapshot::analyze("invalid-group-fetch.doria", &invalid).diagnostics(), compiler.diagnostics);
+            }
+        }
+    }
+
+    #[test]
+    fn transfer_group_resubmission_preserves_writable_directional_range_contracts() {
+        use doriac::compiler_known_stream::{
+            READ_TRANSFER_KEY, TRANSFER_GROUP, WRITE_TRANSFER_KEY,
+        };
+        for (method, key, wrong_key) in [
+            ("resubmitRead", READ_TRANSFER_KEY, WRITE_TRANSFER_KEY),
+            ("resubmitWrite", WRITE_TRANSFER_KEY, READ_TRANSFER_KEY),
+        ] {
+            for (prefix, group_name, key_name) in [
+                (String::new(), TRANSFER_GROUP, key),
+                (
+                    format!("use {TRANSFER_GROUP} as Group; use {key} as Key;"),
+                    "Group",
+                    "Key",
+                ),
+            ] {
+                let source = format!("{prefix} function inspect(writable {group_name} $group, {key_name} $key): void throws Doria\\Std\\Io\\IoError {{ \
+                    $group->{method}(key: $key, offset: 0, length: 1); $group->{method}($key, 0, 1); }}");
+                let snapshot = AnalysisSnapshot::analyze("group-resubmit.doria", &source);
+                assert!(
+                    snapshot.diagnostics().is_empty(),
+                    "{:?}",
+                    snapshot.diagnostics()
+                );
+                let offset = source.find(&format!("->{method}")).unwrap() + 2;
+                let signature = format!("writable function {TRANSFER_GROUP}::{method}({key} $key, int $offset, int $length): void");
+                let hover = snapshot.hover_at_offset(offset).unwrap();
+                assert!(hover.markdown.contains(&signature), "{hover:?}");
+                assert!(hover.markdown.contains("**Ambient I/O:**"), "{hover:?}");
+                let members = snapshot.member_completions_at_offset(offset).unwrap();
+                assert_eq!(
+                    members
+                        .iter()
+                        .find(|item| item.label == method)
+                        .unwrap()
+                        .detail,
+                    signature
+                );
+                for (name, active) in [("key:", 0), ("offset:", 1), ("length:", 2)] {
+                    let argument = source.find(name).unwrap();
+                    let help = snapshot.signature_help_at_offset(argument).unwrap();
+                    assert_eq!(help[0].label, signature);
+                    assert_eq!(help[0].active_parameter, active);
+                    assert!(snapshot
+                        .named_argument_completions_at_offset(argument)
+                        .unwrap()
+                        .iter()
+                        .any(|item| item.label == name));
+                }
+                let readonly = source.replace(
+                    &format!("writable {group_name} $group"),
+                    &format!("{group_name} $group"),
+                );
+                let filtered =
+                    AnalysisSnapshot::analyze("readonly-group-resubmit.doria", &readonly)
+                        .member_completions_at_offset(
+                            readonly.find(&format!("->{method}")).unwrap() + 2,
+                        )
+                        .unwrap();
+                assert!(!filtered
+                    .iter()
+                    .any(|item| matches!(item.label.as_str(), "resubmitRead" | "resubmitWrite")));
+                let conflict = format!("{prefix} function conflict(writable {group_name} $group, {key_name} $key, {READ_TRANSFER_KEY} $readKey): void throws Doria\\Std\\Io\\IoError {{ \
+                    let $region = $group->getReadRegion($readKey); $group->{method}($key, 0, 1); if ($region != null) {{ echo $region->length; }} }}");
+                for invalid in [
+                    readonly,
+                    source.replace(&format!("{key_name} $key"), &format!("{wrong_key} $key")),
+                    source.replace("offset: 0", "offset: 0.5"),
+                    conflict,
+                ] {
+                    let (_, compiler) =
+                        doriac::analyze_source_for_ide("invalid-group-resubmit.doria", &invalid)
+                            .unwrap();
+                    assert!(!compiler.diagnostics.is_empty(), "{invalid}");
+                    let rejected =
+                        AnalysisSnapshot::analyze("invalid-group-resubmit.doria", &invalid);
+                    assert_eq!(rejected.diagnostics(), compiler.diagnostics);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn writable_file_operations_help_preserves_compiler_access_and_effects() {
+        let source = include_str!("../../editors/fixtures/stage36a-seekable-files.doria");
+        let snapshot = AnalysisSnapshot::analyze("file-synchronization.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        for (method, parameters, arguments) in [
+            ("synchronizeData", "", ""),
+            ("synchronizeMetadata", "", ""),
+            ("setLength", "int $length", "0"),
+        ] {
+            for (offset, _) in source.match_indices(&format!("->{method}")) {
+                let offset = offset + 2;
+                let members = snapshot.member_completions_at_offset(offset).unwrap();
+                let operation = members.iter().find(|item| item.label == method).unwrap();
+                assert_eq!(operation.kind, 2);
+                assert!(
+                    operation.detail.starts_with("writable function ")
+                        && operation
+                            .detail
+                            .contains(&format!("::{method}({parameters}): void")),
+                    "{operation:?}"
+                );
+                assert!(!members.iter().any(|item| item.label == "truncate"));
+                let hover = snapshot.hover_at_offset(offset).unwrap();
+                assert!(hover.markdown.contains(&operation.detail), "{hover:?}");
+                assert!(
+                    hover.markdown.contains("Doria\\Std\\Io\\IoError"),
+                    "{hover:?}"
+                );
+                let help = snapshot
+                    .signature_help_at_offset(offset + method.len() + 1)
+                    .unwrap();
+                assert_eq!(help[0].label, operation.detail);
+                assert!(snapshot.declaration_span_at_offset(offset).is_none());
+            }
+            for file in ["ReadableFile", "WritableFile", "DuplexFile"] {
+                let invalid = format!("use Doria\\Std\\Io\\{{{file}, IoError}}; function inspect({file} $file): void throws IoError {{ $file->{method}({arguments}); }}");
+                let (_, compiler) =
+                    doriac::analyze_source_for_ide("invalid-file-synchronization.doria", &invalid)
+                        .unwrap();
+                assert!(!compiler.diagnostics.is_empty(), "{invalid}");
+                let snapshot =
+                    AnalysisSnapshot::analyze("invalid-file-synchronization.doria", &invalid);
+                assert_eq!(snapshot.diagnostics(), compiler.diagnostics);
+                let members = snapshot
+                    .member_completions_at_offset(invalid.find(&format!("->{method}")).unwrap() + 2)
+                    .unwrap();
+                assert!(!members.iter().any(|item| matches!(
+                    item.label.as_str(),
+                    "synchronizeData" | "synchronizeMetadata" | "setLength"
+                )));
+            }
+        }
+        let readable = snapshot
+            .member_completions_at_offset(
+                source.find("$read->getPosition").unwrap() + "$read->".len(),
+            )
+            .unwrap();
+        assert!(!readable.iter().any(|item| matches!(
+            item.label.as_str(),
+            "synchronizeData" | "synchronizeMetadata" | "setLength"
+        )));
+        let argument = source.find("length:").unwrap();
+        let help = snapshot.signature_help_at_offset(argument).unwrap();
+        assert_eq!(help[0].active_parameter, 0);
+        assert!(snapshot
+            .named_argument_completions_at_offset(argument)
+            .unwrap()
+            .iter()
+            .any(|item| item.label == "length:"));
+        for file in ["WritableFile", "DuplexFile"] {
+            for arguments in ["", "length: \"invalid\""] {
+                let invalid = format!("use Doria\\Std\\Io\\{{{file}, IoError}}; function inspect(writable {file} $file): void throws IoError {{ $file->setLength({arguments}); }}");
+                let (_, compiler) =
+                    doriac::analyze_source_for_ide("invalid-file-length.doria", &invalid).unwrap();
+                assert!(!compiler.diagnostics.is_empty(), "{invalid}");
+                let snapshot = AnalysisSnapshot::analyze("invalid-file-length.doria", &invalid);
+                assert_eq!(snapshot.diagnostics(), compiler.diagnostics);
+            }
+        }
+    }
+
+    #[test]
+    fn seekable_file_help_preserves_compiler_access_effects_and_named_arguments() {
+        let source = include_str!("../../editors/fixtures/stage36a-seekable-files.doria");
+        let snapshot = AnalysisSnapshot::analyze("seekable-files.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        for (offset, _) in source.match_indices("->seek") {
+            let offset = offset + 2;
+            let members = snapshot.member_completions_at_offset(offset).unwrap();
+            let seek = members.iter().find(|item| item.label == "seek").unwrap();
+            assert!(seek.detail.starts_with("writable function "), "{seek:?}");
+            assert!(
+                seek.detail
+                    .contains("int $offset, Doria\\Std\\Io\\SeekOrigin $origin): int"),
+                "{seek:?}"
+            );
+            let hover = snapshot.hover_at_offset(offset).unwrap();
+            assert!(hover.markdown.contains(&seek.detail), "{hover:?}");
+            assert!(
+                hover.markdown.contains("Doria\\Std\\Io\\IoError"),
+                "{hover:?}"
+            );
+            assert!(snapshot.declaration_span_at_offset(offset).is_none());
+        }
+        for (name, active) in [("offset:", 0), ("origin:", 1)] {
+            let offset = source.find(name).unwrap();
+            let help = snapshot.signature_help_at_offset(offset).unwrap();
+            assert_eq!(help[0].active_parameter, active);
+            assert!(snapshot
+                .named_argument_completions_at_offset(offset)
+                .unwrap()
+                .iter()
+                .any(|item| item.label == name));
+        }
+        for method in ["getPosition", "getLength"] {
+            for (offset, _) in source.match_indices(&format!("->{method}")) {
+                let offset = offset + 2;
+                let members = snapshot.member_completions_at_offset(offset).unwrap();
+                let inspection = members.iter().find(|item| item.label == method).unwrap();
+                assert_eq!(inspection.kind, 2);
+                assert!(
+                    inspection.detail.starts_with("function ")
+                        && inspection.detail.contains(&format!("::{method}(): int")),
+                    "{inspection:?}"
+                );
+                assert!(!members
+                    .iter()
+                    .any(|item| matches!(item.label.as_str(), "position" | "length")));
+                let hover = snapshot.hover_at_offset(offset).unwrap();
+                assert!(hover.markdown.contains(&inspection.detail), "{hover:?}");
+                assert!(
+                    hover.markdown.contains("Doria\\Std\\Io\\IoError"),
+                    "{hover:?}"
+                );
+                let help = snapshot
+                    .signature_help_at_offset(offset + method.len() + 1)
+                    .unwrap();
+                assert_eq!(help[0].label, inspection.detail);
+                assert!(snapshot.declaration_span_at_offset(offset).is_none());
+            }
+        }
+        for case in ["Start", "Current", "End"] {
+            let offset = source.find(&format!("Origin::{case}")).unwrap() + "Origin::".len();
+            let cases = snapshot.static_completions_at_offset(offset).unwrap();
+            assert_eq!(
+                cases
+                    .iter()
+                    .filter(|item| item.kind == 20)
+                    .map(|item| item.label.as_str())
+                    .collect::<HashSet<_>>(),
+                HashSet::from(["Start", "Current", "End"])
+            );
+        }
+        for file in ["ReadableFile", "WritableFile", "DuplexFile"] {
+            for invalid in [
+                format!("use Doria\\Std\\Io\\{{{file}, SeekOrigin, IoError}}; function inspect({file} $file): void throws IoError {{ $file->seek(0, SeekOrigin::Start); }}"),
+                format!("use Doria\\Std\\Io\\{{{file}, IoError}}; function inspect({file} $file): void throws IoError {{ let $position = $file->position; }}"),
+                format!("use Doria\\Std\\Io\\{{{file}, IoError}}; function inspect({file} $file): void throws IoError {{ let $length = $file->length; }}"),
+                format!("use Doria\\Std\\Io\\{{{file}, IoError}}; function inspect(writable {file} $file): void throws IoError {{ $file->seek(0); }}"),
+            ] {
+                let (_, compiler) = doriac::analyze_source_for_ide("invalid-seekable-file.doria", &invalid).unwrap();
+                assert!(!compiler.diagnostics.is_empty(), "{invalid}");
+                let snapshot = AnalysisSnapshot::analyze("invalid-seekable-file.doria", &invalid);
+                assert_eq!(snapshot.diagnostics(), compiler.diagnostics);
+            }
+        }
+    }
+
+    #[test]
+    fn transfer_group_controls_preserve_compiler_signature_and_named_arguments() {
+        let source = include_str!("../../editors/fixtures/stage36a-transfer-group-controls.doria");
+        let snapshot = AnalysisSnapshot::analyze("transfer-group-controls.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        let signature = "writable function Doria\\Std\\Io\\ReadinessSet::begin(take Doria\\Std\\Io\\TransferPlan $plan, ?Doria\\Std\\Time\\Deadline $deadline, ?Doria\\Std\\Concurrency\\CancellationToken $cancellation): Doria\\Std\\Io\\TransferGroup";
+        let offset = source.find("->begin").unwrap() + 2;
+        let members = snapshot.member_completions_at_offset(offset).unwrap();
+        let begin = members.iter().find(|item| item.label == "begin").unwrap();
+        assert_eq!(begin.detail, signature);
+        assert!(begin
+            .documentation
+            .as_deref()
+            .unwrap()
+            .contains("Default arguments available for `$deadline`, `$cancellation`."));
+        assert!(snapshot
+            .hover_at_offset(offset)
+            .unwrap()
+            .markdown
+            .contains(signature));
+        assert!(snapshot.declaration_span_at_offset(offset).is_none());
+        for (name, active) in [("deadline:", 1), ("cancellation:", 2)] {
+            let argument = source.find(name).unwrap();
+            let help = snapshot.signature_help_at_offset(argument).unwrap();
+            assert_eq!(help[0].label, signature);
+            assert_eq!(help[0].active_parameter, active);
+            assert!(snapshot
+                .named_argument_completions_at_offset(argument)
+                .unwrap()
+                .iter()
+                .any(|item| item.label == name));
+        }
+    }
+
+    #[test]
+    fn transfer_group_observation_help_preserves_approved_contract() {
+        let documentation =
+            transfer_result_documentation(doriac::compiler_known_stream::TRANSFER_WAIT_RESULT)
+                .unwrap();
+        for expected in [
+            "Doria\\Std\\Io\\TransferGroup",
+            "readonly observedReadKey: ?ReadTransferKey",
+            "readonly observedWriteKey: ?WriteTransferKey",
+            "Only the fetched operation's direction is present",
+            "both are null before the first fetch and after timeout or exhaustion",
+            "original opaque stamp and mixed-plan operation position",
+            "published before an original owned checked Error propagates",
+            "If wait infrastructure fails alongside a preserved transfer completion or owned transfer error, the infrastructure error is reported first",
+            "The original completion or owned error remains available for a subsequent fetch; it is not discarded, relabeled, or reconstructed",
+            "preserved across resubmission",
+            "Key copies retain no group, storage, or source loans or resources",
+            "Observed keys do not replace successful completion payload keys",
+            "A retired read's known completed prefix may be available through getReadRegion before fetching; observed keys are published only by fetching",
+            "Fetching and cleanup do not repeat retired adapter callbacks",
+            "An original queued IoError remains owned until fetched or group destruction",
+            "begin consumes the plan on success and failure",
+            "plan-validation and native-setup IoError use IoOperation::Configure / IoTarget::TransferGroup",
+            "preserving reason and system-code details",
+            "An adapter's original owned checked Error propagates unchanged, not relabeled or reconstructed",
+            "Failed setup releases plan loans, leaves no active group, and submits no work",
+            "The compiler declares writable getNextCompletion(Wait $wait): TransferWaitResult",
+            "Tooling validation and pinned-compiler integration remain pending",
+        ] {
+            assert!(documentation.contains(expected), "{documentation}");
+        }
+        for rejected in ["TransferIdentity", "TransferSession"] {
+            assert!(!documentation.contains(rejected), "{documentation}");
+        }
+    }
+
+    #[test]
+    fn transfer_result_enum_help_preserves_payloads_copy_and_nullable_outcomes() {
+        use doriac::compiler_known_stream::{
+            READ_TRANSFER_KEY, TRANSFER_COMPLETION, TRANSFER_WAIT_RESULT, WRITE_TRANSFER_KEY,
+        };
+
+        for (case, key, outcome, success) in [
+            (
+                "Read",
+                READ_TRANSFER_KEY,
+                "Doria\\Std\\Io\\ReadOutcome",
+                "Data",
+            ),
+            (
+                "Write",
+                WRITE_TRANSFER_KEY,
+                "Doria\\Std\\Io\\WriteOutcome",
+                "Accepted",
+            ),
+        ] {
+            for (prefix, event, result) in [
+                (String::new(), TRANSFER_COMPLETION, TRANSFER_WAIT_RESULT),
+                (format!("use {TRANSFER_COMPLETION} as Event; use {TRANSFER_WAIT_RESULT} as Observation;"), "Event", "Observation"),
+            ] {
+                let other_case = if case == "Read" { "Write" } else { "Read" };
+                let mut source = format!(
+                    r#"{prefix}
+function passEvent({event} $event): {event} {{ return $event; }}
+function passResult({result} $result): {result} {{ return $result; }}
+function matchesOutcome({event} $completion, ?{outcome} $expected): bool {{
+    return match ($completion) {{
+        {event}::{case}($ignoredKey, $actual) => $actual == $expected && !($actual != $expected),
+        {event}::{other_case}($ignoredKey, $actual) => false,
+    }};
+}}
+function inspect({key} $key, ?{outcome} $outcome): void {{
+    let $completion = {event}::{case}(key: $key, outcome: $outcome);
+    let $empty = {event}::{case}($key, null);
+    let $zero = {event}::{case}($key, {outcome}::{success}(0));
+    let $blocked = {event}::{case}($key, {outcome}::WouldBlock);
+    matchesOutcome($completion, $outcome); matchesOutcome($empty, null);
+    let $eventCopy = passEvent($completion); passEvent($completion);
+    ?{event} $maybeEvent = $empty;
+    if ($maybeEvent != null) {{ passEvent($maybeEvent); }}
+    let $completed = {result}::Completed(completion: $completion);
+    let $copy = passResult($completed); passResult($completed);
+    ?{result} $optional = $completed;
+    if ($optional != null) {{ passResult($optional); }}
+    let $timeout = {result}::TimedOut;
+    let $exhausted = {result}::Exhausted;
+}}
+"#
+                );
+                if case == "Read" {
+                    source.push_str(&format!(
+                        "function terminal({key} $key): void {{ \
+                        {event}::Read($key, {outcome}::EndOfStream); \
+                        {event}::Read($key, {outcome}::TimedOut); }}"
+                    ));
+                }
+                let snapshot = AnalysisSnapshot::analyze("transfer-result-help.doria", &source);
+                assert!(snapshot.diagnostics().is_empty(), "{:?}", snapshot.diagnostics());
+                for (spelling, name, parameter) in [(event, TRANSFER_COMPLETION, "$event"), (result, TRANSFER_WAIT_RESULT, "$result")] {
+                    let offset = source.find(&format!("{spelling} {parameter}")).unwrap();
+                    let hover = snapshot.hover_at_offset(offset).unwrap();
+                    assert!(hover.markdown.contains(&format!("enum {name}")), "{hover:?}");
+                    assert!(hover.markdown.contains("Nominal Copy enum"), "{hover:?}");
+                    assert!(hover.markdown.contains(transfer_result_documentation(name).unwrap()), "{hover:?}");
+                    assert!(snapshot.declaration_span_at_offset(offset).is_none());
+                }
+                for (name, case, fields, parameter, active, labels) in [
+                    (TRANSFER_COMPLETION, case, format!("{key} $key, ?{outcome} $outcome"), "outcome:", 1, vec!["Read", "Write"]),
+                    (TRANSFER_WAIT_RESULT, "Completed", format!("{TRANSFER_COMPLETION} $completion"), "completion:", 0, vec!["Completed", "TimedOut", "Exhausted"]),
+                ] {
+                    let offset = source.find(&format!("::{case}(")).unwrap() + 2;
+                    let signature = format!("{name}::{case}({fields}): {name}");
+                    let hover = snapshot.hover_at_offset(offset).unwrap();
+                    assert!(hover.markdown.contains(&signature), "{hover:?}");
+                    assert!(hover.markdown.contains("Constructs a Copy enum value"), "{hover:?}");
+                    assert!(hover.markdown.contains(transfer_result_documentation(name).unwrap()), "{hover:?}");
+                    let argument = source.find(parameter).unwrap();
+                    let help = snapshot.signature_help_at_offset(argument).unwrap();
+                    assert_eq!(help[0].label, signature);
+                    assert_eq!(help[0].active_parameter, active);
+                    assert!(snapshot.named_argument_completions_at_offset(argument).unwrap().iter().any(|item| item.label == parameter));
+                    let completions = snapshot.static_completions_at_offset(offset).unwrap();
+                    assert_eq!(completions.iter().map(|item| item.label.as_str()).collect::<HashSet<_>>(), labels.into_iter().collect());
+                    assert!(completions.iter().all(|item| item.kind == 20 && item.documentation.as_ref().unwrap().contains(transfer_result_documentation(name).unwrap())));
+                    assert!(snapshot.declaration_span_at_offset(offset).is_none());
+                }
+                for case in ["TimedOut", "Exhausted"] {
+                    let offset = source.find(&format!("{result}::{case}")).unwrap() + result.len() + 2;
+                    let hover = snapshot.hover_at_offset(offset).unwrap();
+                    assert!(hover.markdown.contains(&format!("{TRANSFER_WAIT_RESULT}::{case}: {TRANSFER_WAIT_RESULT}")), "{hover:?}");
+                    assert!(hover.markdown.contains(transfer_result_documentation(TRANSFER_WAIT_RESULT).unwrap()), "{hover:?}");
+                }
+                for (variable, ty) in [
+                    ("$completion", TRANSFER_COMPLETION.to_string()),
+                    ("$eventCopy", TRANSFER_COMPLETION.to_string()),
+                    ("$maybeEvent", format!("?{event}")),
+                    ("$completed", TRANSFER_WAIT_RESULT.to_string()),
+                    ("$copy", TRANSFER_WAIT_RESULT.to_string()),
+                    ("$optional", format!("?{result}")),
+                    ("$actual", format!("?{outcome}")),
+                ] {
+                    let offset = if variable == "$completion" {
+                        source.find("let $completion").unwrap() + "let ".len()
+                    } else {
+                        source.find(variable).unwrap()
+                    };
+                    let hover = snapshot.hover_at_offset(offset).unwrap();
+                    assert!(hover.markdown.contains(&format!("{ty} {variable}")), "{hover:?}");
+                }
+                for invalid in [
+                    source.replace("key: $key", "key: 0"),
+                    source.replace("outcome: $outcome", "outcome: 1"),
+                    source.replace("completion: $completion", "completion: $key"),
+                    source.replace(&format!("?{outcome} $expected"), &format!("?{TRANSFER_WAIT_RESULT} $expected")),
+                ] {
+                    let (_, compiler) = doriac::analyze_source_for_ide("invalid-transfer-result.doria", &invalid).unwrap();
+                    assert!(!compiler.diagnostics.is_empty(), "{invalid}");
+                    let snapshot = AnalysisSnapshot::analyze("invalid-transfer-result.doria", &invalid);
+                    assert_eq!(snapshot.diagnostics(), compiler.diagnostics);
+                }
+            }
+        }
+        for name in [
+            "App\\TransferCompletion",
+            "App\\TransferWaitResult",
+            "TransferCompletion",
+            "TransferWaitResult",
+        ] {
+            assert!(transfer_result_documentation(name).is_none());
+        }
+    }
+
+    #[test]
+    fn cancellation_source_help_uses_compiler_declarations_and_member_facts() {
+        use doriac::compiler_known_concurrency::{
+            CANCELLATION_ERROR, CANCELLATION_SOURCE, CANCELLATION_TOKEN,
+        };
+
+        for (prefix, source_name, token_name, error_name) in [
+            (String::new(), CANCELLATION_SOURCE, CANCELLATION_TOKEN, CANCELLATION_ERROR),
+            (format!("use {CANCELLATION_SOURCE} as Source; use {CANCELLATION_TOKEN} as Token; use {CANCELLATION_ERROR} as Failure; "), "Source", "Token", "Failure"),
+        ] {
+            let source = format!(
+                "{prefix}function inspect(writable {source_name} $source, {token_name} $view): {token_name} throws {error_name} {{ \
+                let writable $local = new {source_name}(); \
+                let $token = $source->token; let $copy = $token; \
+                let $requested = $source->cancellationRequested; $source->cancel(); return $copy; }}"
+            );
+            let snapshot = AnalysisSnapshot::analyze("cancellation-help.doria", &source);
+            assert!(snapshot.diagnostics().is_empty(), "{:?}", snapshot.diagnostics());
+            for (needle, expected) in [
+                (format!("{source_name} $source"), format!("class {CANCELLATION_SOURCE}")),
+                (format!("{token_name} $view"), CANCELLATION_TOKEN_DOCUMENTATION.to_string()),
+            ] {
+                let offset = source.find(&needle).unwrap();
+                let hover = snapshot.hover_at_offset(offset).unwrap();
+                assert!(hover.markdown.contains(&expected), "{hover:?}");
+                assert!(snapshot.declaration_span_at_offset(offset).is_none());
+            }
+            let offset = source.find("->cancel").unwrap() + 2;
+            let members = snapshot.member_completions_at_offset(offset).unwrap();
+            for (name, detail) in [
+                ("token", format!("$token {{ get: {CANCELLATION_TOKEN} }}")),
+                ("cancellationRequested", "$cancellationRequested { get: bool }".to_string()),
+                ("cancel", format!("writable function {CANCELLATION_SOURCE}::cancel(): void throws {CANCELLATION_ERROR}")),
+            ] {
+                let member = members.iter().find(|member| member.label == name).unwrap();
+                assert_eq!(member.detail, detail);
+                let needle = if member.kind == 2 { format!("->{name}(") } else { format!("->{name}") };
+                let offset = source.find(&needle).unwrap() + 2;
+                let hover = snapshot.hover_at_offset(offset).unwrap();
+                assert!(hover.markdown.contains(&detail), "{hover:?}");
+                assert!(snapshot.declaration_span_at_offset(offset).is_none());
+                if member.kind == 10 {
+                    assert!(member.documentation.as_deref().unwrap().contains("Readonly"));
+                    assert!(!member.detail.contains("set("));
+                } else {
+                    let help = snapshot.signature_help_at_offset(offset + name.len() + 1).unwrap();
+                    assert_eq!(help[0].label, detail);
+                }
+            }
+            for unapproved in ["create", "getToken", "requestCancellation"] {
+                assert!(!members.iter().any(|member| member.label == unapproved));
+            }
+            let readonly = source.replace(&format!("writable {source_name} $source"), &format!("{source_name} $source"));
+            let filtered = AnalysisSnapshot::analyze("readonly-cancellation-help.doria", &readonly)
+                .member_completions_at_offset(readonly.find("->cancel").unwrap() + 2).unwrap();
+            assert!(!filtered.iter().any(|member| member.label == "cancel"));
+            let constructor = source.find(&format!("new {source_name}(")).unwrap() + 4 + source_name.len() + 1;
+            let help = snapshot.signature_help_at_offset(constructor).unwrap();
+            assert!(help[0].label.contains(&format!("{CANCELLATION_SOURCE}::__construct()")), "{help:?}");
+
+            for invalid in [
+                format!("{prefix}function inspect({source_name} $source): void throws {error_name} {{ $source->cancel(); }}"),
+                format!("{prefix}function inspect(writable {source_name} $source): void {{ $source->cancellationRequested = false; }}"),
+                format!("{prefix}function inspect(writable {source_name} $source, {token_name} $token): void {{ $source->token = $token; }}"),
+                format!("{prefix}function inspect(): void {{ let $token = new {token_name}(); }}"),
+            ] {
+                let snapshot = AnalysisSnapshot::analyze("invalid-cancellation-help.doria", &invalid);
+                let (_, compiler) = doriac::analyze_source_for_ide("invalid-cancellation-help.doria", &invalid).unwrap();
+                assert!(!compiler.diagnostics.is_empty(), "{invalid}");
+                assert_eq!(snapshot.diagnostics(), compiler.diagnostics);
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_token_comparison_help_preserves_shared_state_identity() {
+        let source = include_str!("../../editors/fixtures/stage36a-cancellation.doria");
+        let snapshot = AnalysisSnapshot::analyze("cancellation-comparison-help.doria", source);
+        for needle in [
+            "$first == $second",
+            "$token != $other",
+            "$optional == $token",
+        ] {
+            let hover = snapshot
+                .hover_at_offset(source.find(needle).unwrap())
+                .unwrap();
+            assert!(
+                hover.markdown.contains(CANCELLATION_TOKEN_DOCUMENTATION),
+                "{hover:?}"
+            );
+            assert!(
+                !hover.markdown.contains(NON_OWNING_INLINE_DOCUMENTATION),
+                "{hover:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn standard_stream_accessors_and_copy_help_use_compiler_metadata() {
+        use doriac::compiler_known_stream::{STANDARD_ERROR, STANDARD_INPUT, STANDARD_OUTPUT};
+        let source = include_str!("../../editors/fixtures/stage36a-standard-streams.doria");
+        let snapshot = AnalysisSnapshot::analyze("standard-streams.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        for (property, ty) in [
+            ("input", STANDARD_INPUT),
+            ("output", STANDARD_OUTPUT),
+            ("error", STANDARD_ERROR),
+        ] {
+            let offset = source.find(&format!("Devices::{property}")).unwrap() + "Devices::".len();
+            let members = snapshot.static_completions_at_offset(offset).unwrap();
+            let getter = members.iter().find(|item| item.label == property).unwrap();
+            assert_eq!(getter.kind, 10);
+            assert_eq!(getter.detail, format!("static ${property} {{ get: {ty} }}"));
+            assert!(!getter.detail.contains("set("));
+            assert!(getter
+                .documentation
+                .as_deref()
+                .unwrap()
+                .contains("Static accessor"));
+            let hover = snapshot.hover_at_offset(offset).unwrap();
+            assert!(hover.markdown.contains(&getter.detail), "{hover:?}");
+            assert!(hover.markdown.contains("Static accessor"), "{hover:?}");
+            assert!(!hover.markdown.contains("Readonly receiver"), "{hover:?}");
+            assert!(snapshot.declaration_span_at_offset(offset).is_none());
+        }
+        for needle in ["$inputCopy =", "$output =", "$error =", "$optional ="] {
+            let hover = snapshot
+                .hover_at_offset(source.find(needle).unwrap())
+                .unwrap();
+            assert!(
+                hover.markdown.contains(STANDARD_STREAM_DOCUMENTATION),
+                "{hover:?}"
+            );
+            assert!(
+                hover.markdown.contains(NON_OWNING_INLINE_DOCUMENTATION),
+                "{hover:?}"
+            );
+            assert!(
+                !hover.markdown.contains(CANCELLATION_TOKEN_DOCUMENTATION),
+                "{hover:?}"
+            );
+        }
+        for ty in [STANDARD_INPUT, STANDARD_OUTPUT, STANDARD_ERROR] {
+            for invalid in [
+                format!("function inspect(): void {{ new {ty}(); }}"),
+                format!("function inspect(writable {ty} $view): void {{ $view->close(); }}"),
+            ] {
+                let (_, compiler) =
+                    doriac::analyze_source_for_ide("invalid-standard-stream.doria", &invalid)
+                        .unwrap();
+                assert!(!compiler.diagnostics.is_empty(), "{invalid}");
+                let rejected = AnalysisSnapshot::analyze("invalid-standard-stream.doria", &invalid);
+                assert_eq!(rejected.diagnostics(), compiler.diagnostics);
+            }
+        }
+    }
+
+    #[test]
+    fn inline_copy_help_distinguishes_managed_cancellation_from_non_owning_values() {
+        use doriac::inline_value::InlineValueKind;
+
+        for kind in [
+            InlineValueKind::Duration,
+            InlineValueKind::Deadline,
+            InlineValueKind::RegistrationKey,
+            InlineValueKind::ReadTransferKey,
+            InlineValueKind::WriteTransferKey,
+            InlineValueKind::CancellationToken,
+            InlineValueKind::StandardInput,
+            InlineValueKind::StandardOutput,
+            InlineValueKind::StandardError,
+        ] {
+            let documentation = inline_value_documentation(kind);
+            assert!(documentation.contains(INLINE_COPY_DOCUMENTATION));
+            assert_eq!(
+                documentation.contains(NON_OWNING_INLINE_DOCUMENTATION),
+                !kind.requires_owned_cleanup(),
+                "{kind:?}: {documentation}"
+            );
+            assert_eq!(
+                documentation.contains(CANCELLATION_TOKEN_DOCUMENTATION),
+                kind == InlineValueKind::CancellationToken,
+                "{kind:?}: {documentation}"
+            );
+            assert_eq!(
+                documentation.contains(STANDARD_STREAM_DOCUMENTATION),
+                matches!(
+                    kind,
+                    InlineValueKind::StandardInput
+                        | InlineValueKind::StandardOutput
+                        | InlineValueKind::StandardError
+                ),
+                "{kind:?}: {documentation}"
+            );
+            if matches!(
+                kind,
+                InlineValueKind::StandardInput
+                    | InlineValueKind::StandardOutput
+                    | InlineValueKind::StandardError
+            ) {
+                assert!(!kind.requires_owned_cleanup());
+            }
+        }
+        assert!(InlineValueKind::CancellationToken.requires_owned_cleanup());
+        for claim in [
+            "retains one shared state claim",
+            "releases it during ordinary cleanup",
+            "Borrowed arguments acquire no ownership claim",
+            "allocate no second state or native signal",
+            "Tokens may outlive their source",
+            "destroying its CancellationSource, do not request cancellation",
+            "`==` compares shared cancellation-state identity; `!=` is its inverse",
+            "distinct live states differ",
+            "Ordinary nullable equality applies",
+            "Borrowed comparison acquires no ownership claim",
+            "no ordering, hashing, integer conversion, or address API",
+        ] {
+            assert!(CANCELLATION_TOKEN_DOCUMENTATION.contains(claim), "{claim}");
+        }
+    }
+
+    #[test]
+    fn user_cancellation_token_name_does_not_grant_standard_copy_semantics() {
+        let source = "namespace App; class CancellationToken {} \
+            function consume(take CancellationToken $value): void {} \
+            function inspect(CancellationToken $token): void { \
+            let $second = $token; consume($token); }";
+        for namespace in ["App", "App\\Concurrency"] {
+            let source = source.replace("namespace App;", &format!("namespace {namespace};"));
+            let snapshot = AnalysisSnapshot::analyze("user-cancellation-token.doria", &source);
+            let (_, compiler) =
+                doriac::analyze_source_for_ide("user-cancellation-token.doria", &source).unwrap();
+            assert!(!compiler.diagnostics.is_empty());
+            assert_eq!(snapshot.diagnostics(), compiler.diagnostics);
+            assert!(doriac::inline_value::InlineValueKind::for_name(&format!(
+                "{namespace}\\CancellationToken"
+            ))
+            .is_none());
+            let hover = snapshot
+                .hover_at_offset(source.find("CancellationToken").unwrap())
+                .unwrap();
+            assert!(
+                hover.markdown.contains("class CancellationToken"),
+                "{hover:?}"
+            );
+            assert!(
+                !hover.markdown.contains(INLINE_COPY_DOCUMENTATION),
+                "{hover:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_copy_help_preserves_nominal_identity_and_opaque_construction() {
+        for name in [
+            doriac::compiler_known_time::DURATION,
+            doriac::compiler_known_time::DEADLINE,
+            doriac::compiler_known_stream::READ_TRANSFER_KEY,
+            doriac::compiler_known_stream::WRITE_TRANSFER_KEY,
+        ] {
+            for (prefix, spelling) in [
+                (String::new(), name),
+                (format!("use {name} as InlineValue; "), "InlineValue"),
+            ] {
+                let source = format!(
+                    "{prefix}function pass({spelling} $value): {spelling} {{ return $value; }} \
+                    function inspect({spelling} $original): void {{ \
+                    let $copy = $original; pass($original); ?{spelling} $optional = $original; \
+                    pass($original); if ($optional != null) {{ pass($optional); }} }}"
+                );
+                let snapshot = AnalysisSnapshot::analyze("inline-copy-help.doria", &source);
+                assert!(
+                    snapshot.diagnostics().is_empty(),
+                    "{:?}",
+                    snapshot.diagnostics()
+                );
+                let type_offset =
+                    source.find(&format!("{spelling} $original")).unwrap() + spelling.len() - 1;
+                let hover = snapshot.hover_at_offset(type_offset).unwrap();
+                assert!(hover.markdown.contains(name), "{hover:?}");
+                let documentation = inline_value_documentation(
+                    doriac::inline_value::InlineValueKind::for_name(name).unwrap(),
+                );
+                assert!(hover.markdown.contains(&documentation), "{hover:?}");
+                assert!(
+                    hover.markdown.contains(INLINE_COPY_DOCUMENTATION),
+                    "{hover:?}"
+                );
+                assert_eq!(
+                    hover.markdown.contains(DURATION_NUMERIC_DOCUMENTATION),
+                    name == doriac::compiler_known_time::DURATION,
+                    "{hover:?}"
+                );
+                assert_eq!(
+                    hover.markdown.contains(DEADLINE_DOCUMENTATION),
+                    name == doriac::compiler_known_time::DEADLINE,
+                    "{hover:?}"
+                );
+                assert!(!hover.markdown.contains("class "), "{hover:?}");
+                assert!(snapshot.declaration_span_at_offset(type_offset).is_none());
+                assert!(snapshot
+                    .semantic_token_spans()
+                    .iter()
+                    .any(|(span, kind, _)| span_contains(*span, type_offset) && *kind == 1));
+                for variable in ["$copy", "$original", "$optional"] {
+                    let hover = snapshot
+                        .hover_at_offset(source.rfind(variable).unwrap())
+                        .unwrap();
+                    assert!(hover.markdown.contains(&documentation), "{hover:?}");
+                    assert!(
+                        hover.markdown.contains(INLINE_COPY_DOCUMENTATION),
+                        "{hover:?}"
+                    );
+                    assert_eq!(
+                        hover.markdown.contains(DURATION_NUMERIC_DOCUMENTATION),
+                        name == doriac::compiler_known_time::DURATION,
+                        "{hover:?}"
+                    );
+                    assert_eq!(
+                        hover.markdown.contains(DEADLINE_DOCUMENTATION),
+                        name == doriac::compiler_known_time::DEADLINE,
+                        "{hover:?}"
+                    );
+                }
+                let source = format!("{prefix}function inspect(): void {{ new {spelling}(); }}");
+                let snapshot = AnalysisSnapshot::analyze("opaque-copy-construction.doria", &source);
+                assert!(
+                    snapshot
+                        .diagnostics()
+                        .iter()
+                        .any(|diagnostic| diagnostic.code == "E0307"),
+                    "{:?}",
+                    snapshot.diagnostics()
+                );
+                assert!(snapshot
+                    .signature_help_at_offset(source.find("();").unwrap() + 1)
+                    .is_none());
+            }
+            let short = name.rsplit('\\').next().unwrap();
+            let source = format!(
+                "namespace App; class {short} {{ function __construct(string $label) {{}} }} \
+                function inspect(): void {{ let $value = new {short}(\"owned\"); }}"
+            );
+            let snapshot = AnalysisSnapshot::analyze("user-inline-copy-name.doria", &source);
+            assert!(
+                snapshot.diagnostics().is_empty(),
+                "{:?}",
+                snapshot.diagnostics()
+            );
+            let hover = snapshot
+                .hover_at_offset(source.find(short).unwrap())
+                .unwrap();
+            assert!(
+                hover.markdown.contains(&format!("class {short}")),
+                "{hover:?}"
+            );
+            assert!(!hover.markdown.contains(INLINE_COPY_DOCUMENTATION));
+            assert!(!hover.markdown.contains(DURATION_NUMERIC_DOCUMENTATION));
+            assert!(snapshot
+                .signature_help_at_offset(source.find("\"owned\"").unwrap())
+                .is_some());
+        }
+    }
+
+    #[test]
+    fn transfer_plan_help_preserves_mixed_generic_signatures() {
+        use doriac::compiler_known_stream::TRANSFER_PLAN;
+
+        for (prefix, plan) in [
+            (String::new(), TRANSFER_PLAN),
+            (format!("use {TRANSFER_PLAN} as Plan;"), "Plan"),
+        ] {
+            let source = format!(
+                r#"{prefix}
+use Doria\Std\Io\{{PendingReadableStream, PendingWritableStream, RegistrationKey,
+    WritableByteRegion, ByteRegion, IoError}};
+function readThenWrite<R implements PendingReadableStream, W implements PendingWritableStream>(
+    RegistrationKey<R> $readKey, writable WritableByteRegion $destination,
+    RegistrationKey<W> $writeKey, ByteRegion $source
+): {plan} throws IoError {{
+    return {plan}::read(key: $readKey, destination: $destination)
+        ->andWriteTo(key: $writeKey, source: $source);
+}}
+function writeThenRead<R implements PendingReadableStream, W implements PendingWritableStream>(
+    RegistrationKey<R> $readKey, writable WritableByteRegion $destination,
+    RegistrationKey<W> $writeKey, ByteRegion $source
+): {plan} throws IoError {{
+    return {plan}::writeTo(key: $writeKey, source: $source)
+        ->andReadFrom(key: $readKey, destination: $destination);
+}}
+"#
+            );
+            let snapshot = AnalysisSnapshot::analyze("mixed-plan-help.doria", &source);
+            assert!(
+                snapshot.diagnostics().is_empty(),
+                "{:?}",
+                snapshot.diagnostics()
+            );
+            for (method, mode, bound, key_type, region, region_type) in [
+                (
+                    "read",
+                    "static",
+                    "PendingReadableStream",
+                    "R",
+                    "destination",
+                    "writable Doria\\Std\\Io\\WritableByteRegion",
+                ),
+                (
+                    "andReadFrom",
+                    "consuming",
+                    "PendingReadableStream",
+                    "R",
+                    "destination",
+                    "writable Doria\\Std\\Io\\WritableByteRegion",
+                ),
+                (
+                    "writeTo",
+                    "static",
+                    "PendingWritableStream",
+                    "W",
+                    "source",
+                    "Doria\\Std\\Io\\ByteRegion",
+                ),
+                (
+                    "andWriteTo",
+                    "consuming",
+                    "PendingWritableStream",
+                    "W",
+                    "source",
+                    "Doria\\Std\\Io\\ByteRegion",
+                ),
+            ] {
+                let offset = source.find(&format!("{method}(key:")).unwrap();
+                let hover = snapshot.hover_at_offset(offset).unwrap();
+                assert!(hover.markdown.contains(&format!("{mode} function {TRANSFER_PLAN}::{method}<T implements Doria\\Std\\Io\\{bound}>")), "{hover:?}");
+                assert!(hover.markdown.contains(&format!("(Doria\\Std\\Io\\RegistrationKey<{key_type}> $key, {region_type} ${region}): {TRANSFER_PLAN}")), "{hover:?}");
+                assert!(
+                    hover.markdown.contains("Doria\\Std\\Io\\IoError"),
+                    "{hover:?}"
+                );
+                let argument = offset + source[offset..].find(&format!("{region}:")).unwrap();
+                let help = snapshot.signature_help_at_offset(argument).unwrap();
+                assert!(hover.markdown.contains(&help[0].label), "{help:?}");
+                assert_eq!(help[0].active_parameter, 1);
+                assert!(snapshot
+                    .named_argument_completions_at_offset(argument)
+                    .unwrap()
+                    .iter()
+                    .any(|item| item.label == format!("{region}:")));
+                let members = if mode == "static" {
+                    snapshot.static_completions_at_offset(offset).unwrap()
+                } else {
+                    snapshot.member_completions_at_offset(offset).unwrap()
+                };
+                assert!(
+                    members.iter().any(|item| item.label == method),
+                    "{members:?}"
+                );
+                assert!(
+                    !members.iter().any(|item| matches!(
+                        item.label.as_str(),
+                        "andRead" | "readFrom" | "write" | "andWrite"
+                    )),
+                    "{members:?}"
+                );
+                assert!(snapshot.declaration_span_at_offset(offset).is_none());
+            }
+            for (approved, rejected) in [
+                ("::read(", "::readFrom("),
+                ("->andReadFrom(", "->andRead("),
+                ("::writeTo(", "::write("),
+                ("->andWriteTo(", "->andWrite("),
+            ] {
+                let invalid = source.replace(approved, rejected);
+                let (_, compiler) =
+                    doriac::analyze_source_for_ide("rejected-plan-name.doria", &invalid).unwrap();
+                assert!(!compiler.diagnostics.is_empty(), "{invalid}");
+                let snapshot = AnalysisSnapshot::analyze("rejected-plan-name.doria", &invalid);
+                assert_eq!(snapshot.diagnostics(), compiler.diagnostics);
+            }
+        }
+    }
+
+    #[test]
+    fn transfer_plan_lookup_help_preserves_readonly_access_and_copy_results() {
+        use doriac::compiler_known_stream::{READ_TRANSFER_KEY, TRANSFER_PLAN, WRITE_TRANSFER_KEY};
+
+        for (method, key, documentation) in [
+            (
+                "getReadKey",
+                READ_TRANSFER_KEY,
+                READ_TRANSFER_KEY_DOCUMENTATION,
+            ),
+            (
+                "getWriteKey",
+                WRITE_TRANSFER_KEY,
+                WRITE_TRANSFER_KEY_DOCUMENTATION,
+            ),
+        ] {
+            for (prefix, plan, result) in [
+                (String::new(), TRANSFER_PLAN, key),
+                (
+                    format!("use {TRANSFER_PLAN} as Plan; use {key} as OperationKey;"),
+                    "Plan",
+                    "OperationKey",
+                ),
+            ] {
+                let source = format!(
+                    "{prefix} function discard(take {plan} $plan): void {{}} \
+                    function lookup(take {plan} $plan): {result} throws Doria\\Std\\Io\\IoError {{ \
+                    let $key = $plan->{method}(position: 0); let $copy = $key; \
+                    discard($plan); return $copy; }}"
+                );
+                let snapshot = AnalysisSnapshot::analyze("transfer-key-lookup.doria", &source);
+                assert!(
+                    snapshot.diagnostics().is_empty(),
+                    "{:?}",
+                    snapshot.diagnostics()
+                );
+                let offset = source.find(&format!("->{method}")).unwrap() + 2;
+                let signature = format!("function {TRANSFER_PLAN}::{method}(int $position): {key}");
+                let hover = snapshot.hover_at_offset(offset).unwrap();
+                assert!(hover.markdown.contains(&signature), "{hover:?}");
+                assert!(hover.markdown.contains("**Ambient I/O:**"), "{hover:?}");
+                assert!(!hover.markdown.contains("borrow rooted in"), "{hover:?}");
+                let members = snapshot.member_completions_at_offset(offset).unwrap();
+                let completion = members.iter().find(|item| item.label == method).unwrap();
+                assert_eq!(completion.detail, signature);
+                let position = source.find("position:").unwrap();
+                let help = snapshot.signature_help_at_offset(position).unwrap();
+                assert_eq!(help[0].label, signature);
+                assert_eq!(help[0].active_parameter, 0);
+                assert!(snapshot
+                    .named_argument_completions_at_offset(position)
+                    .unwrap()
+                    .iter()
+                    .any(|item| item.label == "position:"));
+                for variable in ["$key", "$copy"] {
+                    let hover = snapshot
+                        .hover_at_offset(source.rfind(variable).unwrap())
+                        .unwrap();
+                    assert!(hover.markdown.contains(key), "{hover:?}");
+                    assert!(
+                        hover.markdown.contains(INLINE_COPY_DOCUMENTATION),
+                        "{hover:?}"
+                    );
+                    assert!(hover.markdown.contains(documentation), "{hover:?}");
+                    assert!(
+                        hover
+                            .markdown
+                            .contains(TRANSFER_KEY_LOOKUP_FAILURE_DOCUMENTATION),
+                        "{hover:?}"
+                    );
+                    assert!(
+                        !hover.markdown.contains(REGISTRATION_KEY_DOCUMENTATION),
+                        "{hover:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn registration_key_binding_help_preserves_generic_copy_identity() {
+        let source = include_str!("../../editors/fixtures/stage36a-registration-keys.doria");
+        let snapshot = AnalysisSnapshot::analyze("registration-keys.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        for (variable, ty) in [
+            (
+                "$returned",
+                "Doria\\Std\\Io\\RegistrationKey<Doria\\Std\\Io\\ReadableFile>",
+            ),
+            (
+                "$optionalCopy",
+                "?Doria\\Std\\Io\\RegistrationKey<Doria\\Std\\Io\\ReadableFile>",
+            ),
+            (
+                "$writableCopy",
+                "?Doria\\Std\\Io\\RegistrationKey<Doria\\Std\\Io\\WritableFile>",
+            ),
+        ] {
+            let hover = snapshot
+                .hover_at_offset(source.rfind(variable).unwrap())
+                .unwrap();
+            assert!(hover.markdown.contains(ty), "{hover:?}");
+            assert!(
+                hover.markdown.contains(INLINE_COPY_DOCUMENTATION),
+                "{hover:?}"
+            );
+            assert!(
+                hover.markdown.contains(REGISTRATION_KEY_DOCUMENTATION),
+                "{hover:?}"
+            );
+            assert!(
+                !hover.markdown.contains(DURATION_NUMERIC_DOCUMENTATION),
+                "{hover:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn readiness_set_help_uses_compiler_generic_signatures_and_effects() {
+        use doriac::compiler_known_stream::{
+            READABLE_FILE, READINESS_SET, READINESS_STREAM, REGISTRATION_KEY,
+        };
+
+        for (prefix, spelling) in [
+            (String::new(), READINESS_SET),
+            (format!("use {READINESS_SET} as Registry; "), "Registry"),
+        ] {
+            let construction = format!("{prefix}function create(): void {{ new {spelling}(); }}");
+            let snapshot =
+                AnalysisSnapshot::analyze("readiness-set-construction.doria", &construction);
+            assert!(
+                snapshot.diagnostics().is_empty(),
+                "{:?}",
+                snapshot.diagnostics()
+            );
+            let constructor = snapshot
+                .signature_help_at_offset(construction.find("();").unwrap() + 1)
+                .unwrap();
+            assert!(constructor[0]
+                .label
+                .contains(&format!("{READINESS_SET}::__construct()")));
+            assert!(!constructor[0].label.contains("throws"), "{constructor:?}");
+            let setup = snapshot
+                .hover_at_offset(construction.find("create").unwrap())
+                .unwrap();
+            assert!(setup.markdown.contains("**Ambient I/O:**"), "{setup:?}");
+            assert!(
+                setup.markdown.contains("`Doria\\Std\\Io\\IoError`"),
+                "{setup:?}"
+            );
+
+            let source = format!(
+                "{construction} function relay(writable {spelling} $set, take {READABLE_FILE} $stream): {READABLE_FILE} {{ \
+                let $key = $set->register(stream: $stream); let $copy = $key; \
+                let $returned = $set->unregister(key: $copy); return $returned; }}"
+            );
+            let snapshot = AnalysisSnapshot::analyze("readiness-set-help.doria", &source);
+            assert!(
+                snapshot.diagnostics().is_empty(),
+                "{:?}",
+                snapshot.diagnostics()
+            );
+
+            for (method, parameter, parameter_type, result) in [
+                (
+                    "register",
+                    "stream",
+                    format!("take {READABLE_FILE}"),
+                    format!("{REGISTRATION_KEY}<{READABLE_FILE}>"),
+                ),
+                (
+                    "unregister",
+                    "key",
+                    format!("{REGISTRATION_KEY}<{READABLE_FILE}>"),
+                    READABLE_FILE.to_string(),
+                ),
+            ] {
+                let offset = source.find(&format!("->{method}")).unwrap() + 2;
+                let members = snapshot.member_completions_at_offset(offset).unwrap();
+                let completion = members
+                    .iter()
+                    .find(|member| member.label == method)
+                    .unwrap();
+                assert_eq!(completion.kind, 2);
+                assert!(
+                    completion
+                        .detail
+                        .starts_with(&format!("writable function {READINESS_SET}::{method}<T")),
+                    "{completion:?}"
+                );
+                if method == "register" {
+                    assert!(
+                        completion
+                            .detail
+                            .contains(&format!("T implements {READINESS_STREAM}")),
+                        "{completion:?}"
+                    );
+                }
+                let hover = snapshot.hover_at_offset(offset).unwrap();
+                assert!(
+                    hover
+                        .markdown
+                        .contains(&format!("({parameter_type} ${parameter}): {result}")),
+                    "{hover:?}"
+                );
+                assert!(hover.markdown.contains("**Ambient I/O:**"), "{hover:?}");
+                assert!(
+                    hover.markdown.contains("`Doria\\Std\\Io\\IoError`"),
+                    "{hover:?}"
+                );
+                assert!(!completion.detail.contains("throws"), "{completion:?}");
+                assert!(snapshot.declaration_span_at_offset(offset).is_none());
+                let argument = source.find(&format!("{parameter}:")).unwrap();
+                let help = snapshot.signature_help_at_offset(argument).unwrap();
+                assert!(hover.markdown.contains(&help[0].label), "{help:?}");
+                assert_eq!(help[0].active_parameter, 0);
+                assert!(snapshot
+                    .named_argument_completions_at_offset(argument)
+                    .unwrap()
+                    .iter()
+                    .any(|item| item.label == format!("{parameter}:")));
+            }
+            for (variable, ty) in [
+                ("$copy", format!("{REGISTRATION_KEY}<{READABLE_FILE}>")),
+                ("$returned", READABLE_FILE.to_string()),
+            ] {
+                let hover = snapshot
+                    .hover_at_offset(source.rfind(variable).unwrap())
+                    .unwrap();
+                assert!(hover.markdown.contains(&ty), "{hover:?}");
+                assert_eq!(
+                    hover.markdown.contains(INLINE_COPY_DOCUMENTATION),
+                    variable == "$copy",
+                    "{hover:?}"
+                );
+            }
+            let readonly = source.replace("writable ", "");
+            let snapshot = AnalysisSnapshot::analyze("readonly-set-help.doria", &readonly);
+            let members = snapshot
+                .member_completions_at_offset(readonly.find("->register").unwrap() + 2)
+                .unwrap();
+            assert!(!members
+                .iter()
+                .any(|member| matches!(member.label.as_str(), "register" | "unregister")));
+        }
+        let source = include_str!("../../editors/fixtures/stage36a-readiness-set.doria");
+        let snapshot = AnalysisSnapshot::analyze("readiness-set-types.doria", source);
+        let types = [READABLE_FILE, READINESS_STREAM, "T", "ReadyOnly"];
+        for ((offset, _), ty) in source.match_indices("->register(").zip(types) {
+            let hover = snapshot.hover_at_offset(offset + 2).unwrap();
+            assert!(
+                hover
+                    .markdown
+                    .contains(&format!("(take {ty} $stream): {REGISTRATION_KEY}<{ty}>")),
+                "{hover:?}"
+            );
+        }
+        for ((offset, _), ty) in source
+            .match_indices("->unregister(")
+            .zip(types.into_iter().chain([READABLE_FILE]))
+        {
+            let hover = snapshot.hover_at_offset(offset + 2).unwrap();
+            assert!(
+                hover
+                    .markdown
+                    .contains(&format!("({REGISTRATION_KEY}<{ty}> $key): {ty}")),
+                "{hover:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn readiness_set_borrowing_help_preserves_type_access_and_receiver_loans() {
+        use doriac::compiler_known_stream::{READABLE_FILE, READINESS_SET, REGISTRATION_KEY};
+
+        let source = include_str!("../../editors/fixtures/stage36a-readiness-set-borrowing.doria");
+        let snapshot = AnalysisSnapshot::analyze("readiness-set-borrowing-help.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        for (method, writable) in [("getStream", false), ("getWritableStream", true)] {
+            let offset = source.find(&format!("->{method}(")).unwrap() + 2;
+            let completion = snapshot
+                .member_completions_at_offset(offset)
+                .unwrap()
+                .into_iter()
+                .find(|member| member.label == method)
+                .unwrap();
+            assert_eq!(completion.kind, 2);
+            assert!(
+                completion
+                    .detail
+                    .contains(&format!("function {READINESS_SET}::{method}<T")),
+                "{completion:?}"
+            );
+            assert_eq!(
+                completion.detail.starts_with("writable "),
+                writable,
+                "{completion:?}"
+            );
+            let hover = snapshot.hover_at_offset(offset).unwrap();
+            assert!(
+                hover.markdown.contains(&format!(
+                    "({REGISTRATION_KEY}<{READABLE_FILE}> $key): {READABLE_FILE}"
+                )),
+                "{hover:?}"
+            );
+            let access = if writable { "writable" } else { "readonly" };
+            assert!(
+                hover.markdown.contains(&format!(
+                    "Returns a {access} borrow rooted in the receiver."
+                )),
+                "{hover:?}"
+            );
+            let argument = offset + method.len() + 1;
+            let help = snapshot.signature_help_at_offset(argument).unwrap();
+            assert!(hover.markdown.contains(&help[0].label), "{help:?}");
+            assert_eq!(help[0].active_parameter, 0);
+            assert!(snapshot
+                .named_argument_completions_at_offset(argument)
+                .unwrap()
+                .iter()
+                .any(|item| item.label == "key:"));
+            assert!(snapshot.declaration_span_at_offset(offset).is_none());
+        }
+        let readonly = source.find("->getStream(").unwrap() + 2;
+        let members = snapshot.member_completions_at_offset(readonly).unwrap();
+        assert!(members.iter().any(|member| member.label == "getStream"));
+        assert!(!members
+            .iter()
+            .any(|member| member.label == "getWritableStream"));
+        for ((offset, _), ty) in source.match_indices("->getStream(").zip([
+            READABLE_FILE,
+            "Doria\\Std\\Io\\ReadinessStream",
+            "T",
+            READABLE_FILE,
+        ]) {
+            let hover = snapshot.hover_at_offset(offset + 2).unwrap();
+            assert!(
+                hover
+                    .markdown
+                    .contains(&format!("({REGISTRATION_KEY}<{ty}> $key): {ty}")),
+                "{hover:?}"
+            );
+        }
+        let read = source.find("$stream->read(").unwrap();
+        assert!(snapshot
+            .hover_at_offset(read)
+            .unwrap()
+            .markdown
+            .contains(&format!("writable {READABLE_FILE} $stream")));
+        assert!(snapshot
+            .member_completions_at_offset(read + "$stream->".len())
+            .unwrap()
+            .iter()
+            .any(|member| member.label == "read"));
+    }
+
+    #[test]
+    fn borrowed_local_help_and_member_access_follow_compiler_binding_facts() {
+        let source = include_str!("../../editors/fixtures/stage36a-writable-borrowed-locals.doria");
+        let name = "writable-borrowed-locals-help.doria";
+        let (_, compiler) = doriac::analyze_source_for_ide(name, source).unwrap();
+        assert!(
+            compiler.diagnostics.is_empty(),
+            "{:?}",
+            compiler.diagnostics
+        );
+        let snapshot = AnalysisSnapshot::analyze(name, source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        for name in [
+            "method", "function", "alias", "generic", "property", "readonly",
+        ] {
+            let writable = !matches!(name, "readonly" | "property");
+            let declaration = compiler
+                .info
+                .binding_resolution
+                .declarations_by_id
+                .values()
+                .find(|binding| binding.kind == BindingKind::Local && binding.name == name)
+                .unwrap();
+            assert_eq!(
+                declaration.ownership,
+                if writable {
+                    BindingOwnership::WritableBorrow
+                } else {
+                    BindingOwnership::ReadonlyBorrow
+                }
+            );
+            let expected = format!("{}Counter ${name}", if writable { "writable " } else { "" });
+            for (offset, _) in source.match_indices(&format!("${name}")) {
+                let hover = snapshot.hover_at_offset(offset).unwrap();
+                assert!(hover.markdown.contains(&expected), "{name}: {hover:?}");
+                if !writable {
+                    assert!(!hover.markdown.contains("writable Counter"), "{hover:?}");
+                }
+            }
+            let member = source.find(&format!("${name}->")).unwrap() + name.len() + 3;
+            let completions = snapshot.member_completions_at_offset(member).unwrap();
+            assert_eq!(
+                completions.iter().any(|member| member.label == "bump"),
+                writable,
+                "{name}: {completions:?}"
+            );
+        }
     }
 
     #[test]
@@ -8527,6 +11501,449 @@ function main(): void
             .local_completions_at_offset(after_when)
             .iter()
             .any(|completion| completion.label == "$branch"));
+    }
+
+    #[test]
+    fn conditional_clauses_preserve_declarations_without_unconditional_member_fallbacks() {
+        let source = include_str!("../../editors/fixtures/stage36a-conditional-capabilities.doria");
+        let snapshot = AnalysisSnapshot::analyze("conditional-capabilities.doria", source);
+        let (_, compiler) =
+            doriac::analyze_source_for_ide("conditional-capabilities.doria", source).unwrap();
+        assert_eq!(snapshot.diagnostics(), compiler.diagnostics);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        assert_eq!(compiler.info.contracts.conditions.len(), 8);
+        assert!(!compiler.info.callable_signatures.is_empty());
+        for (offset, _) in source.match_indices("where (") {
+            assert!(snapshot
+                .semantic_token_spans()
+                .iter()
+                .any(|(span, kind, _)| {
+                    span.start == offset
+                        && span.end == offset + "where".len()
+                        && *kind == SEMANTIC_TOKEN_KEYWORD
+                }));
+            assert!(snapshot
+                .hover_at_offset(offset)
+                .unwrap()
+                .markdown
+                .contains("Local nominal capability condition"));
+        }
+        for needle in [
+            "function ready(): int where",
+            "int $state where",
+            "static function inspect<U>",
+        ] {
+            let offset = source.find(needle).unwrap();
+            let name_offset = if needle.starts_with("int ") {
+                offset + "int ".len()
+            } else {
+                offset + source[offset..].find("function ").unwrap() + "function ".len()
+            };
+            assert!(snapshot
+                .hover_at_offset(name_offset)
+                .unwrap()
+                .markdown
+                .contains("where ("));
+        }
+        let adapter = snapshot
+            .class_members
+            .iter()
+            .find(|(name, _)| name.ends_with("Adapter"))
+            .unwrap()
+            .1;
+        assert!(adapter.iter().all(|member| {
+            !matches!(
+                member.completion.label.as_str(),
+                "ready" | "prepare" | "state" | "inspect"
+            )
+        }));
+        assert!(snapshot.global_symbols.references.iter().any(|reference| {
+            reference.import_alias.as_deref() == Some("Capable")
+                && &source[reference.source_span.start..reference.source_span.end] == "Capable"
+        }));
+        assert!(snapshot
+            .hover_at_offset(source.find("Adapter<T>").unwrap())
+            .unwrap()
+            .markdown
+            .contains("where ("));
+        let multiline = source.replace("where (", "where\n(");
+        let multiline_snapshot =
+            AnalysisSnapshot::analyze("multiline-conditions.doria", &multiline);
+        assert!(
+            multiline_snapshot.diagnostics().is_empty(),
+            "{:?}",
+            multiline_snapshot.diagnostics()
+        );
+        for (offset, _) in multiline.match_indices("where\n(") {
+            assert!(multiline_snapshot
+                .semantic_token_spans()
+                .iter()
+                .any(|(span, kind, _)| {
+                    span.start == offset
+                        && span.end == span.start + "where".len()
+                        && *kind == SEMANTIC_TOKEN_KEYWORD
+                }));
+        }
+        let contextual = "function where(int $where): int { return $where; } function main(): void { echo where(1); }";
+        let ordinary = AnalysisSnapshot::analyze("contextual-where.doria", contextual);
+        assert!(
+            ordinary.diagnostics().is_empty(),
+            "{:?}",
+            ordinary.diagnostics()
+        );
+        assert!(!ordinary
+            .semantic_token_spans()
+            .iter()
+            .any(|(span, kind, _)| {
+                &contextual[span.start..span.end] == "where" && *kind == SEMANTIC_TOKEN_KEYWORD
+            }));
+    }
+
+    #[test]
+    fn conditional_subject_navigation_uses_compiler_lexical_parameter_origins() {
+        let source = r#"namespace App;
+use App\Ready as R;
+interface Ready<T> {}
+interface Other<T> {}
+class Adapter<T> implements R<T> where (T implements R<T>) {
+    static function inspect<U>(): int where (T implements R<List<U>>, Other<U>, U implements R<T>) { return 1; }
+}
+trait Inspection<T> {
+    int $state where (T implements R<T>) { get { return 1; } }
+}"#;
+        let snapshot = AnalysisSnapshot::analyze("condition-subjects.doria", source);
+        let (_, compiler) =
+            doriac::analyze_source_for_ide("condition-subjects.doria", source).unwrap();
+        assert_eq!(snapshot.diagnostics(), compiler.diagnostics);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        assert_eq!(compiler.info.contracts.conditions.len(), 3);
+        assert!(compiler
+            .info
+            .contracts
+            .conformances
+            .iter()
+            .all(|fact| fact.origin.source != SourceId::default()));
+        let owner = source.find("Adapter<T>").unwrap() + "Adapter<".len();
+        let method = source.find("inspect<U>").unwrap() + "inspect<".len();
+        let trait_parameter = source.find("Inspection<T>").unwrap() + "Inspection<".len();
+        for (offset, declaration, name) in [
+            (source.find("T implements R<T>").unwrap(), owner, "T"),
+            (source.find("T implements R<List<U>>").unwrap(), owner, "T"),
+            (source.find("U implements R<T>").unwrap(), method, "U"),
+            (
+                source.rfind("T implements R<T>").unwrap(),
+                trait_parameter,
+                "T",
+            ),
+        ] {
+            assert_eq!(
+                snapshot.declaration_span_at_offset(offset),
+                Some(Span::new(declaration, declaration + 1))
+            );
+            assert!(snapshot
+                .hover_at_offset(offset)
+                .unwrap()
+                .markdown
+                .contains(&format!("type parameter {name}")));
+            assert!(snapshot.rename_edits_at_offset(offset, "V").is_none());
+            assert!(snapshot.rename_replacement_at_offset(offset, "V").is_none());
+            assert!(snapshot.reference_spans_at_offset(offset, true).is_empty());
+        }
+        for condition in compiler.info.contracts.conditions.values() {
+            for obligation in &condition.obligations {
+                let declaration = snapshot
+                    .declaration_span_at_offset(obligation.subject_span.start)
+                    .unwrap();
+                assert!(declaration.start >= obligation.subject.declaration.start);
+                assert!(declaration.end <= obligation.subject.declaration.end);
+                assert_eq!(
+                    &source[declaration.start..declaration.end],
+                    obligation.subject.name
+                );
+            }
+        }
+        let invalid = source.replace("U implements R<T>", "Missing implements R<T>");
+        let rejected = AnalysisSnapshot::analyze("invalid-condition-subject.doria", &invalid);
+        assert!(rejected
+            .diagnostics()
+            .iter()
+            .any(|finding| finding.code == "E0778"));
+        for needle in ["T implements R<List<U>>", "Missing implements R<T>"] {
+            assert!(rejected
+                .declaration_span_at_offset(invalid.find(needle).unwrap())
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn conditional_member_features_follow_checked_receivers_and_authored_origins() {
+        use crate::workspace_index::OpenDocumentIndex;
+
+        let members = r#"
+    function relay<U>(U $value): U where (T implements Ready) { return $value; }
+    static function relayStatic<U>(U $value): U where (T implements Ready) { return $value; }
+    int $state where (T implements Ready) { get => 1; }
+    function probe(): int { return 0; }
+    static function staticProbe(): int { return 0; }
+"#;
+        for composed in [false, true] {
+            let owner = if composed {
+                format!("trait Values<T> {{ {members} }} open class Adapter<T> {{ uses Values<T> {{ Values<T>::relay as renamed; }} }}")
+            } else {
+                format!("open class Adapter<T> {{ {members} }}")
+            };
+            let method = if composed { "renamed" } else { "relay" };
+            for (argument, active) in [("Yes", true), ("No", false)] {
+                let declarations = format!("interface Ready {{}} class Yes implements Ready {{}} class No {{}} {owner} class Selected extends Adapter<{argument}> {{}}");
+                let calls = if active {
+                    format!("echo $adapter->{method}(value: 7); echo Selected::relayStatic(value: 8); echo $adapter->state;")
+                } else {
+                    "echo $adapter->probe(); echo Selected::staticProbe();".to_string()
+                };
+                let caller = format!("function inspect(Selected $adapter): void {{ {calls} }}");
+                for source in [
+                    format!("{declarations}{caller}"),
+                    format!("{caller}{declarations}"),
+                ] {
+                    let name = "conditional-editor-features.doria";
+                    let snapshot = AnalysisSnapshot::analyze(name, &source);
+                    assert!(
+                        snapshot.diagnostics().is_empty(),
+                        "{source}: {:?}",
+                        snapshot.diagnostics()
+                    );
+                    let index = OpenDocumentIndex::rebuild(std::iter::once((
+                        "graph".to_string(),
+                        name,
+                        &snapshot,
+                    )));
+                    let instance_offset = source.find("$adapter->").unwrap() + "$adapter->".len();
+                    let instance = snapshot
+                        .member_completions_at_offset(instance_offset)
+                        .unwrap();
+                    for label in ["relay", method, "state"] {
+                        assert_eq!(
+                            instance.iter().any(|item| item.label == label),
+                            active,
+                            "{source}: {instance:?}"
+                        );
+                    }
+                    assert!(!instance.iter().any(|item| item.label == "relayStatic"));
+                    let static_offset = source.find("Selected::").unwrap() + "Selected::".len();
+                    let statics = snapshot
+                        .static_completions_at_offset(static_offset)
+                        .unwrap();
+                    assert_eq!(
+                        statics.iter().any(|item| item.label == "relayStatic"),
+                        active,
+                        "{source}: {statics:?}"
+                    );
+                    assert!(!statics
+                        .iter()
+                        .any(|item| item.label == "relay" || item.label == "state"));
+                    if !active {
+                        assert!(instance.iter().any(|item| item.label == "probe"));
+                        assert!(statics.iter().any(|item| item.label == "staticProbe"));
+                        continue;
+                    }
+                    for (offset, member, declaration, value) in [
+                        (instance_offset, method, "relay", "7"),
+                        (static_offset, "relayStatic", "relayStatic", "8"),
+                    ] {
+                        let signature = format!("{member}<U>(int $value): int");
+                        let hover = snapshot.hover_at_offset(offset).unwrap();
+                        assert!(hover.markdown.contains(&signature), "{source}: {hover:?}");
+                        let argument =
+                            source[offset..].find(&format!("value: {value}")).unwrap() + offset;
+                        let help = snapshot.signature_help_at_offset(argument).unwrap();
+                        assert_eq!(help.len(), 1, "{help:?}");
+                        assert!(help[0].label.contains(&signature), "{help:?}");
+                        assert_eq!(help[0].active_parameter, 0);
+                        let targets =
+                            index.contract_definitions(name, offset).unwrap_or_else(|| {
+                                index.definition(name, offset).into_iter().collect()
+                            });
+                        let authored = source.find(&format!("function {declaration}<")).unwrap()
+                            + "function ".len();
+                        assert!(
+                            targets
+                                .iter()
+                                .any(|target| target.uri == name && target.span.start == authored),
+                            "{source}: {targets:?}"
+                        );
+                        if composed && member == "renamed" {
+                            let alias = source.find("as renamed").unwrap() + "as ".len();
+                            assert!(
+                                targets
+                                    .iter()
+                                    .any(|target| target.uri == name && target.span.start == alias),
+                                "{targets:?}"
+                            );
+                        }
+                    }
+                    let property = source.find("$adapter->state").unwrap() + "$adapter->".len();
+                    let hover = snapshot.hover_at_offset(property).unwrap();
+                    assert!(hover.markdown.contains("get: int"), "{hover:?}");
+                    let targets = index.property_accessor_definitions(name, property).unwrap();
+                    assert_eq!(targets.len(), 1, "{targets:?}");
+                    assert_eq!(targets[0].uri, name);
+                    assert_eq!(targets[0].span.start, source.find("get =>").unwrap());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn conditional_completions_respect_caller_premises_for_symbolic_receivers() {
+        let declarations = r#"
+interface Ready {}
+class Adapter<T> {
+    function inspect(): int where (T implements Ready) { return 1; }
+    int $state where (T implements Ready) { get => 1; }
+    function probe(): int { return 0; }
+    static function inspectStatic(): int where (T implements Ready) { return 1; }
+    static function staticProbe(): int { return 0; }
+    function provedStatic(): int where (T implements Ready) { return self::staticProbe(); }
+    function unprovedStatic(): int { return self::staticProbe(); }
+}
+"#;
+        let callers = r#"
+function proved<T implements Ready>(Adapter<T> $proved): int { return $proved->probe(); }
+function unproved<T>(Adapter<T> $unproved): int { return $unproved->probe(); }
+"#;
+        for source in [
+            format!("{declarations}{callers}"),
+            format!("{callers}{declarations}"),
+        ] {
+            let snapshot =
+                AnalysisSnapshot::analyze("conditional-caller-completion.doria", &source);
+            assert!(
+                snapshot.diagnostics().is_empty(),
+                "{source}: {:?}",
+                snapshot.diagnostics()
+            );
+            for (receiver, available) in [("$proved->", true), ("$unproved->", false)] {
+                let offset = source.find(receiver).unwrap() + receiver.len();
+                let members = snapshot.member_completions_at_offset(offset).unwrap();
+                assert!(members.iter().any(|member| member.label == "probe"));
+                for label in ["inspect", "state"] {
+                    assert_eq!(
+                        members.iter().any(|member| member.label == label),
+                        available,
+                        "{receiver}: {members:?}"
+                    );
+                }
+            }
+            for ((offset, _), available) in
+                source.match_indices("self::staticProbe").zip([true, false])
+            {
+                let members = snapshot
+                    .static_completions_at_offset(offset + "self::".len())
+                    .unwrap();
+                assert!(members.iter().any(|member| member.label == "staticProbe"));
+                assert_eq!(
+                    members.iter().any(|member| member.label == "inspectStatic"),
+                    available,
+                    "{members:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn conditional_generic_candidates_keep_their_conditions_until_call_inference() {
+        use crate::workspace_index::OpenDocumentIndex;
+
+        let source = r#"
+interface Ready {}
+class Yes implements Ready {}
+class Factory {
+    function choose<U>(U $value): U where (U implements Ready) { return $value; }
+    static function chooseStatic<U>(U $value): U where (U implements Ready) { return $value; }
+    function probe(): int { return 0; }
+    static function staticProbe(): int { return 0; }
+}
+function inspect(Factory $factory, Yes $ready): void {
+    echo $factory->probe();
+    echo Factory::staticProbe();
+    let $first = $factory->choose(value: $ready);
+    let $second = Factory::chooseStatic(value: $ready);
+}
+"#;
+        let name = "conditional-method-inference.doria";
+        let snapshot = AnalysisSnapshot::analyze(name, source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        let index =
+            OpenDocumentIndex::rebuild(std::iter::once(("graph".to_string(), name, &snapshot)));
+        let instance = snapshot
+            .member_completions_at_offset(source.find("probe();").unwrap())
+            .unwrap();
+        let statics = snapshot
+            .static_completions_at_offset(source.find("staticProbe();").unwrap())
+            .unwrap();
+        for (items, method, usage) in [
+            (instance, "choose", "$factory->choose"),
+            (statics, "chooseStatic", "Factory::chooseStatic"),
+        ] {
+            let candidate = items.iter().find(|item| item.label == method).unwrap();
+            assert!(
+                candidate.detail.ends_with("where (U implements Ready)"),
+                "{candidate:?}"
+            );
+            assert!(candidate
+                .documentation
+                .as_deref()
+                .unwrap()
+                .contains("inferred method type arguments"));
+            let offset = source.find(usage).unwrap() + usage.len() - method.len();
+            let signature = format!("{method}<U>(Yes $value): Yes");
+            let hover = snapshot.hover_at_offset(offset).unwrap();
+            assert!(hover.markdown.contains(&signature), "{hover:?}");
+            let help = snapshot
+                .signature_help_at_offset(offset + method.len() + 1)
+                .unwrap();
+            assert_eq!(help.len(), 1, "{help:?}");
+            assert!(help[0].label.contains(&signature), "{help:?}");
+            assert_eq!(
+                index.definition(name, offset).unwrap().span.start,
+                source.find(&format!("function {method}<")).unwrap() + "function ".len()
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_tokens_classify_reserved_members_at_authored_name_spans() {
+        let source = include_str!("../../editors/fixtures/stage36a-reserved-members.doria");
+        let snapshot = AnalysisSnapshot::analyze("reserved-members.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+        let tokens = snapshot.semantic_token_spans();
+        for name in ["async", "await", "spawn", "scope"] {
+            for (start, _) in source.match_indices(name) {
+                let span = Span::new(start, start + name.len());
+                assert!(
+                    tokens.iter().any(|(candidate, kind, _)| {
+                        *candidate == span && *kind == SEMANTIC_TOKEN_FUNCTION
+                    }),
+                    "{name} at {span:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -9247,6 +12664,7 @@ function main(): void
 {
     string $text = "Straße";
     int $length = $text->length;
+    let $view = $text->byteRegion;
     bool $found = String::containsIgnoreCase($text, "STRASSE");
     string $title = String::upperFirst("doria");
 }
@@ -9264,6 +12682,21 @@ function main(): void
         assert!(length.markdown.contains("int $length"));
         assert!(length.markdown.contains("extended grapheme clusters"));
 
+        let offset = source.find("->byteRegion").unwrap() + 2;
+        let hover = snapshot.hover_at_offset(offset).unwrap();
+        let completions = snapshot.member_completions_at_offset(offset).unwrap();
+        let view = completions
+            .iter()
+            .find(|item| item.label == "byteRegion")
+            .unwrap();
+        let intrinsic = byte_intrinsics::member(&ResolvedType::String, "byteRegion").unwrap();
+        assert_eq!(view.kind, 10);
+        assert_eq!(view.detail, "Doria\\Std\\Io\\ByteRegion $byteRegion");
+        assert_eq!(view.documentation.as_deref(), Some(intrinsic.documentation));
+        assert!(hover.markdown.contains(&view.detail));
+        assert!(hover.markdown.contains(intrinsic.documentation));
+        assert!(completions.iter().any(|item| item.label == "bytes"));
+
         let contains = snapshot
             .hover_at_offset(
                 source
@@ -9277,6 +12710,324 @@ function main(): void
         assert!(contains
             .markdown
             .contains("full default Unicode case folding"));
+    }
+
+    #[test]
+    fn buffered_adapter_members_follow_the_checked_source_tier() {
+        for (direction, adapter, file, sync_method, region, parameter, outcome, result, request) in [
+            (
+                "Read",
+                "BufferedReader",
+                "ReadableFile",
+                "read",
+                "writable WritableByteRegion",
+                "destination",
+                "ReadOutcome",
+                "EndOfStream",
+                "ReadRequest",
+            ),
+            (
+                "Write",
+                "BufferedWriter",
+                "WritableFile",
+                "write",
+                "ByteRegion",
+                "source",
+                "WriteOutcome",
+                "WouldBlock",
+                "WriteRequest",
+            ),
+        ] {
+            for ownership in ["", "Borrowed"] {
+                let adapter = format!("{ownership}{adapter}");
+                let capability = if direction == "Read" {
+                    "ReadableStream"
+                } else {
+                    "WritableStream"
+                };
+                let prepare = format!("prepare{direction}");
+                let complete = format!("complete{direction}");
+                let source = format!(
+                    r#"use Doria\Std\Io\{{{adapter}, {file}, {capability}, {outcome}, {request}, ByteRegion, WritableByteRegion, IoError}};
+class SyncOnly implements {capability} {{
+    writable function {sync_method}({region} ${parameter}): {outcome} {{ return {outcome}::{result}; }}
+}}
+function inspectPending(writable {adapter}<{file}> $pending,
+    {request} $request, {region} $region): void throws IoError {{
+    {{ let $ready = $pending->readinessSource; }}
+    $pending->{complete}($request, $region);
+}}
+function inspectSync(writable {adapter}<SyncOnly> $sync, {region} $region): void throws IoError {{
+    $sync->{sync_method}($region);
+}}
+"#
+                );
+                let snapshot = AnalysisSnapshot::analyze("buffered-adapter-tiers.doria", &source);
+                assert!(
+                    snapshot.diagnostics().is_empty(),
+                    "{source}\n{:?}",
+                    snapshot.diagnostics()
+                );
+                for (receiver, available) in [("$pending->", true), ("$sync->", false)] {
+                    let offset = source.find(receiver).unwrap() + receiver.len();
+                    let items = snapshot.member_completions_at_offset(offset).unwrap();
+                    for name in ["readinessSource", &prepare, &complete] {
+                        assert_eq!(
+                            items.iter().any(|item| item.label == name),
+                            available,
+                            "{adapter}: {items:?}"
+                        );
+                    }
+                    assert!(items.iter().any(|item| item.label == sync_method));
+                }
+                for (name, ty) in [("readinessSource", "ReadinessSource"), (&complete, outcome)] {
+                    let prefix = "$pending->";
+                    let offset = source.find(&format!("{prefix}{name}")).unwrap() + prefix.len();
+                    let hover = snapshot.hover_at_offset(offset).unwrap();
+                    assert!(hover.markdown.contains(ty), "{hover:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reached_process_types_supply_member_hover_and_completion() {
+        let source = r#"use Doria\Std\Process\Child as ProcessChild;
+function inspect(writable ProcessChild $child): void {
+    let $input = $child->getInput();
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("process-child.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+        let alias = source.rfind("ProcessChild").unwrap();
+        assert!(snapshot
+            .hover_at_offset(alias)
+            .unwrap()
+            .markdown
+            .contains("Doria\\Std\\Process\\Child"));
+        let offset = source.find("getInput").unwrap();
+        let hover = snapshot.hover_at_offset(offset).unwrap();
+        assert!(
+            hover.markdown.contains("Doria\\Std\\Process\\ChildInput"),
+            "{hover:?}"
+        );
+        let items = snapshot.member_completions_at_offset(offset).unwrap();
+        for name in ["getInput", "getOutput", "getErrors"] {
+            assert!(items.iter().any(|item| item.label == name), "{name}");
+        }
+        for name in ["input", "output", "errors"] {
+            assert!(!items.iter().any(|item| item.label == name), "{name}");
+        }
+    }
+
+    #[test]
+    fn region_bulk_copy_hovers_and_completions_follow_intrinsic_metadata() {
+        let source = r#"use Doria\Std\Io\{ByteRegion, WritableByteRegion};
+function copy(writable WritableByteRegion $target, ByteRegion $source): int {
+    $target->copyWithin(0, 1, 1);
+    return $target->copyFrom($source);
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("region-copy.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+        for name in ["copyFrom", "copyWithin"] {
+            let offset = source.find(name).unwrap();
+            let hover = snapshot.hover_at_offset(offset).unwrap();
+            let items = snapshot.member_completions_at_offset(offset).unwrap();
+            let item = items.iter().find(|item| item.label == name).unwrap();
+            assert!(hover.markdown.contains(&item.detail), "{hover:?}");
+            assert!(hover
+                .markdown
+                .contains(item.documentation.as_deref().unwrap()));
+            assert!(snapshot.declaration_span_at_offset(offset).is_none());
+        }
+    }
+
+    #[test]
+    fn byte_contracts_drive_hover_completion_and_named_signature_help() {
+        let source = r#"use Doria\Std\Io\ByteRegion;
+use Doria\Std\Io\WritableByteRegion;
+function inspect(): void {
+    writable Bytes $bytes = Bytes::allocate(length: 4);
+    {
+        ByteRegion $view = $bytes->getRegion(length: 2, offset: 1);
+        let $inner = $view->getRegion(0, 1);
+        echo $inner->length;
+    }
+    {
+        writable WritableByteRegion $view = $bytes->getWritableRegion(0, 4);
+        {
+            let writable $inner = $view->getWritableRegion(0, 2);
+            $inner[0] = 7;
+        }
+        let $readonly = $view->getRegion(0, 1);
+        echo $readonly[0];
+    }
+    let $array = $bytes->toArray();
+    let $copy = Bytes::fromArray($array);
+    echo $copy->length;
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("bytes.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:#?}",
+            snapshot.diagnostics()
+        );
+        for (needle, signature) in [
+            ("allocate", "static function Bytes::allocate(int $length): Bytes"),
+            ("getRegion(length", "function Bytes::getRegion(int $offset, int $length): Doria\\Std\\Io\\ByteRegion"),
+            ("getWritableRegion", "writable function Bytes::getWritableRegion(int $offset, int $length): Doria\\Std\\Io\\WritableByteRegion"),
+            ("toArray", "function Bytes::toArray(): uint8[]"),
+            ("fromArray", "static function Bytes::fromArray(uint8[] $bytes): Bytes"),
+            ("length;", "int $length"),
+        ] {
+            let hover = snapshot.hover_at_offset(source.find(needle).unwrap()).unwrap();
+            assert!(hover.markdown.contains(signature), "{hover:?}");
+        }
+        for (needle, writable) in [
+            ("$bytes->getRegion", true),
+            ("$view->getRegion", false),
+            ("$view->getWritableRegion", true),
+        ] {
+            let offset = source.find(needle).unwrap() + needle.find("->").unwrap() + 2;
+            let completions = snapshot.member_completions_at_offset(offset).unwrap();
+            assert!(completions.iter().any(|item| item.label == "getRegion"));
+            assert!(completions.iter().any(|item| item.label == "length"));
+            assert_eq!(
+                completions
+                    .iter()
+                    .any(|item| item.label == "getWritableRegion"),
+                writable
+            );
+        }
+        let static_items = snapshot
+            .static_completions_at_offset(source.find("allocate").unwrap())
+            .unwrap();
+        assert_eq!(
+            static_items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            ["allocate", "fromArray"]
+        );
+        for (needle, parameter) in [("length: 2", 1), ("offset: 1", 0)] {
+            let signatures = snapshot
+                .signature_help_at_offset(source.find(needle).unwrap())
+                .unwrap();
+            assert_eq!(signatures.len(), 1);
+            assert_eq!(signatures[0].active_parameter, parameter);
+            assert!(signatures[0]
+                .label
+                .ends_with(": Doria\\Std\\Io\\ByteRegion"));
+        }
+        let incomplete = "function inspect(): void { let $bytes = Bytes::allocate(\n}";
+        let offset = incomplete.find("allocate(").unwrap() + "allocate(".len();
+        let help = AnalysisSnapshot::signature_help_for_incomplete_call(
+            "incomplete-bytes.doria",
+            incomplete,
+            offset,
+        )
+        .unwrap();
+        assert_eq!(
+            help[0].label,
+            "static function Bytes::allocate(int $length): Bytes"
+        );
+    }
+
+    #[test]
+    fn nullable_byte_members_preserve_compiler_results_and_receiver_access() {
+        for (ty, writable_storage) in [
+            ("Bytes", true),
+            ("Doria\\Std\\Io\\ByteRegion", false),
+            ("Doria\\Std\\Io\\WritableByteRegion", true),
+        ] {
+            let writable_call = if writable_storage {
+                r#"{
+        let writable $part = $value?->getWritableRegion(0, 0);
+        if ($part != null) { echo $part->length; }
+    }"#
+            } else {
+                ""
+            };
+            let source = format!(
+                r#"function inspect(writable ?{ty} $value): void {{
+    {{
+        let $part = $value?->getRegion(length: 0, offset: 0);
+        ?int $length = $value?->length;
+        echo $length ?? 0;
+    }}
+    if ($value != null) {{
+        let $part = $value->getRegion(0, 0);
+        int $length = $value->length;
+        echo $length;
+    }}
+    {writable_call}
+}}
+"#
+            );
+            let snapshot = AnalysisSnapshot::analyze("nullable-bytes.doria", &source);
+            assert!(
+                snapshot.diagnostics().is_empty(),
+                "{ty}: {:#?}",
+                snapshot.diagnostics()
+            );
+            for (needle, signature) in [
+                ("getRegion(length", "): ?Doria\\Std\\Io\\ByteRegion"),
+                ("?->length", "```doria\n?int $length\n```"),
+                ("->getRegion(0", "): Doria\\Std\\Io\\ByteRegion"),
+                ("$value->length", "```doria\nint $length\n```"),
+            ] {
+                let offset = source.find(needle).unwrap();
+                let offset = offset + needle.find("->").map_or(0, |arrow| arrow + 2);
+                let hover = snapshot.hover_at_offset(offset).unwrap();
+                assert!(hover.markdown.contains(signature), "{ty}: {hover:?}");
+                let items = snapshot.member_completions_at_offset(offset).unwrap();
+                assert_eq!(
+                    items.iter().any(|item| item.label == "getWritableRegion"),
+                    writable_storage,
+                    "{ty}: {items:?}"
+                );
+            }
+            let help = snapshot
+                .signature_help_at_offset(source.find("length: 0").unwrap())
+                .unwrap();
+            assert_eq!(help[0].active_parameter, 1);
+            assert!(help[0].label.ends_with("): ?Doria\\Std\\Io\\ByteRegion"));
+            if writable_storage {
+                let hover = snapshot
+                    .hover_at_offset(source.find("getWritableRegion").unwrap())
+                    .unwrap();
+                assert!(hover
+                    .markdown
+                    .contains("): ?Doria\\Std\\Io\\WritableByteRegion"));
+                assert!(hover.markdown.contains("writable function"));
+            }
+
+            let readonly =
+                format!("function inspect(?{ty} $value): ?int {{ return $value?->length; }}");
+            let snapshot = AnalysisSnapshot::analyze("readonly-nullable-bytes.doria", &readonly);
+            assert!(
+                snapshot.diagnostics().is_empty(),
+                "{ty}: {:#?}",
+                snapshot.diagnostics()
+            );
+            let items = snapshot
+                .member_completions_at_offset(readonly.find("length").unwrap())
+                .unwrap();
+            assert!(
+                !items.iter().any(|item| item.label == "getWritableRegion"),
+                "{ty}: {items:?}"
+            );
+        }
     }
 
     #[test]
@@ -9986,6 +13737,656 @@ function locals(): void {
     }
 
     #[test]
+    fn interface_requirements_preserve_all_compiler_receiver_modes() {
+        let source = r#"
+interface Work {
+    function read(): int;
+    writable function update(): void;
+    consuming function finish(): int;
+}
+function inspect(Work $view): int { return $view->read(); }
+function edit(writable Work $view): void { $view->update(); }
+function complete(take Work $view): int { return $view->finish(); }
+"#;
+        let snapshot = AnalysisSnapshot::analyze("interface-receivers.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        for (name, signature) in [
+            ("read", "function read(): int"),
+            ("update", "writable function update(): void"),
+            ("finish", "consuming function finish(): int"),
+        ] {
+            let offset = source.find(&format!("$view->{name}")).unwrap() + "$view->".len();
+            let members = snapshot.member_completions_at_offset(offset).unwrap();
+            let member = members.iter().find(|member| member.label == name).unwrap();
+            assert_eq!(member.detail, signature);
+            let hover = snapshot.hover_at_offset(offset).unwrap();
+            assert!(hover.markdown.contains(signature), "{hover:?}");
+            if name == "read" {
+                assert!(!members.iter().any(|member| member.label == "update"));
+            }
+        }
+    }
+
+    #[test]
+    fn compiler_stream_requirements_share_hover_completion_and_signature_facts() {
+        let source = r#"use Doria\Std\Io\ReadableStream as Reader;
+use Doria\Std\Io\{WritableStream, DuplexStream, FlushableStream, WritableByteRegion, ByteRegion, IoError};
+function inspect(writable Reader $reader, writable WritableStream $writer,
+    writable DuplexStream $duplex, writable FlushableStream $flusher,
+    writable WritableByteRegion $destination, ByteRegion $source): void throws IoError
+{
+    let $read = $reader->read(destination: $destination);
+    let $write = $writer->write(source: $source);
+    let $duplexRead = $duplex->read($destination);
+    let $duplexWrite = $duplex->write($source);
+    let $flush = $flusher->flush();
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("stream-help.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        for (receiver, method, signature, names) in [
+            ("reader", "read", "writable function read(writable Doria\\Std\\Io\\WritableByteRegion $destination): Doria\\Std\\Io\\ReadOutcome throws Doria\\Std\\Io\\IoError", vec!["read"]),
+            ("writer", "write", "writable function write(Doria\\Std\\Io\\ByteRegion $source): Doria\\Std\\Io\\WriteOutcome throws Doria\\Std\\Io\\IoError", vec!["write"]),
+            ("duplex", "read", "writable function read(writable Doria\\Std\\Io\\WritableByteRegion $destination): Doria\\Std\\Io\\ReadOutcome throws Doria\\Std\\Io\\IoError", vec!["read", "write"]),
+            ("duplex", "write", "writable function write(Doria\\Std\\Io\\ByteRegion $source): Doria\\Std\\Io\\WriteOutcome throws Doria\\Std\\Io\\IoError", vec!["read", "write"]),
+            ("flusher", "flush", "writable function flush(): Doria\\Std\\Io\\FlushOutcome throws Doria\\Std\\Io\\IoError", vec!["flush"]),
+        ] {
+            let needle = format!("${receiver}->{method}(");
+            let offset = source.find(&needle).unwrap() + receiver.len() + 3;
+            let hover = snapshot.hover_at_offset(offset).unwrap();
+            assert!(hover.markdown.contains(signature), "{hover:?}");
+            let help = snapshot.signature_help_at_offset(offset + method.len() + 1).unwrap();
+            assert_eq!(help[0].label, signature);
+            assert_eq!(help[0].active_parameter, 0);
+            let items = snapshot.member_completions_at_offset(offset).unwrap();
+            let labels = items.iter().map(|item| item.label.as_str()).collect::<HashSet<_>>();
+            assert_eq!(labels, names.into_iter().collect());
+            assert_eq!(items.iter().find(|item| item.label == method).unwrap().detail, signature);
+            assert!(snapshot.declaration_span_at_offset(offset).is_none());
+            if method == "flush" {
+                assert!(hover.markdown.contains("Pending preserves the unwritten remainder"));
+                assert!(items.iter().find(|item| item.label == method).unwrap()
+                    .documentation.as_deref().unwrap().contains("does not implicitly wait for readiness"));
+            }
+        }
+        assert!(snapshot
+            .hover_at_offset(source.find("$flush =").unwrap())
+            .unwrap()
+            .markdown
+            .contains("Doria\\Std\\Io\\FlushOutcome $flush"));
+    }
+
+    #[test]
+    fn flush_outcome_help_preserves_payload_free_copy_cases() {
+        for case in ["Complete", "Pending"] {
+            let source = format!("use Doria\\Std\\Io\\FlushOutcome; function outcome(): FlushOutcome {{ return FlushOutcome::{case}; }}");
+            let snapshot = AnalysisSnapshot::analyze("flush-outcome-help.doria", &source);
+            assert!(
+                snapshot.diagnostics().is_empty(),
+                "{:?}",
+                snapshot.diagnostics()
+            );
+            let offset = source.find(&format!("::{case}")).unwrap() + 2;
+            let hover = snapshot.hover_at_offset(offset).unwrap();
+            assert!(
+                hover.markdown.contains("Doria\\Std\\Io\\FlushOutcome"),
+                "{hover:?}"
+            );
+            assert!(
+                hover.markdown.contains("payload-free Copy values"),
+                "{hover:?}"
+            );
+            let labels = snapshot
+                .static_completions_at_offset(offset)
+                .unwrap()
+                .into_iter()
+                .map(|item| item.label)
+                .collect::<HashSet<_>>();
+            assert_eq!(
+                labels,
+                ["Complete", "Pending"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            );
+            assert!(snapshot
+                .signature_help_at_offset(offset + case.len())
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn constrained_method_help_uses_scoped_compiler_contracts() {
+        let source = r#"
+interface Transform<U> { function transform(U $value): U; }
+function inspectInt<T implements Transform<int>>(T $processor, int $input): int {
+    return $processor->transform(value: $input);
+}
+function inspectString<T implements Transform<string>>(T $processor, string $input): string {
+    return $processor->transform(value: $input);
+}
+"#;
+        let snapshot = AnalysisSnapshot::analyze("constrained-help.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        let offsets = source
+            .match_indices("->transform(")
+            .map(|(offset, _)| offset + 2)
+            .collect::<Vec<_>>();
+        assert_eq!(offsets.len(), 2);
+        for (offset, ty) in offsets.into_iter().zip(["int", "string"]) {
+            let expected = format!("function transform({ty} $value): {ty}");
+            let hover = snapshot.hover_at_offset(offset).unwrap();
+            assert!(hover.markdown.contains(&expected), "{hover:?}");
+            let help = snapshot
+                .signature_help_at_offset(offset + "transform(".len())
+                .unwrap();
+            assert_eq!(help[0].label, expected);
+            assert_eq!(help[0].active_parameter, 0);
+            let items = snapshot.member_completions_at_offset(offset).unwrap();
+            assert_eq!(
+                items
+                    .iter()
+                    .find(|item| item.label == "transform")
+                    .unwrap()
+                    .detail,
+                expected
+            );
+            let arguments = snapshot
+                .named_argument_completions_at_offset(offset + "transform(".len())
+                .unwrap();
+            assert_eq!(arguments.len(), 1);
+            assert_eq!(arguments[0].label, "value:");
+            assert!(arguments[0].detail.contains(&expected));
+        }
+    }
+
+    #[test]
+    fn pending_adapter_requirements_preserve_inherited_and_phase_contracts() {
+        let adapters = include_str!("../../editors/fixtures/stage36a-pending-adapters.doria");
+        let snapshot = AnalysisSnapshot::analyze("pending-adapters.doria", adapters);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        for (capability, request, region, prepare, complete, outcome, transfer) in [
+            (
+                "PendingReadableStream",
+                "ReadRequest",
+                "writable WritableByteRegion",
+                "prepareRead",
+                "completeRead",
+                "ReadOutcome",
+                "read",
+            ),
+            (
+                "PendingWritableStream",
+                "WriteRequest",
+                "ByteRegion",
+                "prepareWrite",
+                "completeWrite",
+                "WriteOutcome",
+                "write",
+            ),
+        ] {
+            for generic in [false, true] {
+                let parameters = if generic {
+                    format!("<T implements {capability}>")
+                } else {
+                    String::new()
+                };
+                let receiver = if generic { "T" } else { capability };
+                if transfer == "read" {
+                    let source = format!(
+                        "use Doria\\Std\\Io\\{{{capability}, {request}, ByteRegion, WritableByteRegion, {outcome}, IoError}};\nfunction inspect{parameters}(writable {receiver} $stream, writable {request} $request, {region} $region): ?{outcome} throws IoError {{ $stream->{prepare}($request, $region); return $stream->{complete}($request, $region); }}"
+                    );
+                    let snapshot =
+                        AnalysisSnapshot::analyze("pending-premature-completion.doria", &source);
+                    assert!(
+                        snapshot
+                            .diagnostics()
+                            .iter()
+                            .any(|diagnostic| diagnostic.code == "E0774"),
+                        "completion cannot reuse selected writable storage before retirement: {:?}",
+                        snapshot.diagnostics()
+                    );
+                }
+                let source = format!(
+                    "use Doria\\Std\\Io\\{{{capability}, {request}, ByteRegion, WritableByteRegion, {outcome}, IoError}};\n\
+                     function prepare{parameters}(writable {receiver} $stream, writable {request} $request, {region} $region): void throws IoError {{ $stream->{prepare}($request, $region); }}\n\
+                     function complete{parameters}(writable {receiver} $stream, {request} $request, {region} $region): ?{outcome} throws IoError {{ return $stream->{complete}($request, $region); }}"
+                );
+                let snapshot = AnalysisSnapshot::analyze("pending-help.doria", &source);
+                assert!(
+                    snapshot.diagnostics().is_empty(),
+                    "{source}\n{:?}",
+                    snapshot.diagnostics()
+                );
+                for (method, request_mode, result) in
+                    [(prepare, "writable ", "void"), (complete, "", outcome)]
+                {
+                    let offset = source.find(&format!("->{method}(")).unwrap() + 2;
+                    let region_type = if transfer == "read" {
+                        "writable Doria\\Std\\Io\\WritableByteRegion"
+                    } else {
+                        "Doria\\Std\\Io\\ByteRegion"
+                    };
+                    let result = if result == "void" {
+                        result.to_string()
+                    } else {
+                        format!("?Doria\\Std\\Io\\{result}")
+                    };
+                    let region_name = if transfer == "read" {
+                        "destination"
+                    } else {
+                        "source"
+                    };
+                    let expected = format!("writable function {method}({request_mode}Doria\\Std\\Io\\{request} $request, {region_type} ${region_name}): {result} throws Doria\\Std\\Io\\IoError");
+                    let hover = snapshot.hover_at_offset(offset).unwrap_or_else(|| {
+                        panic!(
+                            "missing {capability} {method} hover (generic={generic}): {:#?}",
+                            snapshot.semantic_hovers
+                        )
+                    });
+                    assert!(hover.markdown.contains(&expected), "{hover:?}");
+                    let help = snapshot
+                        .signature_help_at_offset(offset + method.len() + 1)
+                        .unwrap();
+                    assert_eq!(help[0].label, expected);
+                    let items = snapshot.member_completions_at_offset(offset).unwrap();
+                    let labels = items
+                        .iter()
+                        .map(|item| item.label.as_str())
+                        .collect::<HashSet<_>>();
+                    assert_eq!(
+                        labels,
+                        [transfer, "readinessSource", prepare, complete]
+                            .into_iter()
+                            .collect()
+                    );
+                    assert_eq!(
+                        items
+                            .iter()
+                            .find(|item| item.label == method)
+                            .unwrap()
+                            .detail,
+                        expected
+                    );
+                    assert_eq!(
+                        items
+                            .iter()
+                            .find(|item| item.label == transfer)
+                            .unwrap()
+                            .detail,
+                        format!("writable function {transfer}({region_type} ${region_name}): Doria\\Std\\Io\\{outcome} throws Doria\\Std\\Io\\IoError")
+                    );
+                    assert!(snapshot.declaration_span_at_offset(offset).is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pending_request_members_preserve_readonly_outcomes_and_writable_completion() {
+        for (request, outcome) in [
+            ("ReadRequest", "ReadOutcome"),
+            ("WriteRequest", "WriteOutcome"),
+        ] {
+            let source = format!("use Doria\\Std\\Io\\{{{request}, {outcome}}};\nfunction prepare(writable {request} $request): void {{ $request->complete({outcome}::WouldBlock); }}\nfunction completed({request} $request): ?{outcome} {{ return $request->outcome; }}");
+            let snapshot = AnalysisSnapshot::analyze("pending-request-help.doria", &source);
+            assert!(
+                snapshot.diagnostics().is_empty(),
+                "{source}\n{:?}",
+                snapshot.diagnostics()
+            );
+            let offset = source.find("->complete(").unwrap() + 2;
+            let expected = format!("writable function Doria\\Std\\Io\\{request}::complete(Doria\\Std\\Io\\{outcome} $outcome): void");
+            assert!(snapshot
+                .hover_at_offset(offset)
+                .unwrap()
+                .markdown
+                .contains(&expected));
+            assert_eq!(
+                snapshot
+                    .signature_help_at_offset(offset + "complete(".len())
+                    .unwrap()[0]
+                    .label,
+                expected
+            );
+            let writable = snapshot.member_completions_at_offset(offset).unwrap();
+            assert_eq!(
+                writable
+                    .iter()
+                    .find(|item| item.label == "complete")
+                    .unwrap()
+                    .detail,
+                expected
+            );
+            let offset = source.find("->outcome").unwrap() + 2;
+            let expected = format!("$outcome {{ get: ?Doria\\Std\\Io\\{outcome} }}");
+            let readonly = snapshot.member_completions_at_offset(offset).unwrap();
+            assert!(!readonly.iter().any(|item| item.label == "complete"));
+            let completion = readonly
+                .iter()
+                .find(|item| item.label == "outcome")
+                .unwrap();
+            assert_eq!(completion.detail, expected);
+            assert!(completion
+                .documentation
+                .as_ref()
+                .unwrap()
+                .contains("**Ambient I/O:**"));
+            let hover = snapshot.hover_at_offset(offset).unwrap().markdown;
+            let signature = hover.split("```").nth(1).unwrap();
+            assert!(
+                signature.contains(&format!("get: ?Doria\\Std\\Io\\{outcome}")),
+                "{hover}"
+            );
+            assert!(!signature.contains("throws"), "{hover}");
+            assert!(hover.contains("**Ambient I/O:**"), "{hover}");
+            assert!(snapshot.declaration_span_at_offset(offset).is_none());
+        }
+    }
+
+    #[test]
+    fn pending_request_binding_hovers_use_canonical_identity_access_and_call_scope() {
+        for request in ["ReadRequest", "WriteRequest"] {
+            let source = format!("use Doria\\Std\\Io\\{request} as RequestView;\nfunction inspect(RequestView $request): void {{ let $alias = $request; let $again = $alias; }}\nfunction prepare(writable RequestView $request): void {{ let $alias = $request; let $again = $alias; }}");
+            let snapshot = AnalysisSnapshot::analyze("request-bindings.doria", &source);
+            assert!(
+                snapshot.diagnostics().is_empty(),
+                "{:?}",
+                snapshot.diagnostics()
+            );
+            let (_, compiler) =
+                doriac::analyze_source_for_ide("request-bindings.doria", &source).unwrap();
+            let mut count = 0;
+            for (span, binding) in &compiler.info.binding_resolution.uses_by_span {
+                if span.source != SourceId::default() {
+                    continue;
+                }
+                let declaration = &compiler.info.binding_resolution.declarations_by_id[binding];
+                let Some(ResolvedType::Class(class)) = declaration.source_type.as_ref() else {
+                    continue;
+                };
+                assert!(doriac::compiler_known_stream::is_pending_request(
+                    &class.name
+                ));
+                assert_ne!(declaration.ownership, BindingOwnership::Owned);
+                let hover = snapshot.hover_at_offset(span.start).unwrap().markdown;
+                let access = if declaration.ownership == BindingOwnership::WritableBorrow {
+                    "writable "
+                } else {
+                    ""
+                };
+                assert!(
+                    hover.contains(&format!(
+                        "{access}Doria\\Std\\Io\\{request} ${}",
+                        declaration.name
+                    )),
+                    "{hover}"
+                );
+                assert!(hover.contains("Call-Scoped Request View"), "{hover}");
+                assert!(
+                    !hover.contains("result's last use") && !hover.contains("result's cleanup"),
+                    "{hover}"
+                );
+                count += 1;
+            }
+            assert_eq!(count, 4);
+        }
+        let source =
+            "namespace App; class ReadRequest {} function inspect(ReadRequest $request): void {}";
+        let snapshot = AnalysisSnapshot::analyze("ordinary-request-name.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        let hover = snapshot
+            .hover_at_offset(source.find("$request").unwrap())
+            .unwrap()
+            .markdown;
+        assert!(!hover.contains("Call-Scoped Request View"), "{hover}");
+    }
+
+    #[test]
+    fn consuming_class_and_trait_signatures_preserve_compiler_receiver_modes() {
+        for declarations in [
+            "class Resource { consuming function finish(): int { return 42; } }",
+            "trait Finishing { consuming function finish(): int { return 42; } } class Resource { uses Finishing { Finishing::finish as finishAlias; } }",
+        ] {
+            let source = format!("{declarations} function main(): void {{ let $resource = new Resource(); let $value = $resource->finish(); }}");
+            let snapshot = AnalysisSnapshot::analyze("consuming-help.doria", &source);
+            assert!(snapshot.diagnostics().is_empty(), "{source}\n{:?}", snapshot.diagnostics());
+            let offset = source.find("->finish(").unwrap() + 2;
+            let expected = "consuming function Resource::finish(): int";
+            assert!(snapshot.hover_at_offset(offset).unwrap().markdown.contains(expected));
+            assert_eq!(snapshot.signature_help_at_offset(offset + "finish(".len()).unwrap()[0].label, expected);
+            let completions = snapshot.member_completions_at_offset(offset).unwrap();
+            assert_eq!(completions.iter().find(|item| item.label == "finish").unwrap().detail, expected);
+            if let Some(adaptation) = snapshot.trait_adaptations.first() {
+                let items = snapshot.trait_adaptation_completions_at_offset(adaptation.method.span.start).unwrap();
+                assert!(items.iter().any(|item| item.detail == "consuming function Finishing::finish(): int"), "{items:?}");
+                assert_eq!(completions.iter().find(|item| item.label == "finishAlias").unwrap().detail, "consuming function Resource::finishAlias(): int");
+            }
+            let program = doriac::parse_source("consuming-help.doria", declarations).unwrap();
+            let method = program.items.iter().find_map(|item| {
+                let members = match item {
+                    Item::Class(declaration) => &declaration.members,
+                    Item::Trait(declaration) => &declaration.members,
+                    _ => return None,
+                };
+                members.iter().find_map(|member| match member {
+                    ClassMember::Method(method) => Some(method),
+                    _ => None,
+                })
+            }).unwrap();
+            assert_eq!(function_signature(method, Some("Resource")), expected);
+            assert!(override_stub(method).starts_with("override consuming function finish(): int"));
+        }
+    }
+
+    #[test]
+    fn generic_enum_hovers_separate_authored_identity_from_checked_applications() {
+        let source = include_str!("../../editors/fixtures/stage36a-generic-enums.doria");
+        let snapshot = AnalysisSnapshot::analyze("generic-enum-hover.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        let declaration = source.find("Optional<T>").unwrap();
+        let declaration_hover = snapshot.hover_at_offset(declaration).unwrap();
+        assert!(declaration_hover.markdown.contains("enum Optional<T>"));
+        assert!(!declaration_hover.markdown.contains("Nominal Copy enum"));
+        assert!(!declaration_hover.markdown.contains("Nominal Move enum"));
+
+        for (expression, expected) in [
+            ("Optional::Some(7)", "Optional<int>"),
+            ("Optional::Some(new Token", "Optional<Token>"),
+            ("Optional::None;", "Optional<int>"),
+        ] {
+            let offset = source.find(expression).unwrap();
+            let hover = snapshot.hover_at_offset(offset).unwrap();
+            assert!(hover.markdown.contains(expected), "{hover:?}");
+            assert_eq!(
+                snapshot.declaration_span_at_offset(offset).unwrap().start,
+                declaration
+            );
+        }
+        let parameter = source.find("Optional<int> $value").unwrap();
+        let hover = snapshot.hover_at_offset(parameter).unwrap();
+        assert!(hover.markdown.contains("enum Optional<int>"), "{hover:?}");
+    }
+
+    #[test]
+    fn compiler_stream_type_and_outcome_hovers_use_nominal_metadata() {
+        for name in [
+            "PendingReadableStream",
+            "PendingWritableStream",
+            "ReadRequest",
+            "WriteRequest",
+        ] {
+            assert!(doriac::compiler_known_stream::CANONICAL_TYPES
+                .contains(&format!("Doria\\Std\\Io\\{name}").as_str()));
+        }
+        for name in doriac::compiler_known_stream::CANONICAL_TYPES {
+            let inline_copy = doriac::inline_value::InlineValueKind::for_name(name);
+            let mut arguments = inline_copy
+                .filter(|kind| kind.argument_count() > 0)
+                .map(|kind| {
+                    format!(
+                        "<{}>",
+                        vec!["Doria\\Std\\Io\\ReadableFile"; kind.argument_count()].join(", ")
+                    )
+                })
+                .unwrap_or_default();
+            if let Some(arguments_for_new_type) = match name.rsplit('\\').next().unwrap() {
+                "FinishOutcome" | "LockOutcome" => Some("<int, int>"),
+                "BorrowedFinishOutcome" | "BorrowedLockOutcome" => Some("<int>"),
+                "BufferedReader"
+                | "BorrowedBufferedReader"
+                | "LineReader"
+                | "BorrowedLineReader"
+                | "FileLock"
+                | "LockedFile" => Some("<Doria\\Std\\Io\\ReadableFile>"),
+                "BufferedWriter" | "BorrowedBufferedWriter" => {
+                    Some("<Doria\\Std\\Io\\WritableFile>")
+                }
+                _ => None,
+            } {
+                arguments = arguments_for_new_type.to_string();
+            }
+            let kind = doriac::compiler_known_stream::declarations()
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    Item::Enum(declaration) if declaration.name == name => Some("enum"),
+                    Item::Interface(declaration) if declaration.name == name => Some("interface"),
+                    Item::Class(declaration) if declaration.name == name => Some("class"),
+                    _ => None,
+                })
+                .expect("canonical stream type must have a compiler declaration");
+            for (prefix, spelling) in [
+                (String::new(), name),
+                (format!("use {name} as View; "), "View"),
+            ] {
+                let source =
+                    format!("{prefix}function inspect({spelling}{arguments} $value): void {{}}");
+                let snapshot = AnalysisSnapshot::analyze("stream-type.doria", &source);
+                assert!(
+                    snapshot.diagnostics().is_empty(),
+                    "{:?}",
+                    snapshot.diagnostics()
+                );
+                let offset = source
+                    .rfind(&format!("{spelling}{arguments} $value"))
+                    .unwrap()
+                    + spelling.len()
+                    - 1;
+                let hover = snapshot.hover_at_offset(offset).unwrap();
+                if let Some(inline_copy) = inline_copy {
+                    assert!(
+                        hover
+                            .markdown
+                            .contains(&inline_value_documentation(inline_copy)),
+                        "{hover:?}"
+                    );
+                    assert!(!hover.markdown.contains("class "), "{hover:?}");
+                } else {
+                    assert!(
+                        hover.markdown.contains(&format!("{kind} {name}")),
+                        "{hover:?}"
+                    );
+                }
+                if let Some(request) = pending_request_documentation(name) {
+                    assert!(hover.markdown.contains(request), "{hover:?}");
+                }
+                if let Some(class) = doriac::compiler_known_stream::declarations()
+                    .items
+                    .iter()
+                    .find_map(|item| match item {
+                        Item::Class(class) if class.name == name => Some(class),
+                        _ => None,
+                    })
+                {
+                    for interface in &class.implements {
+                        assert!(
+                            hover.markdown.contains(&format!("`{}`", interface.ty)),
+                            "{hover:?}"
+                        );
+                    }
+                }
+                assert!(snapshot.declaration_span_at_offset(offset).is_none());
+            }
+        }
+        for (name, case, cases) in [
+            (
+                "ReadOutcome",
+                "Data",
+                vec!["Data", "WouldBlock", "EndOfStream", "TimedOut"],
+            ),
+            ("WriteOutcome", "Accepted", vec!["Accepted", "WouldBlock"]),
+        ] {
+            let qualified = format!("Doria\\Std\\Io\\{name}");
+            let source = format!(
+                "function inspect(): void {{ let $value = {qualified}::{case}(byteCount: 0); }}"
+            );
+            let snapshot = AnalysisSnapshot::analyze("stream-outcome.doria", &source);
+            assert!(
+                snapshot.diagnostics().is_empty(),
+                "{:?}",
+                snapshot.diagnostics()
+            );
+            let offset = source.find(&format!("::{case}")).unwrap() + 2;
+            let signature = format!("{qualified}::{case}(int $byteCount): {qualified}");
+            let hover = snapshot.hover_at_offset(offset).unwrap();
+            assert!(hover.markdown.contains(&signature), "{hover:?}");
+            assert!(hover.markdown.contains("Copy enum"), "{hover:?}");
+            let help = snapshot
+                .signature_help_at_offset(source.find("byteCount:").unwrap())
+                .unwrap();
+            assert_eq!(help[0].label, signature);
+            assert_eq!(help[0].active_parameter, 0);
+            let labels = snapshot
+                .static_completions_at_offset(offset)
+                .unwrap()
+                .into_iter()
+                .map(|item| item.label)
+                .collect::<HashSet<_>>();
+            assert_eq!(labels, cases.into_iter().map(str::to_string).collect());
+        }
+        let source = "function inspect(Doria\\Std\\Io\\IoError $error): ?int { return $error->transferredByteCount; }";
+        let snapshot = AnalysisSnapshot::analyze("io-progress.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        let hover = snapshot
+            .hover_at_offset(source.rfind("transferredByteCount").unwrap())
+            .unwrap();
+        assert!(
+            hover.markdown.contains("?int $transferredByteCount"),
+            "{hover:?}"
+        );
+        assert!(hover.markdown.contains("readonly"), "{hover:?}");
+    }
+
+    #[test]
     fn stage35_erased_and_narrowed_completions_use_only_the_requirement_view() {
         let source = r#"
 interface Read<T> { function read(T $value): T; }
@@ -10690,6 +15091,75 @@ let $wrapper = fn() with ($callback) => $callback();
             .markdown
             .contains("Compiler-resolved function value after flow narrowing"));
         assert!(!nullable_use.markdown.contains("?function(): int $nullable"));
+    }
+
+    #[test]
+    fn readiness_callback_hovers_preserve_compiler_owned_return_types() {
+        for callback in [
+            "fn(take ReadinessSet $input) => $input",
+            "function (take ReadinessSet $input): ReadinessSet { return $input; }",
+            "when ($choose) { return fn(take ReadinessSet $input) => $input; } else { return function (take ReadinessSet $input): ReadinessSet { return $input; }; }",
+        ] {
+            let source = format!(
+                r#"use Doria\Std\Io\{{ReadinessSet, IoError}};
+function exercise(bool $choose): void throws IoError {{
+    let $forward = {callback};
+    let $returned = $forward(
+        new ReadinessSet()
+    );
+}}
+function main(): void {{}}
+"#
+            );
+            let (_, compiler) =
+                doriac::analyze_source_for_ide("readiness-callback-hover.doria", &source).unwrap();
+            assert!(
+                compiler.diagnostics.is_empty(),
+                "{:?}",
+                compiler.diagnostics
+            );
+            let snapshot = AnalysisSnapshot::analyze("readiness-callback-hover.doria", &source);
+            assert!(
+                snapshot.diagnostics().is_empty(),
+                "{:?}",
+                snapshot.diagnostics()
+            );
+            assert_eq!(
+                compiler.info.closures.len(),
+                if callback.starts_with("when") { 2 } else { 1 }
+            );
+            for closure in compiler.info.closures.values() {
+                let hover = snapshot.hover_at_offset(closure.closure_id.start).unwrap();
+                assert!(
+                    hover.markdown.contains(&display_function_type_with_effects(
+                        &closure.function_type,
+                        &closure.required_checked_effects,
+                    )),
+                    "{}",
+                    hover.markdown
+                );
+                let ResolvedType::Function(function) = &closure.function_type else {
+                    panic!("closure must have a function type");
+                };
+                assert!(function.return_borrow.is_none_or(|borrow|
+                    borrow.kind != doriac::types::ReturnBorrowKind::Value
+                ));
+            }
+            let call = compiler.info.callable_value_calls.values().next().unwrap();
+            let offset = source.find("$forward(\n").unwrap() + "$forward(\n".len();
+            let hover = snapshot.hover_at_offset(offset).unwrap();
+            assert!(
+                hover.markdown.contains(&display_resolved_type(&call.return_type)),
+                "{}",
+                hover.markdown
+            );
+            assert!(
+                hover.markdown.contains("Semantically checked callable-value invocation"),
+                "{}",
+                hover.markdown
+            );
+            assert!(!hover.markdown.contains("Returns a readonly borrow"));
+        }
     }
 
     #[test]
