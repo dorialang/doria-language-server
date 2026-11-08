@@ -12,7 +12,7 @@ This project follows the Doria toolchain CalVer.
   `scripts/check_rust_toolchain_authority.php` rejects workflows that install
   or select another stable Rust.
 - Synchronized the language server with Stage 36a and pinned the compiler to
-  `1f68889d696f0d633d7d97eaf026ae729528a450`. Hover and completion use
+  `4670b18febc4a45d6729042d629d693e930b3489`. Hover and completion use
   compiler facts for conditional capabilities, generic enums, inline Copy
   values, retained borrows, consuming receivers, and owned-field extraction.
   Removed name-only property recovery for generic compiler-supplied classes;
