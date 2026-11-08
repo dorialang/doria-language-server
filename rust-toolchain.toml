@@ -1,0 +1,11 @@
+# The exact compiler for every local build and every CI job; it matches the
+# release the pinned doriac revision is validated with (doria's
+# rust-toolchain.toml). CI installs this file's toolchain with
+# `rustup toolchain install` and no toolchain argument, so local and CI builds
+# cannot drift apart when a new stable Rust is released. Moving to a newer Rust
+# is a deliberate change to this line. scripts/check_rust_toolchain_authority.php
+# enforces this.
+[toolchain]
+channel = "1.98.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

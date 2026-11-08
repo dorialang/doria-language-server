@@ -6,6 +6,11 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Pinned the Rust toolchain to 1.98.1 in `rust-toolchain.toml`, the release the
+  pinned compiler is validated with. Every CI and release job installs it with
+  `rustup toolchain install` and no toolchain name, and
+  `scripts/check_rust_toolchain_authority.php` rejects workflows that install
+  or select another stable Rust.
 - Synchronized the language server with Stage 36a and pinned the compiler to
   `1f68889d696f0d633d7d97eaf026ae729528a450`. Hover and completion use
   compiler facts for conditional capabilities, generic enums, inline Copy
