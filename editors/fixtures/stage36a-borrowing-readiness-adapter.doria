@@ -1,0 +1,16 @@
+use Doria\Std\Io\{ReadinessSet, ReadinessStream, ReadinessSource, ReadableFile, File, IoError};
+
+class BorrowingReady implements ReadinessStream, Iterator<int>
+{
+    internal ReadableFile $file;
+
+    function __construct(parameter take ReadableFile $file, borrow List<int> $source)
+    {
+        $this->file = $file;
+    }
+
+    ReadinessSource $readinessSource { borrowed get => $this->file->readinessSource; }
+    function hasCurrent(): bool { return true; }
+    function getCurrent(): int { return $this->source[0]; }
+    writable function advance(): void {}
+}

@@ -1,0 +1,123 @@
+class Factory<T>
+{
+    function(take T): T $identity = fn(take T $value) => $value;
+}
+
+class Callbacks
+{
+    function(take Cursor): Cursor $identity = fn(take Cursor $value) => $value;
+    function(take List<Cursor>): List<Cursor> $identities = fn(take List<Cursor> $value) => $value;
+}
+
+class Item { function __construct(int $value) {} }
+
+class Cursor implements Iterator<int>
+{
+    writable bool $available = true;
+    function __construct(borrow List<int> $source) {}
+    function hasCurrent(): bool { return $this->available; }
+    function getCurrent(): int { return $this->source[0]; }
+    writable function advance(): void { $this->available = false; }
+}
+
+class Shelf implements Iterable<int>
+{
+    function __construct(take List<int> $source) {}
+    function iterator(): Iterator<int> { return new Cursor($this->source); }
+}
+
+class OwnedCursor implements Iterator<int>
+{
+    writable int $value = 13;
+    function hasCurrent(): bool { return $this->value != 0; }
+    function getCurrent(): int { return $this->value; }
+    writable function advance(): void { $this->value = 0; }
+}
+
+function pass(take Iterator<int> $cursor): Iterator<int> { return $cursor; }
+function relay<T>(take T $value): T
+{
+    function(take T): T $identity = function(take T $input): T { return $input; };
+    return $identity($value);
+}
+function obtain(Iterable<int> $shelf): Iterator<int> { return pass($shelf->iterator()); }
+function popIterator(take List<Iterator<int>> $incoming): ?Iterator<int>
+{
+    let writable $values = $incoming;
+    return $values->pop();
+}
+function popCallback(take List<?function(): int> $incoming): ?function(): int
+{
+    let writable $values = $incoming;
+    return $values->pop();
+}
+function popNested(take List<List<Iterator<int>>> $incoming): ?List<Iterator<int>>
+{
+    let writable $values = $incoming;
+    return $values->pop();
+}
+
+function main(): void
+{
+    let $integers = new Factory<int>();
+    let $items = new Factory<Item>();
+    echo ($integers->identity)(42);
+    echo ($items->identity)(new Item(3))->value;
+    function(take int): int $integer = fn(take int $input) => $input;
+    function(take Item): Item $item = fn(take Item $input) => $input;
+    echo $integer(42);
+    echo $item(new Item(3))->value;
+    Iterable<int> $shelf = new Shelf([13]);
+    { let writable $cursor = obtain($shelf); echo $cursor->getCurrent(); $cursor->advance(); }
+    foreach ($shelf as int $value) { echo $value; }
+    let $cursor = popIterator([new OwnedCursor()]);
+    if ($cursor != null) { echo $cursor->getCurrent(); }
+    let $callback = popCallback([fn() => 17]);
+    if ($callback != null) { echo $callback(); }
+    let $nested = popNested([[new OwnedCursor()]]);
+    if ($nested != null) { echo $nested[0]->getCurrent(); }
+    writable List<int> $source = [7];
+    {
+        function(take Cursor): Cursor $identity = fn(take Cursor $input) => $input;
+        function(take List<Cursor>): List<Cursor> $identities = fn(take List<Cursor> $input) => $input;
+        let $typedCursor = $identity(new Cursor($source));
+        echo $typedCursor->getCurrent();
+        let $typedCursors = $identities([new Cursor($source)]);
+        echo $typedCursors[0]->getCurrent();
+        let $callbacks = new Callbacks();
+        let $propertyCursor = ($callbacks->identity)(new Cursor($source));
+        echo $propertyCursor->getCurrent();
+        let $propertyCursors = ($callbacks->identities)([new Cursor($source)]);
+        echo $propertyCursors[0]->getCurrent();
+        let $factory = new Factory<Cursor>();
+        let $genericCursor = ($factory->identity)(new Cursor($source));
+        echo $genericCursor->getCurrent();
+        let $factories = new Factory<List<Cursor>>();
+        let $genericCursors = ($factories->identity)([new Cursor($source)]);
+        echo $genericCursors[0]->getCurrent();
+        let $relayedCursor = relay(new Cursor($source));
+        echo $relayedCursor->getCurrent();
+        let $relayedCursors = relay([new Cursor($source)]);
+        echo $relayedCursors[0]->getCurrent();
+        function(take Cursor): ?Cursor $nullableIdentity = fn(take Cursor $input) => $input;
+        let $nullableCursor = $nullableIdentity(new Cursor($source));
+        if ($nullableCursor != null) { echo $nullableCursor->getCurrent(); }
+    }
+    $source->add(8);
+    {
+        function(take Cursor): ?Cursor $nullableEmpty = fn(take Cursor $input) => null;
+        let $emptyCursor = $nullableEmpty(new Cursor($source));
+        $source->add(10);
+        if ($emptyCursor != null) { echo $emptyCursor->getCurrent(); }
+        function(take List<Cursor>): List<Cursor> $empty = fn(take List<Cursor> $input) => [];
+        let $emptyCursors = $empty([new Cursor($source)]);
+        $source->add(11);
+        echo $emptyCursors->count;
+    }
+    let $borrowedCursor = popIterator([new Cursor($source)]);
+    if ($borrowedCursor != null) { echo $borrowedCursor->getCurrent(); }
+    let $borrowedCallback = popCallback([fn() with ($source) => $source[0]]);
+    if ($borrowedCallback != null) { echo $borrowedCallback(); }
+    let $borrowedNested = popNested([[new Cursor($source)]]);
+    if ($borrowedNested != null) { echo $borrowedNested[0]->getCurrent(); }
+}

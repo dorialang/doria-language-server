@@ -1,0 +1,19 @@
+use Doria\Std\Time\Duration as Interval;
+
+function copyInterval(Interval $interval): Interval { return $interval; }
+function optionalNanoseconds(?Interval $interval): ?int64 { return $interval?->nanoseconds; }
+
+function main(): void
+{
+    let $minimum = Interval::fromNanoseconds(nanoseconds: -9223372036854775808);
+    let $maximum = Interval::fromNanoseconds(9223372036854775807);
+    let writable $interval = Interval::fromNanoseconds(-250000000);
+    let $zero = Interval::fromNanoseconds(0);
+    let $copy = copyInterval($interval);
+    ?Interval $optional = $interval;
+    echo $minimum->nanoseconds . ":" . $maximum->nanoseconds . "\n";
+    echo $copy->nanoseconds . ":" . $interval->nanoseconds . ":" . $zero->nanoseconds . "\n";
+    if ((optionalNanoseconds($optional) ?? 0) != -250000000 || optionalNanoseconds(null) != null) {
+        panic("duration projection changed");
+    }
+}

@@ -6,6 +6,53 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 class DoriaLexerTest : TestCase() {
+    fun testConditionalClausesKeepWhereContextualAndComputedHooksHighlighted() {
+        val fixture = Files.readString(Path.of("..", "..", "fixtures", "stage36a-conditional-capabilities.doria"))
+        val tokens = lex(fixture)
+        val names = tokens.filter { it.text == "where" }
+        assertEquals(8, names.count { it.type == DoriaTokenTypes.KEYWORD })
+        assertEquals(1, names.count { it.type == DoriaTokenTypes.FUNCTION_DECLARATION })
+        assertEquals(1, names.count { it.type == DoriaTokenTypes.FUNCTION_CALL })
+        assertEquals(2, tokens.count { it.text == "get" && it.type == DoriaTokenTypes.KEYWORD })
+        assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
+        val multiline = lex("class C<T> { int \$value where /* condition */ (T implements Ready,\n Other)\n { get => 1; } }")
+        assertEquals(DoriaTokenTypes.KEYWORD, multiline.first { it.text == "where" }.type)
+        assertEquals(DoriaTokenTypes.KEYWORD, multiline.first { it.text == "get" }.type)
+        val ordinary = lex("function where(int \$where): int { return \$where; } where(1); \$value->where(); \"where (T implements Ready)\"; // where (T implements Ready)\n")
+        assertFalse(ordinary.any { it.text == "where" && it.type == DoriaTokenTypes.KEYWORD })
+    }
+
+    fun testConsumingReceiversDoNotChangeCallbackOwnershipOrInvocationTokens() {
+        val fixture = Files.readString(Path.of("..", "..", "fixtures", "stage36a-consuming-methods.doria"))
+        val tokens = lex(fixture)
+        for (modifier in listOf("consuming", "take", "writable")) {
+            val occurrences = tokens.filter { it.text == modifier }
+            assertTrue(modifier, occurrences.isNotEmpty())
+            assertTrue(modifier, occurrences.all { it.type == DoriaTokenTypes.MODIFIER })
+        }
+        assertEquals(2, tokens.count { it.text == "consuming" })
+        assertEquals(DoriaTokenTypes.KEYWORD, tokens.first { it.text == "once" }.type)
+        for (name in listOf("finish", "continueBuilding", "accept", "acceptOnce", "acceptWriter")) {
+            assertEquals(name, DoriaTokenTypes.FUNCTION_DECLARATION, tokens.first { it.text == name }.type)
+        }
+        assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
+    }
+
+    fun testConsumingModifierRespectsTriviaAndIdentifierBoundaries() {
+        val tokens = lex(
+            "internal consuming /* receiver */\n function finish(): void {} " +
+                "consumingValue consuming_more consuming1 \$consuming; \"consuming\"; // consuming\n",
+        )
+        assertEquals(DoriaTokenTypes.MODIFIER, tokens.first { it.text == "consuming" }.type)
+        assertEquals(DoriaTokenTypes.FUNCTION_DECLARATION, tokens.first { it.text == "finish" }.type)
+        for (name in listOf("consumingValue", "consuming_more", "consuming1")) {
+            assertEquals(name, DoriaTokenTypes.IDENTIFIER, tokens.first { it.text == name }.type)
+        }
+        assertEquals(DoriaTokenTypes.VARIABLE, tokens.first { it.text == "\$consuming" }.type)
+        assertEquals(DoriaTokenTypes.STRING, tokens.first { it.text == "\"consuming\"" }.type)
+        assertEquals(DoriaTokenTypes.COMMENT, tokens.first { it.text.startsWith("//") }.type)
+    }
+
     fun testStage36HookHeadsKeepOrdinaryGetAndSetCallableNames() {
         val fixture = Files.readString(Path.of("..", "..", "fixtures", "stage36-property-hooks.doria"))
         val tokens = lex(fixture)
@@ -219,6 +266,20 @@ class DoriaLexerTest : TestCase() {
         assertEquals(DoriaTokenTypes.STRING, tokens.first { it.text == "\"parameter override\"" }.type)
         assertEquals(DoriaTokenTypes.COMMENT, tokens.first { it.text.startsWith("//") }.type)
         assertFalse(tokens.any { it.type == DoriaTokenTypes.INVALID })
+    }
+
+    fun testReservedMemberNamesUseOrdinaryMemberTokens() {
+        val fixture = Files.readString(Path.of("..", "..", "fixtures", "stage36a-reserved-members.doria"))
+        val tokens = lex(fixture + "\nasync await spawn scope")
+        for (name in listOf("async", "await", "spawn", "scope")) {
+            val names = tokens.filter { it.text == name }
+            assertEquals(DoriaTokenTypes.FUNCTION_DECLARATION, names.first().type)
+            assertEquals(
+                if (name in listOf("spawn", "scope")) DoriaTokenTypes.STATIC_METHOD_CALL else DoriaTokenTypes.METHOD_CALL,
+                names[names.lastIndex - 1].type,
+            )
+            assertEquals(DoriaTokenTypes.KEYWORD, names.last().type)
+        }
     }
 
     fun testNativeTestingSlice2UsesOrdinaryCallMemberAndTypeTokens() {

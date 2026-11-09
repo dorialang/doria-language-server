@@ -68,8 +68,7 @@ jobs:
       - name: Set up Rust
         shell: bash
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install --no-self-update
           rustup target add "${{ matrix.target }}"
 
       - name: Build release binary

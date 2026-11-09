@@ -448,6 +448,12 @@ class DoriaLexer(private val highlightHooks: Boolean = true) : LexerBase() {
         tokenType = when (text) {
             in INVALID_KEYWORDS -> DoriaTokenTypes.INVALID
 
+            "async", "await", "spawn", "scope" -> when (previousAccessor()) {
+                "->" -> if (isCallName()) DoriaTokenTypes.METHOD_CALL else DoriaTokenTypes.PROPERTY
+                "::" -> if (isCallName()) DoriaTokenTypes.STATIC_METHOD_CALL else DoriaTokenTypes.STATIC_PROPERTY
+                else -> if (isFunctionDeclarationName()) DoriaTokenTypes.FUNCTION_DECLARATION else DoriaTokenTypes.KEYWORD
+            }
+
             "use" -> useTokenType()
 
             "uses" -> DoriaTokenTypes.TRAIT_USES_KEYWORD
@@ -505,6 +511,8 @@ class DoriaLexer(private val highlightHooks: Boolean = true) : LexerBase() {
             "null" -> DoriaTokenTypes.NULL_LITERAL
 
             else -> when {
+                text == "where" && isNominalConditionHead() ->
+                    DoriaTokenTypes.KEYWORD
                 highlightHooks && text in setOf("get", "set", "borrowed") && isHookHeaderToken() ->
                     if (text == "borrowed") DoriaTokenTypes.MODIFIER else DoriaTokenTypes.KEYWORD
                 isFunctionDeclarationName() -> DoriaTokenTypes.FUNCTION_DECLARATION
@@ -668,6 +676,11 @@ class DoriaLexer(private val highlightHooks: Boolean = true) : LexerBase() {
     private fun isFunctionDeclarationName(): Boolean =
         nextNonWhitespace(tokenEnd) in setOf('(', '<') && previousIdentifier() == "function"
 
+    private fun isNominalConditionHead(): Boolean {
+        val match = NOMINAL_CONDITION_START.matchAt(buffer, tokenEnd) ?: return false
+        return match.range.last < endOffset
+    }
+
     private fun isHookHeaderToken(): Boolean {
         if (hookOffsets == null) {
             // Reuse tokenization for balanced presentation scopes, including on lexer restart.
@@ -675,6 +688,7 @@ class DoriaLexer(private val highlightHooks: Boolean = true) : LexerBase() {
             lexer.start(buffer, 0, endOffset, MODE_NORMAL)
             val scopes = ArrayDeque<Boolean>()
             val initializerDepths = mutableSetOf<Int>()
+            val conditionalPropertyDepths = mutableSetOf<Int>()
             val expressionBodyDepths = mutableSetOf<Int>()
             val offsets = mutableSetOf<Int>()
             var previous = ""
@@ -689,21 +703,26 @@ class DoriaLexer(private val highlightHooks: Boolean = true) : LexerBase() {
                             when (text) {
                                 "{" -> {
                                     val expressionBody = expressionBodyDepths.remove(depth)
+                                    val conditionalProperty = conditionalPropertyDepths.remove(depth)
                                     val hooks = !expressionBody &&
-                                        (previousType == DoriaTokenTypes.VARIABLE || depth in initializerDepths)
+                                        (previousType == DoriaTokenTypes.VARIABLE || conditionalProperty || depth in initializerDepths)
                                     if (hooks) initializerDepths.remove(depth)
                                     scopes.addLast(hooks)
                                 }
                                 "(", "[" -> scopes.addLast(false)
                                 "}", ")", "]" -> {
                                     initializerDepths.remove(depth)
+                                    conditionalPropertyDepths.remove(depth)
                                     expressionBodyDepths.remove(depth)
                                     if (scopes.isNotEmpty()) scopes.removeLast()
                                 }
                             }
                         text == "=" && previousType == DoriaTokenTypes.VARIABLE -> initializerDepths.add(depth)
+                        text == "where" && type == DoriaTokenTypes.KEYWORD && previousType == DoriaTokenTypes.VARIABLE ->
+                            conditionalPropertyDepths.add(depth)
                         text == ";" -> {
                             initializerDepths.remove(depth)
+                            conditionalPropertyDepths.remove(depth)
                             expressionBodyDepths.remove(depth)
                         }
                         depth in initializerDepths && type == DoriaTokenTypes.KEYWORD &&
@@ -1047,6 +1066,9 @@ class DoriaLexer(private val highlightHooks: Boolean = true) : LexerBase() {
             "(?:\\s|/\\*[\\s\\S]*?\\*/|//[^\\r\\n]*(?:\\r?\\n|$)|#(?!\\[)[^\\r\\n]*(?:\\r?\\n|$))*"
         private val FUNCTION_BEFORE_REJECTED_TAKE = Regex("\\bfunction" + CODE_TRIVIA + "$")
         private val OPEN_PAREN_AFTER_CODE_TRIVIA = Regex("^" + CODE_TRIVIA + "\\(")
+        private val NOMINAL_CONDITION_START = Regex(
+            CODE_TRIVIA + "\\(" + CODE_TRIVIA + "[A-Za-z_][A-Za-z0-9_]*" + CODE_TRIVIA + "\\bimplements\\b",
+        )
         private val HASH_COMMENT_MARKER = Regex("#(?!\\[)")
         private val HOOK_TRIVIA_TOKENS = setOf(
             DoriaTokenTypes.WHITE_SPACE, DoriaTokenTypes.COMMENT, DoriaTokenTypes.DOC_COMMENT,
@@ -1133,7 +1155,7 @@ class DoriaLexer(private val highlightHooks: Boolean = true) : LexerBase() {
             "instanceof",
         )
 
-        private val MODIFIERS = setOf("take", "borrow", "writable", "readonly", "internal", "static", "shared")
+        private val MODIFIERS = setOf("take", "borrow", "writable", "consuming", "readonly", "internal", "static", "shared")
 
         private val CONSTANT_REFERENCE_NAME = Regex("[A-Z][A-Z0-9_]+")
         private val ENUM_CASE_REFERENCE_NAME = Regex("[A-Z][A-Za-z0-9]*[a-z][A-Za-z0-9]*")

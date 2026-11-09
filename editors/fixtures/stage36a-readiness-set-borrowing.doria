@@ -1,0 +1,35 @@
+use Doria\Std\Io\{ReadinessSet as Registry, RegistrationKey as Key,
+    ReadinessStream, ReadableFile, WritableByteRegion, IoError};
+
+function concrete(Registry $set, Key<ReadableFile> $key): ReadableFile throws IoError
+{
+    return $set->getStream(key: $key);
+}
+
+function edit(writable Registry $set, Key<ReadableFile> $key,
+    writable WritableByteRegion $destination): void throws IoError
+{
+    let writable $stream = $set->getWritableStream(key: $key);
+    $stream->read($destination);
+    let $source = $stream->readinessSource;
+}
+
+function erased(Registry $set, Key<ReadinessStream> $key): ReadinessStream throws IoError
+{
+    return $set->getStream($key);
+}
+
+function generic<T implements ReadinessStream>(Registry $set, Key<T> $key): T throws IoError
+{
+    return $set->getStream($key);
+}
+
+function qualified(Doria\Std\Io\ReadinessSet $set,
+    Doria\Std\Io\RegistrationKey<ReadableFile> $key): ReadableFile throws IoError
+{
+    return $set->getStream($key);
+}
+
+function main(): void
+{
+}

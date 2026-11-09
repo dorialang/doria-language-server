@@ -38,6 +38,22 @@ function tokenize(source, tokenizer = grammar) {
 
 const hookTokens = tokens => tokens.filter(token => token.scopes.includes("keyword.declaration.property-hook.doria"));
 
+test("conditional clauses keep where contextual and preserve computed hook scopes", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "..", "..", "fixtures", "stage36a-conditional-capabilities.doria"), "utf8");
+  const tokens = tokenize(source);
+  const names = tokens.filter(token => token.text === "where");
+  assert.equal(names.filter(token => token.scopes.includes("keyword.declaration.availability.doria")).length, 8);
+  assert.equal(names.filter(token => token.scopes.includes("entity.name.function.doria")).length, 1);
+  assert.equal(names.filter(token => token.scopes.includes("entity.name.function.call.doria")).length, 1);
+  assert.deepEqual(hookTokens(tokens).map(token => token.text), ["get", "get"]);
+  assert.ok(!tokens.some(token => token.scopes.some(scope => scope.startsWith("invalid."))));
+  const multiline = tokenize("class C<T> { int $value where /* condition */ (T implements Ready,\n Other)\n { get => 1; } }");
+  assert.ok(multiline.some(token => token.text === "where" && token.scopes.includes("keyword.declaration.availability.doria")));
+  assert.deepEqual(hookTokens(multiline).map(token => token.text), ["get"]);
+  const ordinary = tokenize('function where(int $where): int { return $where; } where(1); $value->where(); "where (T implements Ready)"; // where (T implements Ready)');
+  assert.ok(!ordinary.some(token => token.text === "where" && token.scopes.includes("keyword.declaration.availability.doria")));
+});
+
 test("tokenizes the shared Stage 36 fixture with callable get/set names intact", () => {
   const tokens = tokenize(fixture);
   assert.equal(hookTokens(tokens).length, 13);

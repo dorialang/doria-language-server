@@ -1,0 +1,26 @@
+namespace Example;
+
+use Example\Ready as Capable;
+
+interface Ready { function ready(): int; }
+interface Pending extends Ready { function prepare(): int; }
+
+class Adapter<T> implements Ready where (T implements Capable), Pending where (T implements Pending)
+{
+    T $source;
+
+    function __construct(parameter take T $source) { $this->source = $source; }
+    function ready(): int where (T implements Capable) { return $this->source->ready(); }
+    function prepare(): int where (T implements Pending) { return $this->source->prepare(); }
+    int $state where (T implements Capable) { get { return 1; } }
+    static function inspect<U>(U $source): int where (T implements Pending, U implements Capable) { return $source->ready(); }
+}
+
+trait Inspection<T>
+{
+    function inspect(T $source): int where (T implements Capable) { return $source->ready(); }
+    int $state where (T implements Capable) { get { return 1; } }
+}
+
+function where(int $where): int { return $where; }
+function main(): void { echo where(1); }

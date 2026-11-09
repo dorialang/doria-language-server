@@ -25,6 +25,9 @@
       "include": "#accessors"
     },
     {
+      "include": "#nominalConditions"
+    },
+    {
       "include": "#callableCalls"
     },
     {
@@ -795,7 +798,7 @@
           }
         },
         {
-          "match": "(->)\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+          "match": "(\\?->|->)\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
           "captures": {
             "1": {
               "name": "keyword.operator.accessor.doria"
@@ -806,7 +809,7 @@
           }
         },
         {
-          "match": "(->)\\s*([A-Za-z_][A-Za-z0-9_]*)",
+          "match": "(\\?->|->)\\s*([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": {
               "name": "keyword.operator.accessor.doria"
@@ -886,12 +889,13 @@
     "propertyHooks": {
       "patterns": [
         {
-          "begin": "(\\$[A-Za-z_][A-Za-z0-9_]*)(?=\\s*(?:\\{|=(?!=|>)|$|/\\*|//|#))",
+          "begin": "(\\$[A-Za-z_][A-Za-z0-9_]*)(?=\\s*(?:where\\b|\\{|=(?!=|>)|$|/\\*|//|#))",
           "beginCaptures": {
             "1": { "patterns": [{ "include": "#variables" }] }
           },
-          "end": "(?=[^\\s{])(?!=(?!=|>)|/\\*|//|#(?!\\[))",
+          "end": "(?=[^\\s{])(?!where\\b|=(?!=|>)|/\\*|//|#(?!\\[))",
           "patterns": [
+            { "include": "#nominalConditions" },
             { "include": "#comments" },
             {
               "begin": "=(?!=|>)",
@@ -975,6 +979,23 @@
         }
       ]
     },
+    "nominalConditions": {
+      "patterns": [
+        {
+          "name": "meta.nominal-condition.doria",
+          "begin": "\\b(where)\\b(?=(?:\\s|/\\*.*?\\*/)*\\((?:\\s|/\\*.*?\\*/)*[A-Za-z_][A-Za-z0-9_]*(?:\\s|/\\*.*?\\*/)+implements\\b)",
+          "beginCaptures": { "1": { "name": "keyword.declaration.availability.doria" } },
+          "end": "\\)",
+          "endCaptures": { "0": { "name": "punctuation.section.doria" } },
+          "patterns": [
+            { "include": "#comments" },
+            { "include": "#types" },
+            { "include": "#keywords" },
+            { "include": "#punctuation" }
+          ]
+        }
+      ]
+    },
     "keywords": {
       "patterns": [
         {
@@ -1015,7 +1036,7 @@
         },
         {
           "name": "storage.modifier.mutability.doria",
-          "match": "\\b(?:writable|readonly|take|borrow|shared)\\b"
+          "match": "\\b(?:writable|consuming|readonly|take|borrow|shared)\\b"
         },
         {
           "name": "storage.modifier.visibility.doria",

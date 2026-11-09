@@ -1,0 +1,42 @@
+use Doria\Std\Io\{PendingReadableStream, PendingWritableStream, ReadRequest, WriteRequest,
+    ReadinessSource, ReadOutcome, WriteOutcome, WritableByteRegion, ByteRegion, IoError,
+    ReadableFile, WritableFile, DuplexFile};
+
+class ForwardingReader implements PendingReadableStream {
+    internal writable PendingReadableStream $source;
+    function __construct(parameter take PendingReadableStream $source) { $this->source = $source; }
+    ReadinessSource $readinessSource { borrowed get => $this->source->readinessSource; }
+    writable function read(writable WritableByteRegion $destination): ReadOutcome throws IoError {
+        return $this->source->read($destination);
+    }
+    writable function prepareRead(writable ReadRequest $request, writable WritableByteRegion $destination): void throws IoError {
+        $this->source->prepareRead($request, $destination);
+    }
+    writable function completeRead(ReadRequest $request, writable WritableByteRegion $destination): ?ReadOutcome throws IoError {
+        return $this->source->completeRead($request, $destination);
+    }
+}
+
+class ForwardingWriter implements PendingWritableStream {
+    internal writable PendingWritableStream $source;
+    function __construct(parameter take PendingWritableStream $source) { $this->source = $source; }
+    ReadinessSource $readinessSource { borrowed get => $this->source->readinessSource; }
+    writable function write(ByteRegion $source): WriteOutcome throws IoError {
+        return $this->source->write($source);
+    }
+    writable function prepareWrite(writable WriteRequest $request, ByteRegion $source): void throws IoError {
+        $this->source->prepareWrite($request, $source);
+    }
+    writable function completeWrite(WriteRequest $request, ByteRegion $source): ?WriteOutcome throws IoError {
+        return $this->source->completeWrite($request, $source);
+    }
+}
+
+function requirePendingReader(writable PendingReadableStream $stream): void {}
+function requirePendingWriter(writable PendingWritableStream $stream): void {}
+function inspectFileCapabilities(writable ReadableFile $reader, writable WritableFile $writer, writable DuplexFile $duplex): void {
+    requirePendingReader($reader);
+    requirePendingWriter($writer);
+    requirePendingReader($duplex);
+    requirePendingWriter($duplex);
+}

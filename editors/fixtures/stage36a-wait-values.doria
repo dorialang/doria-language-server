@@ -1,0 +1,55 @@
+use Doria\Std\Io\Wait as Observation;
+use Doria\Std\Time\Deadline as Instant;
+use Doria\Std\Time\Duration as Interval;
+use Doria\Std\Time\ClockError as TimeFailure;
+
+function copyObservation(Observation $wait): Observation
+{
+    return $wait;
+}
+
+function inspectDeadline(Instant $deadline): void
+{
+    let $until = Observation::Until(deadline: $deadline);
+    let $copy = copyObservation($until);
+    ?Observation $optional = $until;
+    copyObservation($until);
+    if ($optional != null) {
+        copyObservation($optional);
+    }
+    let $instant = match ($copy) {
+        Observation::Until($value) => $value,
+        default => $deadline,
+    };
+    copyObservation(Observation::Until($instant));
+}
+
+function main(): void
+{
+    let $interval = Interval::fromNanoseconds(-17);
+    let $wait = Observation::For(duration: $interval);
+    let $copy = copyObservation($wait);
+    ?Observation $optional = $wait;
+    copyObservation($wait);
+    copyObservation($optional ?? Observation::Immediate);
+    let $indefinite = Doria\Std\Io\Wait::Indefinite;
+    copyObservation($indefinite);
+    echo match ($copy) {
+        Observation::For($duration) => $duration->nanoseconds,
+        default => 0,
+    } . "\n";
+    try {
+        let $past = Instant::fromNow(duration: $interval);
+        let $copy = $past;
+        ?Instant $optional = $past;
+        inspectDeadline($past);
+        inspectDeadline($copy);
+        if ($optional != null) {
+            inspectDeadline($optional);
+        }
+        inspectDeadline(Doria\Std\Time\Deadline::fromNow(Interval::fromNanoseconds(0)));
+        inspectDeadline(Instant::fromNow(Interval::fromNanoseconds(-9223372036854775808)));
+    } catch (TimeFailure $error) {
+        echo $error->message . ":" . ($error->systemCode ?? -1) . "\n";
+    }
+}

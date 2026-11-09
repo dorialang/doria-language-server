@@ -1,0 +1,41 @@
+use Doria\Std\Io\{ReadableFile, WritableFile, DuplexFile,
+    SeekableStream as Cursor, SeekOrigin as Origin, IoError};
+
+function rewind(writable Cursor $stream): int throws IoError
+{
+    return $stream->seek(offset: 0, origin: Origin::Start);
+}
+
+function inspect(ReadableFile $read, WritableFile $write,
+    DuplexFile $duplex): void throws IoError
+{
+    echo $read->getPosition() . ":" . $read->getLength();
+    echo $write->getPosition() . ":" . $write->getLength();
+    echo $duplex->getPosition() . ":" . $duplex->getLength();
+}
+
+function reposition(writable ReadableFile $read, writable WritableFile $write,
+    writable DuplexFile $duplex): void throws IoError
+{
+    let $readPosition = $read->seek(0, Origin::Start);
+    let $writePosition = $write->seek(0, Origin::Current);
+    let $duplexPosition = $duplex->seek(-1, Origin::End);
+    echo $readPosition . ":" . $writePosition . ":" . $duplexPosition;
+}
+
+function synchronize(writable WritableFile $write,
+    writable DuplexFile $duplex): void throws IoError
+{
+    $write->synchronizeData();
+    $write->synchronizeMetadata();
+    $duplex->synchronizeData();
+    $duplex->synchronizeMetadata();
+}
+
+function resize(writable WritableFile $write,
+    writable DuplexFile $duplex): void throws IoError
+{
+    $write->setLength(length: 0);
+    $duplex->setLength(length: 8);
+    echo $write->getPosition() . ":" . $duplex->getLength();
+}

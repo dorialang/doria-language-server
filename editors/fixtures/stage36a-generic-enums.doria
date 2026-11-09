@@ -1,0 +1,26 @@
+enum Optional<T> { case None; case Some(T $value); }
+enum Pair<A, B> { case Both(A $left, B $right); }
+
+class Token {
+    function __construct(int $id) {}
+}
+
+function wrap<T>(take T $value): Optional<T> {
+    return Optional::Some($value);
+}
+
+function unwrap(Optional<int> $value): int {
+    return match ($value) {
+        Optional::Some($inner) => $inner,
+        Optional::None => -1,
+    };
+}
+
+function main(): void {
+    let $some = Optional::Some(7);
+    Optional<int> $none = Optional::None;
+    let $copy = $some;
+    let $pair = Pair::Both(unwrap($copy), unwrap($none));
+    let $token = Optional::Some(new Token(1));
+    let $wrapped = wrap(3);
+}

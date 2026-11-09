@@ -49,7 +49,11 @@ impl SnapshotBuilder<'_> {
                 self.hierarchy_semantic_tokens
                     .push((span, SEMANTIC_TOKEN_KEYWORD, 0));
             }
-            let mut signature = format!("{owner}::${} {{ ", property.name);
+            let mut signature = format!(
+                "{owner}::${}{} {{ ",
+                property.name,
+                nominal_condition_signature(property.availability.as_ref())
+            );
             // Setters already imply a writable receiver; only getters spell it.
             if accessor.receiver_mode == ReceiverMode::Writable
                 && hook.kind == PropertyHookKind::Get
@@ -72,11 +76,8 @@ impl SnapshotBuilder<'_> {
                 }
             }
             signature.push_str(" }");
-            let mut docs = Some(format!(
-                "{} receiver.",
-                receiver_label(accessor.receiver_mode)
-            ));
-            if hook.body.as_block().is_none() {
+            let mut docs = Some(format!("{}.", receiver_label(Some(accessor.receiver_mode))));
+            if matches!(hook.body, doriac::ast::FunctionBody::Requirement { .. }) {
                 append_documentation(
                     &mut docs,
                     "Declared accessor requirement, not an executable body.",
@@ -169,22 +170,28 @@ impl SnapshotBuilder<'_> {
                 parameters: call.parameter.iter().cloned().collect(),
                 return_type: call.return_type.clone(),
             };
+            let effects =
+                doriac::CheckedEffectProfile::classify(call.checked_effects.iter().cloned());
             let detail = accessor_signature(
                 name,
                 kind,
                 &signature,
                 call.receiver_mode,
-                &call.checked_effects,
+                &effects.required,
                 &HashMap::new(),
             );
             let mut docs = format!(
-                "{} receiver on `{}`.",
+                "{} on `{}`.",
                 receiver_label(call.receiver_mode),
                 display_resolved_type(&call.declaring_type)
             );
             docs.push_str(&callable_return_documentation(
                 &signature,
                 call.return_borrow,
+            ));
+            docs.push_str(&ambient_effect_documentation(&effects.ambient));
+            docs.push_str(&test_assertion_effect_documentation(
+                &effects.test_assertion,
             ));
             if call.virtual_root.is_some() {
                 docs.push_str("\n\nVirtual property accessor selected by the compiler.");
@@ -217,11 +224,12 @@ impl SnapshotBuilder<'_> {
     }
 }
 
-fn receiver_label(mode: ReceiverMode) -> &'static str {
-    if mode == ReceiverMode::Writable {
-        "Writable"
-    } else {
-        "Readonly"
+fn receiver_label(mode: Option<ReceiverMode>) -> &'static str {
+    match mode {
+        Some(ReceiverMode::Readonly) => "Readonly receiver",
+        Some(ReceiverMode::Writable) => "Writable receiver",
+        Some(ReceiverMode::Consuming) => "Consuming receiver",
+        None => "Static accessor",
     }
 }
 
@@ -229,7 +237,7 @@ pub(super) fn accessor_signature(
     name: &str,
     kind: PropertyHookKind,
     signature: &CallableSignatureSemanticInfo,
-    receiver: ReceiverMode,
+    receiver: Option<ReceiverMode>,
     effects: &[ResolvedType],
     bindings: &HashMap<String, ResolvedType>,
 ) -> String {
@@ -256,7 +264,7 @@ pub(super) fn accessor_signature(
     let accessor = match kind {
         PropertyHookKind::Get => format!(
             "{}get: {}",
-            if receiver == ReceiverMode::Writable {
+            if receiver == Some(ReceiverMode::Writable) {
                 "writable "
             } else {
                 ""
@@ -273,7 +281,8 @@ pub(super) fn accessor_signature(
             effects.iter().map(display).collect::<Vec<_>>().join(", ")
         )
     };
-    format!("${name} {{ {accessor}{throws} }}")
+    let modifier = if receiver.is_none() { "static " } else { "" };
+    format!("{modifier}${name} {{ {accessor}{throws} }}")
 }
 
 pub(super) fn surface_documentation(
@@ -304,7 +313,7 @@ pub(super) fn surface_documentation(
             &accessor.automatic_effects,
         );
         sections.push(format!(
-            "```doria\n{signature}\n```\n\n{} receiver.{}",
+            "```doria\n{signature}\n```\n\n{}.{}",
             receiver_label(accessor.receiver_mode),
             docs.map(|docs| format!("\n\n{docs}")).unwrap_or_default()
         ));
@@ -351,6 +360,172 @@ mod tests {
             .hover_at_offset(source.find(needle).unwrap())
             .unwrap()
             .markdown
+    }
+
+    #[test]
+    fn readiness_source_accessors_preserve_borrowed_results_and_pure_effects() {
+        for (receiver, parameters) in [
+            ("Doria\\Std\\Io\\ReadableFile", ""),
+            ("Doria\\Std\\Io\\WritableFile", ""),
+            ("Doria\\Std\\Io\\DuplexFile", ""),
+            ("Doria\\Std\\Io\\ReadinessStream", ""),
+            ("T", "<T implements Doria\\Std\\Io\\ReadinessStream>"),
+        ] {
+            let source = format!(
+                "function inspect{parameters}({receiver} $stream): Doria\\Std\\Io\\ReadinessSource {{ return $stream->readinessSource; }}"
+            );
+            let snapshot = analyze(&source);
+            let offset = source.rfind("readinessSource").unwrap();
+            let hover = snapshot.hover_at_offset(offset).unwrap().markdown;
+            assert!(
+                hover.contains("get: Doria\\Std\\Io\\ReadinessSource"),
+                "{hover}"
+            );
+            assert!(
+                hover.contains("Returns a readonly borrow rooted in the receiver."),
+                "{hover}"
+            );
+            assert!(
+                hover.contains("The source must remain available through the result's last use."),
+                "{hover}"
+            );
+            let signature = hover.split("```").nth(1).unwrap();
+            assert!(!signature.contains("throws"), "{hover}");
+            let abstract_dispatch =
+                !parameters.is_empty() || receiver == "Doria\\Std\\Io\\ReadinessStream";
+            assert_eq!(
+                hover.contains("**Ambient I/O:**"),
+                abstract_dispatch,
+                "{hover}"
+            );
+            let (_, compiler) = doriac::analyze_source_for_ide("hooks.doria", &source).unwrap();
+            let call = compiler
+                .info
+                .property_accessor_calls
+                .values()
+                .find_map(|calls| calls.getter.as_ref())
+                .unwrap();
+            let effects =
+                doriac::CheckedEffectProfile::classify(call.checked_effects.iter().cloned());
+            assert!(effects.required.is_empty(), "{effects:?}");
+            assert_eq!(effects.ambient.len(), if abstract_dispatch { 2 } else { 0 });
+            for effect in effects.ambient {
+                assert!(hover.contains(&display_resolved_type(&effect)), "{hover}");
+            }
+            assert!(snapshot.declaration_span_at_offset(offset).is_none());
+            let items = snapshot.member_completions_at_offset(offset).unwrap();
+            let property = items
+                .iter()
+                .find(|item| item.label == "readinessSource")
+                .unwrap();
+            assert_eq!(property.kind, 10);
+            assert_eq!(
+                property.detail,
+                "$readinessSource { get: Doria\\Std\\Io\\ReadinessSource }"
+            );
+            let documentation = property.documentation.as_deref().unwrap();
+            assert!(
+                documentation.contains("Returns a readonly borrow rooted in the receiver."),
+                "{documentation}"
+            );
+            assert!(
+                !documentation.contains("stored property"),
+                "{documentation}"
+            );
+        }
+    }
+
+    #[test]
+    fn accessor_call_effects_separate_required_errors_from_automatic_transport() {
+        let source = r#"
+class IoError implements Error { function __construct(string $message) {} }
+interface Value {
+    writable int $value {
+        get throws IoError;
+        set (int $next) throws IoError;
+    }
+}
+function read(Value $subject): int throws IoError { return $subject->value; }
+function write(writable Value $subject, int $next): void throws IoError { $subject->value = $next; }
+function readGeneric<T implements Value>(T $generic): int throws IoError { return $generic->value; }
+function writeGeneric<T implements Value>(writable T $generic, int $next): void throws IoError { $generic->value = $next; }
+"#;
+        let snapshot = analyze(source);
+        for needle in [
+            "$subject->value;",
+            "$subject->value =",
+            "$generic->value;",
+            "$generic->value =",
+        ] {
+            let offset = source.find(needle).unwrap() + needle.find("value").unwrap();
+            let hover = snapshot.hover_at_offset(offset).unwrap().markdown;
+            let signature = hover.split("```").nth(1).unwrap();
+            assert!(signature.contains("throws IoError"), "{hover}");
+            assert!(!signature.contains("Doria\\Std\\Io\\IoError"), "{hover}");
+            assert!(!signature.contains("InvalidUtf8Error"), "{hover}");
+            assert!(hover.contains("**Ambient I/O:**"), "{hover}");
+            for effect in [
+                doriac::compiler_known_io::IO_ERROR,
+                doriac::compiler_known_io::INVALID_UTF8_ERROR,
+            ] {
+                assert!(hover.contains(effect), "{hover}");
+            }
+        }
+    }
+
+    #[test]
+    fn readiness_source_intrinsic_bodies_are_not_accessor_requirements() {
+        let mut builder = SnapshotBuilder::new(
+            "",
+            &[],
+            doriac::compiler_known_stream::SOURCE_ID,
+            None,
+            Vec::new(),
+        );
+        let mut saw_intrinsic = false;
+        let mut saw_requirement = false;
+        for item in &doriac::compiler_known_stream::declarations().items {
+            let (owner, properties, context) = match item {
+                Item::Class(class) => (
+                    &class.name,
+                    class
+                        .members
+                        .iter()
+                        .filter_map(|member| match member {
+                            ClassMember::Property(property) => Some(property),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                    PropertyHookContext::Class,
+                ),
+                Item::Interface(interface) => (
+                    &interface.name,
+                    interface.properties.iter().collect(),
+                    PropertyHookContext::Interface,
+                ),
+                _ => continue,
+            };
+            for property in properties
+                .into_iter()
+                .filter(|property| property.name == "readinessSource")
+            {
+                let mut documentation = None;
+                builder.collect_property_hooks(owner, property, context, &mut documentation);
+                let documentation = documentation.unwrap();
+                let body = &property.hooks[0].body;
+                let requirement = matches!(body, doriac::ast::FunctionBody::Requirement { .. });
+                saw_intrinsic |= matches!(body, doriac::ast::FunctionBody::Intrinsic { .. });
+                saw_requirement |= requirement;
+                assert_eq!(
+                    documentation.contains("Declared accessor requirement"),
+                    requirement,
+                    "{owner}: {documentation}"
+                );
+                assert!(documentation.contains("borrowed get:"), "{documentation}");
+            }
+        }
+        assert!(saw_intrinsic, "expected a compiler-owned readiness getter");
+        assert!(saw_requirement, "expected a readiness accessor requirement");
     }
 
     #[test]
@@ -575,12 +750,66 @@ function edit(writable Panel $panel): int { return $panel->stored; }
                 .find(|item| item.label == "readWrite")
                 .unwrap();
             assert_eq!(property.kind, 10);
+            assert_eq!(property.detail, "writable $readWrite { get: int }");
             let docs = property.documentation.as_deref().unwrap();
             assert!(docs.contains("get: int"), "{docs}");
             assert!(docs.contains("set(int $next): void"), "{docs}");
             assert!(!completions
                 .iter()
                 .any(|item| item.label.contains("::get") || item.label.contains("::set")));
+            assert_eq!(
+                completions
+                    .iter()
+                    .find(|item| item.label == "stored")
+                    .unwrap()
+                    .detail,
+                "writable int $stored"
+            );
+            if writable {
+                assert_eq!(
+                    completions
+                        .iter()
+                        .find(|item| item.label == "cache")
+                        .unwrap()
+                        .detail,
+                    "$cache { writable get: int }"
+                );
+                assert_eq!(
+                    completions
+                        .iter()
+                        .find(|item| item.label == "sink")
+                        .unwrap()
+                        .detail,
+                    "writable $sink { set(int $next): void }"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn accessor_completion_signatures_are_shared_across_receiver_kinds() {
+        let source = r#"
+interface Value { int $value { get; } }
+class Concrete implements Value { int $value { get => 42; } }
+function concrete(Concrete $concrete): int { return $concrete->value; }
+function erased(Value $erased): int { return $erased->value; }
+function constrained<T implements Value>(T $constrained): int { return $constrained->value; }
+"#;
+        let snapshot = analyze(source);
+        for receiver in ["$concrete->", "$erased->", "$constrained->"] {
+            let offset = source.find(receiver).unwrap() + receiver.len();
+            let completions = snapshot.member_completions_at_offset(offset).unwrap();
+            let property = completions
+                .iter()
+                .find(|item| item.label == "value")
+                .unwrap();
+            assert_eq!(property.kind, 10);
+            assert_eq!(property.detail, "$value { get: int }");
+            assert!(!property
+                .documentation
+                .as_deref()
+                .unwrap()
+                .contains("stored property"));
         }
     }
 
@@ -666,6 +895,12 @@ function optional(Source $source): void { let $callback = $source->optional; }
                         !presentation.contains(if borrowed { retained } else { lent }),
                         "{presentation}"
                     );
+                    let obligation = if receiver == "$reader->" {
+                        "The source must remain available through the result's cleanup, even after its last use."
+                    } else {
+                        "The source must remain available through the result's last use."
+                    };
+                    assert!(presentation.contains(obligation), "{presentation}");
                 }
             }
         }

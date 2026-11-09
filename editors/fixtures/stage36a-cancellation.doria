@@ -1,0 +1,52 @@
+use Doria\Std\Concurrency\{CancellationSource, CancellationToken, CancellationError};
+
+function detachedToken(): CancellationToken
+{
+    let $source = new CancellationSource();
+    return $source->token;
+}
+
+function consume(take CancellationToken $token): void {}
+
+function sameState(CancellationToken $first, CancellationToken $second): bool
+{
+    return $first == $second;
+}
+
+function inspect(writable CancellationSource $source): void
+{
+    let $token = $source->token;
+    let $copy = $token;
+    let $second = $source->token;
+    echo sameState($token, $second);
+    echo $token != $copy;
+    consume($token);
+    consume($copy);
+    try {
+        $source->cancel();
+    } catch (CancellationError $error) {
+        echo $error->message;
+        let $code = $error->systemCode;
+        if ($code != null) { echo $code; }
+    }
+    echo $source->cancellationRequested;
+    echo $token == $source->token;
+}
+
+function main(): void
+{
+    let writable $source = new CancellationSource();
+    inspect($source);
+    let $token = detachedToken();
+    let $copy = $token;
+    let $other = detachedToken();
+    echo sameState($token, $copy);
+    echo $token != $other;
+    ?CancellationToken $optional = $token;
+    ?CancellationToken $empty = null;
+    echo $optional == $token;
+    echo $optional != $empty;
+    echo $empty == null;
+    consume($token);
+    consume($copy);
+}
