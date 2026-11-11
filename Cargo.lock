@@ -222,7 +222,7 @@ dependencies = [
 [[package]]
 name = "doria-diagnostic-catalogue"
 version = "2026.3.1-canary"
-source = "git+https://github.com/dorialang/doria?rev=4670b18febc4a45d6729042d629d693e930b3489#4670b18febc4a45d6729042d629d693e930b3489"
+source = "git+https://github.com/dorialang/doria?rev=61e314503a64cedf708d256b3c88c3d7db1cef60#61e314503a64cedf708d256b3c88c3d7db1cef60"
 
 [[package]]
 name = "doria-language-server"
@@ -234,9 +234,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "doria-terminal"
+version = "2026.3.1-canary"
+source = "git+https://github.com/dorialang/doria?rev=61e314503a64cedf708d256b3c88c3d7db1cef60#61e314503a64cedf708d256b3c88c3d7db1cef60"
+
+[[package]]
 name = "doria-time"
 version = "2026.3.1-canary"
-source = "git+https://github.com/dorialang/doria?rev=4670b18febc4a45d6729042d629d693e930b3489#4670b18febc4a45d6729042d629d693e930b3489"
+source = "git+https://github.com/dorialang/doria?rev=61e314503a64cedf708d256b3c88c3d7db1cef60#61e314503a64cedf708d256b3c88c3d7db1cef60"
 dependencies = [
  "libc",
 ]
@@ -244,7 +249,7 @@ dependencies = [
 [[package]]
 name = "doria-unicode"
 version = "2026.3.1-canary"
-source = "git+https://github.com/dorialang/doria?rev=4670b18febc4a45d6729042d629d693e930b3489#4670b18febc4a45d6729042d629d693e930b3489"
+source = "git+https://github.com/dorialang/doria?rev=61e314503a64cedf708d256b3c88c3d7db1cef60#61e314503a64cedf708d256b3c88c3d7db1cef60"
 dependencies = [
  "icu_casemap",
  "icu_locale_core",
@@ -256,7 +261,7 @@ dependencies = [
 [[package]]
 name = "doriac"
 version = "2026.3.1-canary"
-source = "git+https://github.com/dorialang/doria?rev=4670b18febc4a45d6729042d629d693e930b3489#4670b18febc4a45d6729042d629d693e930b3489"
+source = "git+https://github.com/dorialang/doria?rev=61e314503a64cedf708d256b3c88c3d7db1cef60#61e314503a64cedf708d256b3c88c3d7db1cef60"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -264,6 +269,7 @@ dependencies = [
  "cranelift-native",
  "cranelift-object",
  "doria-diagnostic-catalogue",
+ "doria-terminal",
  "doria-time",
  "doria-unicode",
  "ryu",
@@ -377,9 +383,9 @@ dependencies = [
 
 [[package]]
 name = "icu_locale_core"
-version = "2.3.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d56e28588da92eee5c3201a6eff33fabdd49b62269c8938d4ff050ce4d900deb"
+checksum = "25d29b57c17c6528d0dc4c2141cfa2d08200465acb537a3909c8b9b8a4a984c0"
 dependencies = [
  "displaydoc",
  "litemap",
@@ -471,9 +477,9 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "libc"
-version = "0.2.186"
+version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libm"
@@ -655,6 +661,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "synstructure"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "901704edd0dfe137f1987838ee4f259e4e063c31371bdb423f7ae38ec6f77f02"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
+
+[[package]]
 name = "target-lexicon"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -662,9 +679,9 @@ checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 
 [[package]]
 name = "tinystr"
-version = "0.8.4"
+version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1e27c91459209c2986af3dcf603a5a74a4368754ce37414f59acc971167f643"
+checksum = "abc840c238154d58f9e86b2792261edfde565a17696e1cda1a449de27979801a"
 dependencies = [
  "displaydoc",
  "serde_core",
@@ -707,9 +724,9 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "yoke"
-version = "0.8.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "709fe23a0424b6a435d82152b1bd3fdfb0833487d5fa90d05d42762a9891fef5"
+checksum = "417ef3fcf6c300b7dbd25c85531a746931c02ad536f3cf4786ed1e88223340b3"
 dependencies = [
  "stable_deref_trait",
  "yoke-derive",
@@ -718,14 +735,14 @@ dependencies = [
 
 [[package]]
 name = "yoke-derive"
-version = "0.8.2"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de844c262c8848816172cef550288e7dc6c7b7814b4ee56b3e1553f275f1858e"
+checksum = "ec8ebde2db3681e8c9980cc27822030e68752690ddfa9473e739aeb4dbde6d71"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
- "synstructure",
+ "syn 3.0.3",
+ "synstructure 0.14.0",
 ]
 
 [[package]]
@@ -746,7 +763,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
- "synstructure",
+ "synstructure 0.13.2",
 ]
 
 [[package]]
@@ -763,9 +780,9 @@ dependencies = [
 
 [[package]]
 name = "zerovec"
-version = "0.11.8"
+version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb0464e17806c1d976d5cba29399c7f08e516e279e2ba493f63123b5fca67dd8"
+checksum = "f58a2799cfe9a1670c7ea8edbd52ef8edb93cb37a7f83bf31ba9e35d9dae6a40"
 dependencies = [
  "serde",
  "yoke",
@@ -775,9 +792,9 @@ dependencies = [
 
 [[package]]
 name = "zerovec-derive"
-version = "0.11.6"
+version = "0.11.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34df6fc39dbd26ddc9c10e6a2984476e13acce22e64e4487636ef494369225da"
+checksum = "c3743ddbf47738d929cd1ae2e199d40d0162979dfe31aef8ae646d2bf00bf97a"
 dependencies = [
  "proc-macro2",
  "quote",

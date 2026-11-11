@@ -6,6 +6,14 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Synchronized the language server with Stage 46, the terminal layer, and
+  pinned the compiler to `61e314503a64cedf708d256b3c88c3d7db1cef60`. Hover explains the inline Copy values of
+  `Doria\Std\Term` (`Size`, `Position`, `KeyModifiers`, `Style`) and the
+  watch values of `Doria\Std\Io` (`WatchKey`, `WatchSource`) from the
+  compiler's `InlineValueKind`; `TransferCompletion` hover covers `Ready`, and
+  the standard-stream hover names `isInteractive`. The shared fixture
+  `editors/fixtures/stage46-terminal.doria` is a terminal program that watches
+  its `RawMode` in a transfer group; the server reports no diagnostics for it.
 - Pinned the Rust toolchain to 1.98.1 in `rust-toolchain.toml`, the release the
   pinned compiler is validated with. Every CI and release job installs it with
   `rustup toolchain install` and no toolchain name, and
