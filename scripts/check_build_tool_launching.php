@@ -6,10 +6,14 @@ declare(strict_types=1);
  * `scripts/build.php` starts the tool it names, with the arguments it gives.
  *
  * The build script starts `npm` by name and `gradlew` by path. On Windows both
- * are batch files, and a batch file reads its own directory from how it was
- * started. This check puts a small tool in a directory whose name has a space,
- * starts it the way the build script does from a different working directory,
- * and requires the tool to report its own directory and each argument whole.
+ * are batch files. A batch file reads its own directory from how it was
+ * started, and hands its arguments on to a program as text (`%*`), with more
+ * commands after them on the same line. This check puts a small tool of that
+ * shape in a directory whose name has a space and starts it the way the build
+ * script does, from a different working directory. The tool must report its
+ * own directory, the program it forwards to must receive every argument
+ * exactly, and the command after the arguments must still run.
+ *
  * When `npm` is installed it must also answer `--version` from that directory;
  * `--require-npm` makes a missing `npm` a failure, for CI.
  *
@@ -28,30 +32,45 @@ $toolName = 'doria-echo-tool';
 $toolFile = $toolDirectory . DIRECTORY_SEPARATOR . $toolName . ($windows ? '.cmd' : '');
 $errors = [];
 
+// The forwarding line has the shape of gradlew.bat's: a program, the
+// arguments, then another command.
+$batchTool = <<<'BATCH'
+@ECHO OFF
+ECHO dir=%~dp0
+ECHO first=%~1
+"%DORIA_CHECK_PHP%" -r "echo 'forwarded=', json_encode(array_slice($argv, 1)), PHP_EOL;" -- %* & ECHO after=ran
+
+BATCH;
+$shellTool = <<<'SHELL'
+#!/bin/sh
+echo "dir=$(cd "$(dirname "$0")" && pwd -P)"
+echo "first=$1"
+"$DORIA_CHECK_PHP" -r "echo 'forwarded=', json_encode(array_slice(\$argv, 1)), PHP_EOL;" -- "$@"; echo "after=ran"
+
+SHELL;
+
 try {
     foreach ([$toolDirectory, $workingDirectory] as $directory) {
         if (!mkdir($directory, 0777, true)) {
             throw new RuntimeException("could not create {$directory}");
         }
     }
-    file_put_contents(
-        $toolFile,
-        $windows
-            ? "@ECHO OFF\r\nECHO dir=%~dp0\r\nECHO first=%~1\r\nECHO second=%~2\r\n"
-            : "#!/bin/sh\necho \"dir=$(cd \"$(dirname \"$0\")\" && pwd -P)\"\n"
-                . "echo \"first=$1\"\necho \"second=$2\"\n"
-    );
+    file_put_contents($toolFile, $windows ? str_replace("\n", "\r\n", $batchTool) : $shellTool);
     chmod($toolFile, 0755);
 
-    $arguments = ['one two', 'key=value with space'];
+    // A space, an equals sign, the last place on the line, and a backslash
+    // before the closing quote are the cases a command line gets wrong.
+    $arguments = ['one two', 'key=value with space', 'C:\\ends with backslash\\'];
     $expected = [
         'dir' => comparable_directory($toolDirectory),
         'first' => 'one two',
-        'second' => 'key=value with space',
+        'forwarded' => $arguments,
+        'after' => 'ran',
     ];
 
     $previousPath = getenv('PATH');
     putenv('PATH=' . $toolDirectory . PATH_SEPARATOR . ($previousPath === false ? '' : $previousPath));
+    putenv('DORIA_CHECK_PHP=' . PHP_BINARY);
 
     $cases = [
         'found on PATH by name' => $toolName,
@@ -66,10 +85,24 @@ try {
             }
         }
         $reported['dir'] = comparable_directory($reported['dir'] ?? '');
+        $reported['forwarded'] = json_decode($reported['forwarded'] ?? 'null', true);
         foreach ($expected as $key => $value) {
             if (($reported[$key] ?? null) !== $value) {
-                $errors[] = "{$label}: the tool reported {$key}=" . var_export($reported[$key] ?? null, true)
-                    . ', expected ' . var_export($value, true);
+                $errors[] = "{$label}: the tool reported {$key}=" . json_encode($reported[$key] ?? null)
+                    . ', expected ' . json_encode($value);
+            }
+        }
+    }
+
+    if ($windows) {
+        foreach (['say "hello"', '100%', "two\nlines"] as $unsafe) {
+            try {
+                tool_command($toolFile, [$unsafe]);
+                $errors[] = 'an argument the command processor rewrites was accepted: ' . json_encode($unsafe);
+            } catch (RuntimeException $error) {
+                if (!str_contains($error->getMessage(), 'run this command again')) {
+                    $errors[] = 'the refused-argument error does not say what to do: ' . $error->getMessage();
+                }
             }
         }
     }

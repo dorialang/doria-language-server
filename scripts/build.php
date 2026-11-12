@@ -527,15 +527,17 @@ function run_tool(string $tool, array $arguments, string $workingDirectory): voi
  * file, with `$arguments`.
  *
  * The file is found here and started by its full path. On Windows `npm` and
- * `gradlew` are batch files, and PHP quotes every argument it passes. A batch
- * file that the command processor finds on PATH from a quoted name reads its
- * own directory (`%~dp0`) as the working directory, so `npm.cmd` looked for
- * npm inside the directory being built.
+ * `gradlew` are batch files. A batch file that the command processor finds on
+ * PATH from a quoted name reads its own directory (`%~dp0`) as the working
+ * directory, so `npm.cmd` looked for npm inside the directory being built.
+ *
+ * The result is a list of arguments for a program, or on Windows a whole
+ * command line for a batch file; see `windows_batch_command_line`.
  *
  * @param list<string> $arguments
- * @return list<string>
+ * @return list<string>|string
  */
-function tool_command(string $tool, array $arguments): array
+function tool_command(string $tool, array $arguments): array|string
 {
     $executable = resolve_tool($tool);
     if (PHP_OS_FAMILY !== 'Windows') {
@@ -546,7 +548,7 @@ function tool_command(string $tool, array $arguments): array
     $extension = strtolower(pathinfo($executable, PATHINFO_EXTENSION));
 
     return in_array($extension, ['bat', 'cmd'], true)
-        ? windows_command($executable, $arguments)
+        ? windows_batch_command_line($executable, $arguments)
         : [$executable, ...$arguments];
 }
 
@@ -593,24 +595,84 @@ function resolve_tool(string $tool): string
 }
 
 /**
+ * The Windows command line that runs a batch file with `$arguments`.
+ *
+ * A batch file runs inside the command processor, which reads one line of
+ * text, so this function writes that line itself: the file and every argument
+ * in double quotes, the whole line in one more pair, after `/s /c`. With `/s`
+ * the command processor removes exactly that outer pair and runs the rest
+ * unchanged.
+ *
+ * Handing the command processor a list of separately quoted arguments does
+ * not work. Without `/s` it removes the first and the last quote of the line,
+ * so the last argument loses its closing quote and takes in whatever the batch
+ * file wrote after `%*`. `gradlew.bat` ends its Java command with
+ * `%* & call :exitWithErrorLevel`, and that text became part of the last
+ * Gradle argument.
+ *
  * @param list<string> $arguments
- * @return list<string>
  */
-function windows_command(string $executable, array $arguments): array
+function windows_batch_command_line(string $batchFile, array $arguments): string
 {
     $commandProcessor = getenv('COMSPEC');
     if ($commandProcessor === false || $commandProcessor === '') {
         $commandProcessor = 'cmd.exe';
     }
 
-    return [$commandProcessor, '/d', '/c', $executable, ...$arguments];
+    $line = implode(' ', array_map(windows_batch_argument(...), [$batchFile, ...$arguments]));
+
+    return '"' . $commandProcessor . '" /d /s /c "' . $line . '"';
 }
 
-/** @param list<string> $command */
-function run_command(array $command, string $workingDirectory): void
+/**
+ * One argument in double quotes for a batch file, which hands it on to a
+ * program. Backslashes at the end are doubled, because the program reads a
+ * backslash before the closing quote as part of the quote.
+ *
+ * A double quote, a percent sign or a line break cannot be passed through the
+ * command processor unchanged, so an argument that has one is refused.
+ */
+function windows_batch_argument(string $argument): string
+{
+    if (preg_match('/["%\r\n\0]/', $argument) === 1) {
+        throw new RuntimeException(
+            'cannot pass ' . var_export($argument, true) . ' to a Windows batch file: the command processor '
+                . 'rewrites double quotes, percent signs and line breaks. Remove that character from the '
+                . 'path or value, then run this command again.'
+        );
+    }
+
+    $trailing = strlen($argument) - strlen(rtrim($argument, '\\'));
+
+    return '"' . $argument . str_repeat('\\', $trailing) . '"';
+}
+
+/**
+ * Starts a command: a list of arguments for a program, or a whole Windows
+ * command line, which is passed on exactly as written.
+ *
+ * @param list<string>|string $command
+ * @param array<int, mixed> $descriptors
+ * @param-out array<int, resource> $pipes
+ * @return resource|false
+ */
+function start_command(array|string $command, array $descriptors, &$pipes, string $workingDirectory)
+{
+    return proc_open(
+        $command,
+        $descriptors,
+        $pipes,
+        $workingDirectory,
+        null,
+        is_string($command) ? ['bypass_shell' => true] : null
+    );
+}
+
+/** @param list<string>|string $command */
+function run_command(array|string $command, string $workingDirectory): void
 {
     fwrite(STDOUT, "\n> " . display_command($command) . "\n");
-    $process = proc_open(
+    $process = start_command(
         $command,
         [
             0 => ['file', 'php://stdin', 'r'],
@@ -630,10 +692,10 @@ function run_command(array $command, string $workingDirectory): void
     }
 }
 
-/** @param list<string> $command */
-function capture_command(array $command, string $workingDirectory): string
+/** @param list<string>|string $command */
+function capture_command(array|string $command, string $workingDirectory): string
 {
-    $process = proc_open(
+    $process = start_command(
         $command,
         [
             0 => ['file', 'php://stdin', 'r'],
@@ -659,9 +721,13 @@ function capture_command(array $command, string $workingDirectory): string
     return $output;
 }
 
-/** @param list<string> $command */
-function display_command(array $command): string
+/** @param list<string>|string $command */
+function display_command(array|string $command): string
 {
+    if (is_string($command)) {
+        return $command;
+    }
+
     return implode(' ', array_map(
         static fn (string $argument): string => preg_match('/^[A-Za-z0-9_\.\-\/:=]+$/', $argument) === 1
             ? $argument
