@@ -69,6 +69,11 @@ jobs:
         run: |
           rustup toolchain install --no-self-update
 
+      # Editor packages are named for the Rust target of the server they
+      # carry, which this check reads from the pinned toolchain.
+      - name: Check build script platform naming
+        run: php scripts/check_build_platform.php
+
       - name: Test
         run: cargo test --workspace --locked
 
@@ -98,6 +103,11 @@ jobs:
       - name: Install VS Code packaging dependencies
         working-directory: editors/vscode/doria
         run: npm ci --ignore-scripts
+
+      # The build platform check asks the pinned toolchain for its host.
+      - name: Set up Rust
+        run: |
+          rustup toolchain install --no-self-update
 
       - name: Check repository guardrails
         run: |

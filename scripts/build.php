@@ -263,6 +263,9 @@ function build_vscode(string $root, ?string $compilerPath = null): void
 {
     $editor = $root . '/editors/vscode/doria';
     $dist = $root . '/dist';
+    // Named before anything is built, so a server this package cannot carry
+    // is reported before the build is paid for.
+    $target = vscode_target(server_target_triple($root));
     ensure_directory($dist);
 
     build_server($root, true, $compilerPath);
@@ -280,7 +283,7 @@ function build_vscode(string $root, ?string $compilerPath = null): void
     run_tool('npm', ['ci', '--ignore-scripts'], $editor);
     run_tool(
         'npm',
-        ['run', 'package', '--', '--target', vscode_target(), '--out', $vsix],
+        ['run', 'package', '--', '--target', $target, '--out', $vsix],
         $editor
     );
 
@@ -291,10 +294,10 @@ function build_vscode(string $root, ?string $compilerPath = null): void
 function build_intellij(string $root, ?string $compilerPath = null): void
 {
     $editor = $root . '/editors/intellij/doria';
+    $platform = intellij_platform_key(server_target_triple($root));
     build_server($root, true, $compilerPath);
     $server = server_artifact($root, true);
     $bundle = $root . '/target/intellij-lsp-bundle';
-    $platform = intellij_platform_key();
     $executable = PHP_OS_FAMILY === 'Windows' ? 'doria-lsp.exe' : 'doria-lsp';
     remove_stale_artifacts($bundle . '/*/doria-lsp*');
     install_executable($server, "{$bundle}/{$platform}/{$executable}");
@@ -343,52 +346,97 @@ function server_artifact(string $root, bool $release): string
     return ($metadata['target_directory'] ?? $root . '/target') . "/{$profile}/{$executable}";
 }
 
-function vscode_target(): string
+/**
+ * The Rust target `doria-lsp` is built for: the host of the toolchain this
+ * repository pins.
+ *
+ * An editor package is named for the server it carries, so the platform is
+ * asked of the toolchain that built that server. The PHP running this script
+ * says nothing about it: a 32-bit PHP on 64-bit Windows reports `i586` while
+ * Cargo builds an x86_64 server.
+ */
+function server_target_triple(string $root): string
 {
-    $platform = match (PHP_OS_FAMILY) {
-        'Windows' => 'win32',
-        'Darwin' => 'darwin',
-        'Linux' => 'linux',
-        default => throw new RuntimeException(
-            'VS Code packaging is unsupported on ' . PHP_OS_FAMILY
-        ),
-    };
-    $machine = strtolower(php_uname('m'));
-    $architecture = match ($machine) {
-        'x86_64', 'amd64' => 'x64',
-        'aarch64', 'arm64' => 'arm64',
-        'armv7l', 'armv7' => 'armhf',
-        default => throw new RuntimeException(
-            "VS Code packaging is unsupported on architecture {$machine}"
-        ),
-    };
-    if ($platform !== 'linux' && $architecture === 'armhf') {
-        throw new RuntimeException("VS Code packaging does not support {$platform}-armhf");
+    $requested = getenv('CARGO_BUILD_TARGET');
+    if ($requested !== false && $requested !== '') {
+        throw new RuntimeException(
+            "CARGO_BUILD_TARGET is set to '{$requested}', but this script builds and packages "
+                . 'the server for the toolchain host. Unset CARGO_BUILD_TARGET, then run this command again.'
+        );
     }
+
+    $version = capture_command(['rustc', '-vV'], $root);
+    if (preg_match('/^host:\s*(\S+)\s*$/m', $version, $match) !== 1) {
+        throw new RuntimeException(
+            "`rustc -vV` did not report a host target. Run `rustc -vV` in {$root} and check the Rust installation."
+        );
+    }
+
+    return $match[1];
+}
+
+/**
+ * The system and processor a Rust target names, in the target's own words.
+ *
+ * @return array{system: string, processor: string}
+ */
+function target_platform(string $triple): array
+{
+    $system = match (true) {
+        str_contains($triple, '-windows-') => 'windows',
+        str_contains($triple, '-apple-darwin') => 'macos',
+        str_contains($triple, '-linux-') => 'linux',
+        default => throw new RuntimeException(
+            "Editor packaging does not support the Rust target {$triple}: only Windows, macOS and Linux "
+                . 'servers are packaged. Build on one of those systems.'
+        ),
+    };
+
+    return ['system' => $system, 'processor' => explode('-', $triple, 2)[0]];
+}
+
+function vscode_target(string $triple): string
+{
+    ['system' => $system, 'processor' => $processor] = target_platform($triple);
+    $platform = match ($system) {
+        'windows' => 'win32',
+        'macos' => 'darwin',
+        'linux' => 'linux',
+    };
+    $architecture = match (true) {
+        $processor === 'x86_64' => 'x64',
+        $processor === 'aarch64' => 'arm64',
+        $system === 'linux' && str_starts_with($processor, 'armv7') => 'armhf',
+        default => throw new RuntimeException(
+            "VS Code packaging does not support the Rust target {$triple}. " . supported_hosts_advice($system)
+        ),
+    };
 
     return "{$platform}-{$architecture}";
 }
 
-function intellij_platform_key(): string
+function intellij_platform_key(string $triple): string
 {
-    $platform = match (PHP_OS_FAMILY) {
-        'Windows' => 'windows',
-        'Darwin' => 'macos',
-        'Linux' => 'linux',
-        default => throw new RuntimeException(
-            'IntelliJ packaging is unsupported on ' . PHP_OS_FAMILY
-        ),
-    };
-    $machine = strtolower(php_uname('m'));
-    $architecture = match ($machine) {
-        'x86_64', 'amd64' => 'x86_64',
-        'aarch64', 'arm64' => 'aarch64',
-        default => throw new RuntimeException(
-            "IntelliJ packaging is unsupported on architecture {$machine}"
-        ),
+    ['system' => $system, 'processor' => $processor] = target_platform($triple);
+    if (!in_array($processor, ['x86_64', 'aarch64'], true)) {
+        throw new RuntimeException(
+            "IntelliJ packaging does not support the Rust target {$triple}. " . supported_hosts_advice($system)
+        );
+    }
+
+    return "{$system}-{$processor}";
+}
+
+function supported_hosts_advice(string $system): string
+{
+    $vendor = match ($system) {
+        'windows' => 'pc-windows-msvc',
+        'macos' => 'apple-darwin',
+        'linux' => 'unknown-linux-gnu',
     };
 
-    return "{$platform}-{$architecture}";
+    return "Install a Rust toolchain whose host is x86_64-{$vendor} or aarch64-{$vendor} "
+        . '(`rustup set default-host <host>`, then `rustup toolchain install`), then run this command again.';
 }
 
 /**
