@@ -53,6 +53,18 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          coverage: none
+
+      # The build script starts npm and Gradle differently on each system.
+      # The runner's own Node.js is used on purpose: on Windows it lives under
+      # a directory whose name has a space.
+      - name: Check build script tool launching
+        run: php scripts/check_build_tool_launching.php --require-npm
+
       - name: Set up Rust
         run: |
           rustup toolchain install --no-self-update

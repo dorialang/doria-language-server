@@ -3,6 +3,11 @@
 
 declare(strict_types=1);
 
+// Checks include this file for its functions; only a direct run builds.
+if (PHP_SAPI !== 'cli' || realpath($_SERVER['SCRIPT_FILENAME'] ?? '') !== __FILE__) {
+    return;
+}
+
 $root = dirname(__DIR__);
 $target = $argv[1] ?? 'help';
 $compilerPath = null;
@@ -300,11 +305,7 @@ function build_intellij(string $root, ?string $compilerPath = null): void
         '--no-daemon',
         "-PdoriaLspBundleDir={$bundle}",
     ];
-    $command = PHP_OS_FAMILY === 'Windows'
-        ? windows_command($gradle, $arguments)
-        : [$gradle, ...$arguments];
-
-    run_command($command, $editor);
+    run_tool($gradle, $arguments, $editor);
 
     $artifacts = glob($editor . '/build/distributions/*.zip') ?: [];
     if (count($artifacts) !== 1) {
@@ -470,10 +471,77 @@ function write_generated_file(string $path, string $contents): void
 /** @param list<string> $arguments */
 function run_tool(string $tool, array $arguments, string $workingDirectory): void
 {
-    $command = PHP_OS_FAMILY === 'Windows'
-        ? windows_command($tool, $arguments)
-        : [$tool, ...$arguments];
-    run_command($command, $workingDirectory);
+    run_command(tool_command($tool, $arguments), $workingDirectory);
+}
+
+/**
+ * The command that starts `$tool`, a name to find on PATH or a path to a
+ * file, with `$arguments`.
+ *
+ * The file is found here and started by its full path. On Windows `npm` and
+ * `gradlew` are batch files, and PHP quotes every argument it passes. A batch
+ * file that the command processor finds on PATH from a quoted name reads its
+ * own directory (`%~dp0`) as the working directory, so `npm.cmd` looked for
+ * npm inside the directory being built.
+ *
+ * @param list<string> $arguments
+ * @return list<string>
+ */
+function tool_command(string $tool, array $arguments): array
+{
+    $executable = resolve_tool($tool);
+    if (PHP_OS_FAMILY !== 'Windows') {
+        return [$executable, ...$arguments];
+    }
+
+    $executable = str_replace('/', '\\', $executable);
+    $extension = strtolower(pathinfo($executable, PATHINFO_EXTENSION));
+
+    return in_array($extension, ['bat', 'cmd'], true)
+        ? windows_command($executable, $arguments)
+        : [$executable, ...$arguments];
+}
+
+/**
+ * The file a tool name stands for: the first match on PATH, tried with each
+ * PATHEXT extension on Windows when the name has none. A tool given with a
+ * directory is the caller's choice of file and is returned unchanged. The
+ * working directory is never searched.
+ */
+function resolve_tool(string $tool): string
+{
+    if (is_absolute_path($tool) || strpbrk($tool, '/\\') !== false) {
+        return $tool;
+    }
+
+    $windows = PHP_OS_FAMILY === 'Windows';
+    $extensions = [''];
+    if ($windows && pathinfo($tool, PATHINFO_EXTENSION) === '') {
+        $configured = getenv('PATHEXT');
+        if ($configured === false || $configured === '') {
+            $configured = '.COM;.EXE;.BAT;.CMD';
+        }
+        $extensions = array_values(array_filter(explode(';', $configured)));
+    }
+
+    $path = getenv('PATH');
+    foreach (explode(PATH_SEPARATOR, $path === false ? '' : $path) as $directory) {
+        $directory = rtrim(trim($directory, '"'), '/\\');
+        if ($directory === '') {
+            continue;
+        }
+        foreach ($extensions as $extension) {
+            $candidate = $directory . DIRECTORY_SEPARATOR . $tool . $extension;
+            if (is_file($candidate) && ($windows || is_executable($candidate))) {
+                return $candidate;
+            }
+        }
+    }
+
+    throw new RuntimeException(
+        "'{$tool}' was not found on PATH. Install it, or add its directory to PATH "
+            . 'and open a new terminal, then run this command again.'
+    );
 }
 
 /**
