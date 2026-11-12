@@ -5181,6 +5181,14 @@ fn seekable_file_fixture_preserves_compiler_diagnostics() {
 }
 
 #[test]
+fn a_terminal_program_with_a_watched_raw_mode_has_no_false_diagnostics() {
+    let source = include_str!("../../editors/fixtures/stage46-terminal.doria");
+    let name = "terminal.doria";
+    doriac::check_source(name, source).unwrap();
+    assert_stored_source_diagnostics(name, source, None);
+}
+
+#[test]
 fn cancellation_source_and_copy_tokens_have_no_false_diagnostics() {
     let source = include_str!("../../editors/fixtures/stage36a-cancellation.doria");
     let name = "cancellation.doria";

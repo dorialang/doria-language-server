@@ -1,0 +1,98 @@
+use Doria\Std\Io\{ReadinessSet, StandardStreams, TransferCompletion, TransferPlan, TransferWaitResult, Wait,
+    WatchKey};
+use Doria\Std\Term\{Color, Console, Key, KeyModifiers, Position, RawMode, Size, Style, TerminalError,
+    TerminalEvent, TerminalWaitResult};
+
+function canDraw(): bool
+{
+    return StandardStreams::input->isInteractive && StandardStreams::output->isInteractive;
+}
+
+function heading(): Style
+{
+    return Style::plain->withForeground(Color::Cyan)->withBold();
+}
+
+function describe(Key $key, KeyModifiers $modifiers): string
+{
+    let $name = match ($key) {
+        Key::Character($text) => $text,
+        Key::Function($number) => "F{$number}",
+        Key::Enter => "Enter",
+        default => "another key",
+    };
+    if ($modifiers->control) {
+        return "Control+{$name}";
+    }
+    return $name;
+}
+
+function label(TerminalWaitResult $result): string
+{
+    return match ($result) {
+        TerminalWaitResult::Event($event) => match ($event) {
+            TerminalEvent::Key($key, $modifiers) => describe($key, $modifiers),
+            TerminalEvent::Resized($size) => "{$size->columns}x{$size->rows}",
+        },
+        TerminalWaitResult::TimedOut => "nothing yet",
+        TerminalWaitResult::Cancelled => "cancelled",
+        TerminalWaitResult::Closed => "closed",
+    };
+}
+
+function isReady(TransferWaitResult $result, WatchKey $watch): bool
+{
+    return match ($result) {
+        TransferWaitResult::Completed($completion) => match ($completion) {
+            TransferCompletion::Ready($key) => $key == $watch,
+            default => false,
+        },
+        default => false,
+    };
+}
+
+function draw(RawMode $keys, string $line): void throws TerminalError
+{
+    let $size = Console::getSize();
+    Console::clear();
+    let $title = heading();
+    Console::writeAt(0, 0, "Terminal", $title);
+    Console::writeAt(0, 2, $line);
+    Console::writeAt(0, $size->rows - 1, "any key", Style::plain->withDim());
+    Console::flush();
+    let $cursor = $keys->getCursorPosition();
+    Console::moveTo($cursor->column, $cursor->row);
+}
+
+function main(): int
+{
+    if (!canDraw()) {
+        echo "run this in a terminal\n";
+        return 2;
+    }
+    try {
+        let $keys = Console::enterRawMode();
+        let $screen = Console::enterAlternateScreen();
+        Console::hideCursor();
+        draw($keys, "waiting");
+        writable ReadinessSet $set = new ReadinessSet();
+        {
+            let $plan = TransferPlan::watch($keys);
+            let $watch = $plan->getWatchKey(0);
+            let writable $group = $set->begin($plan);
+            if (isReady($group->getNextCompletion(Wait::Indefinite), $watch)) {
+                draw($keys, label($keys->getNextEvent(Wait::Immediate)));
+                $group->resubmitWatch($watch);
+            }
+            let $observed = $group->observedWatchKey;
+        }
+        Console::showCursor();
+        return 0;
+    } catch (TerminalError $error) {
+        echo $error->message;
+        return 1;
+    } catch (Doria\Std\Io\IoError $error) {
+        echo $error->message;
+        return 1;
+    }
+}

@@ -6967,7 +6967,7 @@ pub(crate) const INLINE_COPY_DOCUMENTATION: &str = "**Representation:** Inline C
 const NON_OWNING_INLINE_DOCUMENTATION: &str =
     "This value carries no heap ownership; copying it allocates nothing.";
 
-pub(crate) const STANDARD_STREAM_DOCUMENTATION: &str = "**Ownership:** Process-Owned Standard Device\n\nStandardStreams exposes readonly static input, output, and error properties returning StandardInput, StandardOutput, and StandardError. These non-owning, nonclosable inline Copy views share the intrinsic device owner, redirection, injection, and access/mode coordination. Access and copying allocate no native handle, control block, buffer, or heap object. Copies grant no independent exclusive access; mode changes require exclusive control and a restoring guard.\n\n**Interface Borrowing:** Copy-to-interface conversion creates an independent owning erased snapshot. A returned borrow stored beyond the call statement requires a named interface owner. The original Copy binding remains independently usable and assignable. Nullable erasure follows the same compiler-owned lifetime rules.";
+pub(crate) const STANDARD_STREAM_DOCUMENTATION: &str = "**Ownership:** Process-Owned Standard Device\n\nStandardStreams exposes readonly static input, output, and error properties returning StandardInput, StandardOutput, and StandardError. These non-owning, nonclosable inline Copy views share the intrinsic device owner, redirection, injection, and access/mode coordination. Access and copying allocate no native handle, control block, buffer, or heap object. Copies grant no independent exclusive access; mode changes require exclusive control and a restoring guard.\n\n**Interface Borrowing:** Copy-to-interface conversion creates an independent owning erased snapshot. A returned borrow stored beyond the call statement requires a named interface owner. The original Copy binding remains independently usable and assignable. Nullable erasure follows the same compiler-owned lifetime rules.\n\n**Terminal:** Each view has readonly `isInteractive: bool`, true when that standard stream is attached to a terminal. It never throws and answers while a pending transfer holds the device.";
 
 const CANCELLATION_TOKEN_DOCUMENTATION: &str = "**Ownership:** Shared Cancellation State\n\nEach independently owned token copy retains one shared state claim and releases it during ordinary cleanup. Borrowed arguments acquire no ownership claim. Token creation and copying allocate no second state or native signal. Tokens may outlive their source. Copying or dropping a token, and destroying its CancellationSource, do not request cancellation.\n\n**Equality:** `==` compares shared cancellation-state identity; `!=` is its inverse. Tokens and copies from the same source compare equal; distinct live states differ. Cancellation and source destruction do not change identity while tokens survive. Ordinary nullable equality applies. Borrowed comparison acquires no ownership claim and performs no signal or clock work. This grants no ordering, hashing, integer conversion, or address API.";
 
@@ -6980,6 +6980,18 @@ pub(crate) const REGISTRATION_KEY_DOCUMENTATION: &str = "**Ownership:** Non-owni
 pub(crate) const READ_TRANSFER_KEY_DOCUMENTATION: &str = "**Identity:** Opaque, non-owning identifier for a read transfer, not a registered stream. Distinct from WriteTransferKey, RegistrationKey<T>, and integers; no integer conversions or public constructor. Copying it does not copy, borrow, or own a stream or buffer. Retrieved by TransferPlan's getReadKey(int $position), using zero-based positions across the entire mixed plan; an invalid or wrong-direction position throws IoError. Operation identity remains stable through consuming appends. The approved TransferGroup contract also exposes it through readonly observedReadKey: ?ReadTransferKey, without retaining group, storage, or source loans. Tooling validation and pinned-compiler integration remain pending.";
 
 pub(crate) const WRITE_TRANSFER_KEY_DOCUMENTATION: &str = "**Identity:** Opaque, non-owning identifier for a write transfer, not a registered stream. Distinct from ReadTransferKey, RegistrationKey<T>, and integers; no integer conversions or public constructor. Copying it does not copy, borrow, or own a stream or buffer. Retrieved by TransferPlan's getWriteKey(int $position), using zero-based positions across the entire mixed plan; an invalid or wrong-direction position throws IoError. Operation identity remains stable through consuming appends. The approved TransferGroup contract also exposes it through readonly observedWriteKey: ?WriteTransferKey, without retaining group, storage, or source loans. Tooling validation and pinned-compiler integration remain pending.";
+
+pub(crate) const WATCH_KEY_DOCUMENTATION: &str = "**Identity:** Opaque, non-owning identifier for one watch in a transfer plan, not the watched source. Distinct from ReadTransferKey, WriteTransferKey, RegistrationKey<T>, and integers; no integer conversions or public constructor. Copying it does not borrow the source or start a watch. Retrieved by TransferPlan's getWatchKey(int $position), using zero-based positions across the entire mixed plan; a position that is not a watch throws IoError. Carried by TransferCompletion::Ready and exposed through TransferGroup's readonly observedWatchKey: ?WatchKey. A watch reports once; resubmitWatch(WatchKey $key) arms it again after its Ready has been fetched.";
+
+pub(crate) const WATCH_SOURCE_DOCUMENTATION: &str = "**Role:** Opaque value by which a Watchable source tells the runtime what to watch. It has no public constructor or member, and a program has no use for it: pass the source itself to TransferPlan::watch or andWatch. Copying it does not borrow the source or start a watch. Only the standard library implements Watchable; E0781 rejects a program's own implementation.";
+
+pub(crate) const TERMINAL_SIZE_DOCUMENTATION: &str = "**Terminal Size:** The columns and rows of the terminal window, read through readonly `columns` and `rows`. Returned by Console::getSize() and carried by TerminalEvent::Resized.";
+
+pub(crate) const TERMINAL_POSITION_DOCUMENTATION: &str = "**Terminal Position:** One cell of the terminal, column first and zero-based, with (0, 0) at the top left; read through readonly `column` and `row`. Returned by RawMode::getCursorPosition().";
+
+pub(crate) const KEY_MODIFIERS_DOCUMENTATION: &str = "**Key Modifiers:** Which of Control, Alt, and Shift were held with a key, read through readonly `control`, `alt`, and `shift`. Carried by TerminalEvent::Key.";
+
+pub(crate) const TERMINAL_STYLE_DOCUMENTATION: &str = "**Style:** How one Console write looks. Start from Style::plain and build with withForeground, withBackground, withBold, withDim, withItalic, withUnderline, withReverse, and withStrikethrough; each returns a changed copy. A style belongs to one write and leaves nothing set on the terminal. A color the terminal cannot show is drawn as the nearest it can, and redirected output receives the text alone.";
 
 pub(crate) const TRANSFER_KEY_LOOKUP_FAILURE_DOCUMENTATION: &str = "**Lookup Failure:** Negative, out-of-range, or wrong-direction positions throw `Doria\\Std\\Io\\IoError` with `operation = IoOperation::Access`, `target = IoTarget::TransferPlan`, and `reason = IoErrorReason::InvalidInput`. The TransferPlan target has no payload. `systemCode` and `transferredByteCount` are `null`.";
 
@@ -7023,9 +7035,17 @@ pub(crate) fn inline_value_documentation(ty: doriac::inline_value::InlineValueKi
         doriac::inline_value::InlineValueKind::RegistrationKey => REGISTRATION_KEY_DOCUMENTATION,
         doriac::inline_value::InlineValueKind::ReadTransferKey => READ_TRANSFER_KEY_DOCUMENTATION,
         doriac::inline_value::InlineValueKind::WriteTransferKey => WRITE_TRANSFER_KEY_DOCUMENTATION,
+        doriac::inline_value::InlineValueKind::WatchKey => WATCH_KEY_DOCUMENTATION,
+        doriac::inline_value::InlineValueKind::WatchSource => WATCH_SOURCE_DOCUMENTATION,
         doriac::inline_value::InlineValueKind::CancellationToken => {
             CANCELLATION_TOKEN_DOCUMENTATION
         }
+        doriac::inline_value::InlineValueKind::Terminal(value) => match value {
+            doriac::inline_value::TerminalValue::Size => TERMINAL_SIZE_DOCUMENTATION,
+            doriac::inline_value::TerminalValue::Position => TERMINAL_POSITION_DOCUMENTATION,
+            doriac::inline_value::TerminalValue::KeyModifiers => KEY_MODIFIERS_DOCUMENTATION,
+            doriac::inline_value::TerminalValue::Style => TERMINAL_STYLE_DOCUMENTATION,
+        },
         doriac::inline_value::InlineValueKind::StandardInput
         | doriac::inline_value::InlineValueKind::StandardOutput
         | doriac::inline_value::InlineValueKind::StandardError => STANDARD_STREAM_DOCUMENTATION,
@@ -7039,6 +7059,10 @@ pub(crate) fn inline_value_documentation(ty: doriac::inline_value::InlineValueKi
         documentation.push_str(TRANSFER_KEY_LOOKUP_FAILURE_DOCUMENTATION);
         documentation.push_str("\n\n");
         documentation.push_str(TRANSFER_GROUP_RESUBMISSION_FAILURE_DOCUMENTATION);
+    }
+    if ty == doriac::inline_value::InlineValueKind::WatchKey {
+        documentation.push_str("\n\n");
+        documentation.push_str(TRANSFER_KEY_LOOKUP_FAILURE_DOCUMENTATION);
     }
     documentation
 }
@@ -7057,7 +7081,7 @@ pub(crate) fn pending_request_documentation(name: &str) -> Option<&'static str> 
 pub(crate) fn transfer_result_documentation(name: &str) -> Option<&'static str> {
     match name {
         doriac::compiler_known_stream::TRANSFER_COMPLETION => Some(
-            "Identifies a retired read or write with its matching typed transfer key and nullable outcome. A null outcome means no transfer outcome on that completed operation, not absence of a completion. Zero-byte success, WouldBlock, EndOfStream, and a read's TimedOut remain actual applicable outcomes. Construction and copying do not retire work, release loans, or grant buffer access.",
+            "Identifies a retired read or write with its matching typed transfer key and nullable outcome, or with Ready a watch whose source has something the program can take without waiting. Ready carries only its WatchKey; the program asks the source, then calls resubmitWatch to watch again. A null outcome means no transfer outcome on that completed operation, not absence of a completion. Zero-byte success, WouldBlock, EndOfStream, and a read's TimedOut remain actual applicable outcomes. Construction and copying do not retire work, release loans, or grant buffer access.",
         ),
         doriac::compiler_known_stream::TRANSFER_WAIT_RESULT => Some(
             "Completed carries a TransferCompletion, distinct from the wait observations TimedOut and Exhausted. Neither observation permanently stops the group or prevents later resubmission. Transfer failures throw the original owned checked Error rather than returning an error case. If wait infrastructure fails alongside a preserved transfer completion or owned transfer error, the infrastructure error is reported first. The original completion or owned error remains available for a subsequent fetch; it is not discarded, relabeled, or reconstructed. The approved reusable owner is Doria\\Std\\Io\\TransferGroup, with readonly observedReadKey: ?ReadTransferKey and readonly observedWriteKey: ?WriteTransferKey. Only the fetched operation's direction is present; both are null before the first fetch and after timeout or exhaustion. The observed key preserves the consumed plan's original opaque stamp and mixed-plan operation position, published before an original owned checked Error propagates and preserved across resubmission. Key copies retain no group, storage, or source loans or resources. Observed keys do not replace successful completion payload keys. A retired read's known completed prefix may be available through getReadRegion before fetching; observed keys are published only by fetching. Fetching and cleanup do not repeat retired adapter callbacks. An original queued IoError remains owned until fetched or group destruction. Group setup through begin consumes the plan on success and failure. Its own plan-validation and native-setup IoError use IoOperation::Configure / IoTarget::TransferGroup, preserving reason and system-code details. An adapter's original owned checked Error propagates unchanged, not relabeled or reconstructed. Failed setup releases plan loans, leaves no active group, and submits no work. Construction and copying do not retire work, release loans, or grant buffer access. The compiler declares writable getNextCompletion(Wait $wait): TransferWaitResult, with ambient IoError transport. Tooling validation and pinned-compiler integration remain pending.",
@@ -10334,6 +10358,7 @@ function matchesOutcome({event} $completion, ?{outcome} $expected): bool {{
     return match ($completion) {{
         {event}::{case}($ignoredKey, $actual) => $actual == $expected && !($actual != $expected),
         {event}::{other_case}($ignoredKey, $actual) => false,
+        {event}::Ready($ignoredWatch) => false,
     }};
 }}
 function inspect({key} $key, ?{outcome} $outcome): void {{
@@ -10372,7 +10397,7 @@ function inspect({key} $key, ?{outcome} $outcome): void {{
                     assert!(snapshot.declaration_span_at_offset(offset).is_none());
                 }
                 for (name, case, fields, parameter, active, labels) in [
-                    (TRANSFER_COMPLETION, case, format!("{key} $key, ?{outcome} $outcome"), "outcome:", 1, vec!["Read", "Write"]),
+                    (TRANSFER_COMPLETION, case, format!("{key} $key, ?{outcome} $outcome"), "outcome:", 1, vec!["Read", "Write", "Ready"]),
                     (TRANSFER_WAIT_RESULT, "Completed", format!("{TRANSFER_COMPLETION} $completion"), "completion:", 0, vec!["Completed", "TimedOut", "Exhausted"]),
                 ] {
                     let offset = source.find(&format!("::{case}(")).unwrap() + 2;
@@ -10535,6 +10560,36 @@ function inspect({key} $key, ?{outcome} $outcome): void {{
     }
 
     #[test]
+    fn terminal_values_and_watch_keys_explain_themselves_on_hover() {
+        let source = include_str!("../../editors/fixtures/stage46-terminal.doria");
+        let snapshot = AnalysisSnapshot::analyze("terminal.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        for (needle, documentation) in [
+            ("$size->rows - 1", TERMINAL_SIZE_DOCUMENTATION),
+            ("$cursor->column", TERMINAL_POSITION_DOCUMENTATION),
+            ("$modifiers->control", KEY_MODIFIERS_DOCUMENTATION),
+            ("$title);", TERMINAL_STYLE_DOCUMENTATION),
+            ("$watch = $plan", WATCH_KEY_DOCUMENTATION),
+        ] {
+            let hover = snapshot
+                .hover_at_offset(source.find(needle).unwrap())
+                .unwrap();
+            assert!(
+                hover.markdown.contains(documentation),
+                "{needle}: {hover:?}"
+            );
+            assert!(
+                hover.markdown.contains(NON_OWNING_INLINE_DOCUMENTATION),
+                "{needle}: {hover:?}"
+            );
+        }
+    }
+
+    #[test]
     fn standard_stream_accessors_and_copy_help_use_compiler_metadata() {
         use doriac::compiler_known_stream::{STANDARD_ERROR, STANDARD_INPUT, STANDARD_OUTPUT};
         let source = include_str!("../../editors/fixtures/stage36a-standard-streams.doria");
@@ -10608,10 +10663,16 @@ function inspect({key} $key, ?{outcome} $outcome): void {{
             InlineValueKind::RegistrationKey,
             InlineValueKind::ReadTransferKey,
             InlineValueKind::WriteTransferKey,
+            InlineValueKind::WatchKey,
+            InlineValueKind::WatchSource,
             InlineValueKind::CancellationToken,
             InlineValueKind::StandardInput,
             InlineValueKind::StandardOutput,
             InlineValueKind::StandardError,
+            InlineValueKind::Terminal(doriac::inline_value::TerminalValue::Size),
+            InlineValueKind::Terminal(doriac::inline_value::TerminalValue::Position),
+            InlineValueKind::Terminal(doriac::inline_value::TerminalValue::KeyModifiers),
+            InlineValueKind::Terminal(doriac::inline_value::TerminalValue::Style),
         ] {
             let documentation = inline_value_documentation(kind);
             assert!(documentation.contains(INLINE_COPY_DOCUMENTATION));

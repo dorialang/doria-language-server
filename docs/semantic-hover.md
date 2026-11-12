@@ -897,6 +897,26 @@ on the same `try` does not catch that finalizer error, while an enclosing catch 
 `R1000` remains a runtime outcome for an error that escapes the entry point, so it is
 not published as an editor diagnostic.
 
+Stage 46 adds `Doria\Std\Term` under Decision 0140. The module is authored in
+Doria, so its classes, enums, members, and case payloads reach hover,
+completion, and signature help through the same compiler declarations as any
+other module; the server adds no terminal-specific symbol table. Its four
+inline Copy values (`Size`, `Position`, `KeyModifiers`, `Style`) are compiler
+`InlineValueKind::Terminal` kinds, and hover adds one description for each
+together with the shared non-owning inline note. `Doria\Std\Io\WatchKey` and
+`WatchSource` are inline kinds too. A `WatchKey` hover says that the key names
+one watch in a transfer plan and not the watched source, and repeats the
+key-lookup failure contract that read and write keys carry. A `WatchSource`
+hover says that a program passes the source itself to `TransferPlan::watch` or
+`andWatch` and has no use for the value. `TransferCompletion` hover describes
+`Ready(WatchKey $key)`: the source has something the program can take without
+waiting, the program asks the source, then calls `resubmitWatch` to watch
+again. The standard-stream hover names the readonly `isInteractive` property.
+The fixture `editors/fixtures/stage46-terminal.doria` holds a program that
+enters raw mode, watches it in a transfer group, and reads keys; the server
+reports no diagnostics for it, and a hover regression covers the four terminal
+values and `WatchKey`.
+
 The server never guesses a symbol from spelling alone. Ambiguous or unresolved
 identifiers return no semantic hover.
 
