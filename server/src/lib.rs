@@ -198,6 +198,9 @@ struct Server {
     source_edit_policies: HashMap<String, SourceEditPolicy>,
     baton_override: Option<String>,
     supports_dynamic_watching: bool,
+    /// The client accepts an InsertReplaceEdit, so it can choose between
+    /// inserting before and replacing the rest of a name.
+    supports_insert_replace: bool,
     project_discovery: ProjectDiscovery,
     project_status_messages: HashMap<String, String>,
     project_watcher_registrations: HashMap<String, String>,
@@ -390,6 +393,15 @@ impl Server {
         let id = message.get("id").cloned();
         match method {
             "initialize" => {
+                self.supports_insert_replace = message
+                    .get("params")
+                    .and_then(|params| {
+                        params.pointer(
+                        "/capabilities/textDocument/completion/completionItem/insertReplaceSupport",
+                    )
+                    })
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 self.supports_dynamic_watching = message
                     .get("params")
                     .and_then(|params| params.get("capabilities"))
@@ -1421,7 +1433,16 @@ impl Server {
     ) -> Value {
         let text = &document.text;
         if let Some(completions) = document.analysis.member_completions_at_offset(offset) {
-            return replacing_completion_items(completions, text, start, offset);
+            return replacing_completion_items(
+                completions,
+                text,
+                PartialName {
+                    start,
+                    cursor: offset,
+                    end,
+                },
+                self.supports_insert_replace,
+            );
         }
         // A compiler-owned expectation chain takes a call, not a property.
         if let Some(source) = repaired_completion_source(
@@ -1435,7 +1456,16 @@ impl Server {
                 .analyze_completion_source(uri, document, &source)
                 .assertion_completions_at_offset(start)
             {
-                return replacing_completion_items(completions, text, start, offset);
+                return replacing_completion_items(
+                    completions,
+                    text,
+                    PartialName {
+                        start,
+                        cursor: offset,
+                        end,
+                    },
+                    self.supports_insert_replace,
+                );
             }
         }
         if let Some(source) =
@@ -1445,7 +1475,16 @@ impl Server {
                 .analyze_completion_source(uri, document, &source)
                 .member_completions_at_offset(start)
             {
-                return replacing_completion_items(completions, text, start, offset);
+                return replacing_completion_items(
+                    completions,
+                    text,
+                    PartialName {
+                        start,
+                        cursor: offset,
+                        end,
+                    },
+                    self.supports_insert_replace,
+                );
             }
         }
         incomplete_completion_items()
@@ -1464,7 +1503,16 @@ impl Server {
     ) -> Value {
         let text = &document.text;
         if let Some(completions) = document.analysis.static_completions_at_offset(offset) {
-            return replacing_completion_items(completions, text, start, offset);
+            return replacing_completion_items(
+                completions,
+                text,
+                PartialName {
+                    start,
+                    cursor: offset,
+                    end,
+                },
+                self.supports_insert_replace,
+            );
         }
         let productions = [
             COMPLETION_PLACEHOLDER.to_string(),
@@ -1482,7 +1530,16 @@ impl Server {
                 .analyze_completion_source(uri, document, &source)
                 .static_completions_at_offset(start)
             {
-                return replacing_completion_items(completions, text, start, offset);
+                return replacing_completion_items(
+                    completions,
+                    text,
+                    PartialName {
+                        start,
+                        cursor: offset,
+                        end,
+                    },
+                    self.supports_insert_replace,
+                );
             }
         }
         incomplete_completion_items()
@@ -1532,17 +1589,21 @@ impl Server {
         if variables.is_empty() {
             return incomplete_completion_items();
         }
-        let range = span_to_range(text, Span::new(start, offset));
+        let name = PartialName {
+            start,
+            cursor: offset,
+            end,
+        };
         json!({
             "isIncomplete": false,
             "items": variables
                 .into_iter()
                 .map(|(label, detail)| json!({
+                    "textEdit": name.edit(text, &label, self.supports_insert_replace),
                     "label": label,
                     "kind": 6,
                     "detail": detail,
                     "filterText": label,
-                    "textEdit": { "range": range, "newText": label },
                 }))
                 .collect::<Vec<_>>(),
         })
@@ -3764,28 +3825,56 @@ fn unclosed_statement_groups(path: &str, before: &str) -> String {
     statement.iter().rev().collect()
 }
 
-/// Items that replace the partial name `start..offset`, so every client
-/// filters and inserts them the same way.
+/// The name a completion request sits in: `start..end` is the whole
+/// identifier, and the cursor may be anywhere inside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PartialName {
+    start: usize,
+    cursor: usize,
+    end: usize,
+}
+
+impl PartialName {
+    /// The edit that puts `new_text` in place of the name. A client that
+    /// accepts an InsertReplaceEdit gets both ranges and applies its own
+    /// insert-or-replace choice (JetBrains: Enter inserts, Tab replaces);
+    /// any other client replaces the whole name, so choosing `toString` at
+    /// `to|Str` never leaves `Str` behind.
+    fn edit(self, text: &str, new_text: &str, insert_replace: bool) -> Value {
+        let replace = span_to_range(text, Span::new(self.start, self.end));
+        if insert_replace {
+            json!({
+                "newText": new_text,
+                "insert": span_to_range(text, Span::new(self.start, self.cursor)),
+                "replace": replace,
+            })
+        } else {
+            json!({ "range": replace, "newText": new_text })
+        }
+    }
+}
+
+/// Items that put their label in place of `name`, so every client filters
+/// and edits them the same way.
 fn replacing_completion_items(
     completions: Vec<SemanticCompletion>,
     text: &str,
-    start: usize,
-    offset: usize,
+    name: PartialName,
+    insert_replace: bool,
 ) -> Value {
     if completions.is_empty() {
         return incomplete_completion_items();
     }
-    let range = span_to_range(text, Span::new(start, offset));
     let items = completions
         .into_iter()
         .map(|completion| {
             json!({
+                "textEdit": name.edit(text, &completion.label, insert_replace),
                 "label": completion.label,
                 "kind": completion.kind,
                 "detail": completion.detail,
                 "documentation": completion.documentation,
                 "filterText": completion.label,
-                "textEdit": { "range": range, "newText": completion.label },
             })
         })
         .collect::<Vec<_>>();
@@ -6145,6 +6234,67 @@ function main(): void
             items[0]["textEdit"]["range"],
             span_to_range(&source, Span::new(end - 1, end))
         );
+    }
+
+    #[test]
+    fn completing_inside_a_name_replaces_the_whole_name() {
+        // `|` marks the cursor; the name continues after it.
+        let cases = [
+            (TYPING_WINDOW.replace("TYPED", "$this->des|cribe();"), "des", "describe"),
+            (
+                "enum Suit\n{\n    case Hearts;\n    case Spades;\n}\n\nfunction main(): void\n{\n    let $suit = Suit::He|arts;\n}\n"
+                    .to_string(),
+                "He",
+                "Hearts",
+            ),
+            (TYPING_WINDOW.replace("TYPED", "let $n = $col|umns;"), "$col", "$columns"),
+        ];
+        for (marked, typed, label) in cases {
+            let cursor = marked.find('|').unwrap();
+            let source = marked.replacen('|', "", 1);
+            let name_start = cursor - typed.len();
+            let name_end = name_start
+                + source[name_start..]
+                    .chars()
+                    .take_while(|character| {
+                        *character == '$' || is_identifier_character(*character)
+                    })
+                    .count();
+            let whole = span_to_range(&source, Span::new(name_start, name_end));
+            let prefix = span_to_range(&source, Span::new(name_start, cursor));
+
+            for insert_replace in [false, true] {
+                let uri = "file:///inside.doria";
+                let mut server = Server {
+                    supports_insert_replace: insert_replace,
+                    ..Server::default()
+                };
+                open_stage31_document(&mut server, uri, &source);
+                let position = byte_offset_to_position(&source, cursor);
+                let response = server.completion(Some(&json!({
+                    "textDocument": { "uri": uri },
+                    "position": { "line": position.line, "character": position.character },
+                })));
+                let item = response["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|item| item["label"] == label)
+                    .unwrap_or_else(|| panic!("`{label}` at {marked}: {response}"))
+                    .clone();
+                let edit = &item["textEdit"];
+                assert_eq!(edit["newText"], label);
+                if insert_replace {
+                    // The client chooses: insert before the rest, or replace it.
+                    assert_eq!(edit["insert"], prefix, "{marked}");
+                    assert_eq!(edit["replace"], whole, "{marked}");
+                } else {
+                    // Without that choice the whole name is replaced, so no
+                    // suffix such as `ribe` is left behind.
+                    assert_eq!(edit["range"], whole, "{marked}");
+                }
+            }
+        }
     }
 
     #[test]

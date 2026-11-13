@@ -14,6 +14,10 @@ This project follows the Doria toolchain CalVer.
   complete operand, so they no longer head the list where an expression or
   a type begins. While the file is mid-edit and does not parse, completion
   still offers the classes it declares and the names it imports.
+- Completing with the cursor inside a name replaces the whole name, so
+  choosing `describe` at `$this->des|cribe` no longer leaves `cribe` behind.
+  An editor that supports insert-and-replace completion (JetBrains IDEs:
+  Enter inserts, Tab replaces) gets both ranges and applies its own choice.
 - Signatures show parameters as declared, also for declarations in files
   that are not open: defaults with their value, `int $width = 120` instead of
   `int $width` (or `= ...` in the open file), and a constructor parameter's
