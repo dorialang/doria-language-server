@@ -6,6 +6,11 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Pinned the compiler to `76fb2952d78dae45352fec435f96f6b74e241fda`, which
+  accepts every local declaration form in a `for` initializer (Decision 0143).
+  `for (writable int $row = 0; ...)` no longer shows three parser errors. The
+  shared fixture `editors/fixtures/for-typed-initializer.doria` holds the
+  typed, grouped and `let` forms; the server reports no diagnostics for it.
 - Synchronized the language server with Stage 46, the terminal layer, and
   pinned the compiler to `61e314503a64cedf708d256b3c88c3d7db1cef60`. Hover explains the inline Copy values of
   `Doria\Std\Term` (`Size`, `Position`, `KeyModifiers`, `Style`) and the

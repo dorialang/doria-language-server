@@ -1,0 +1,29 @@
+class Window
+{
+    internal writable int $width = 4;
+    internal writable int $height = 3;
+
+    function render(): void
+    {
+        for (writable int $row = 0; $row < $this->height; $row++) {
+            for (writable int $column = 0; $column < $this->width; $column++) {
+                echo "#";
+            }
+            echo "\n";
+        }
+    }
+}
+
+function main(): void
+{
+    let $window = new Window();
+    $window->render();
+
+    for (writable int $low, $high = 0; $low < 2; $low++) {
+        echo "{$low} {$high}\n";
+    }
+
+    for (let writable $index = 0; $index < 2; $index++) {
+        echo "{$index}\n";
+    }
+}
