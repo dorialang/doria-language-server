@@ -2603,6 +2603,39 @@ fn preserves_php_readline_migration_guidance() {
 }
 
 #[test]
+fn sequence_get_with_a_fallback_has_no_false_diagnostics() {
+    let source = r#"
+function main(): void
+{
+    List<string> $lines = ["alpha"];
+    int[] $numbers = [1, 2];
+    echo $lines->get(3) ?? "missing";
+    echo $numbers->get(-1) ?? 0;
+}
+"#;
+    let name = "sequence-get.doria";
+    doriac::check_source(name, source).unwrap();
+    assert_stored_source_diagnostics(name, source, None);
+}
+
+#[test]
+fn coalesce_after_an_index_read_names_get() {
+    let diagnostics = diagnostics_for_document(
+        "file:///index-coalesce.doria",
+        "function main(): void { List<string> $lines = [\"a\"]; echo $lines[3] ?? \"\"; }",
+    );
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0782")
+        .unwrap_or_else(|| panic!("E0782 should be published: {diagnostics:?}"));
+    let published = diagnostic.to_string();
+    assert!(
+        published.contains("$sequence->get($index) ?? $fallback"),
+        "{published}"
+    );
+}
+
+#[test]
 fn padding_without_a_padding_text_has_no_false_diagnostics() {
     let source = r#"
 function main(): void

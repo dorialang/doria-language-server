@@ -7338,6 +7338,16 @@ fn collection_method(
             display_nullable_resolved_type(value),
             "Removes and returns the final value, or `null` when the list is empty.",
         ),
+        (ResolvedType::List(value), "get") => (
+            "int $index".to_string(),
+            display_nullable_resolved_type(value),
+            "Returns the value at the given index, or `null` when the index is out of range. `$list[$index]` panics instead.",
+        ),
+        (ResolvedType::TypedArray(value), "get") => (
+            "int $index".to_string(),
+            display_nullable_resolved_type(value),
+            "Returns the value at the given index, or `null` when the index is out of range. `$array[$index]` panics instead.",
+        ),
         (ResolvedType::List(value), "contains") => (
             format!("{} $value", display_resolved_type(value)),
             "bool".to_string(),
@@ -8867,6 +8877,7 @@ mod tests {
             let deque = ResolvedType::Deque(Box::new(element));
             for (receiver, method) in [
                 (&list, "pop"),
+                (&list, "get"),
                 (&dictionary, "get"),
                 (&dictionary, "remove"),
                 (&sorted, "get"),

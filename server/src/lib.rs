@@ -4253,7 +4253,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
                 "`function toString(): string` is the exact externally accessible readonly instance method required by `Displayable`.",
             ),
             "List" => Some(
-                "`List<T>` is the growable, insertion-ordered sequence: `add`, `insertAt`, `removeAt`, `pop`, `contains`, `first`/`last`, and the `count`/`isEmpty` properties (decision 0100). An owned move type.",
+                "`List<T>` is the growable, insertion-ordered sequence: `add`, `insertAt`, `removeAt`, `pop`, `get` (`?T`, `null` when the index is out of range), `contains`, `first`/`last`, and the `count`/`isEmpty` properties (decisions 0100 and 0144). An owned move type.",
             ),
             "Dictionary" => Some(
                 "`Dictionary<K, V>` is the insertion-ordered map: `get` (`?V`), `set`, `remove` (`?V`), `containsKey`, `containsValue`, `clear`, the foreach-only `keys`/`values` projections, and `count`/`isEmpty` (decisions 0100 and 0113). Keys require `Hashable`; nullable keys do not inherit payload conformance. An owned move type.",

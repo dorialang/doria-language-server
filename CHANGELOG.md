@@ -6,6 +6,11 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Pinned the compiler to `b02a8f02070cbcf492383c6f5f2bd393b26334a1`
+  (Decision 0144). `List<T>` and `T[]` have `get(int $index): ?T`, with hover
+  text for both. `??` after a value that is never null, such as an index read,
+  is reported as E0782 in the editor instead of failing later in a build; its
+  help names `$sequence->get($index) ?? $fallback`.
 - Pinned the compiler to `65cbe7c534672c53c256c4c5a83f1f19525ffaf5`, where the
   padding argument of `String::padStart` and `String::padEnd` defaults to one
   space. Their hovers show `string $padding = " "`.
