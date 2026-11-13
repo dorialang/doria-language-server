@@ -58,6 +58,7 @@ impl DiscoveryRunner for ProcessDiscoveryRunner {
             env::var_os("DORIA_BATON_PATH").as_deref(),
             env::current_exe().ok().as_deref(),
             env::var_os("PATH").as_deref(),
+            &LaunchPlatform::host(),
         )?;
         let workspace = project_command(&baton, &request.root_path, true);
         match run_project_command(&workspace, cancelled) {
@@ -300,22 +301,118 @@ fn bounded_message(stderr: &[u8]) -> String {
     }
 }
 
+/// How the host turns a command name into a launchable file.
+///
+/// Windows resolves a command through `PATHEXT`, and Baton ships there only as
+/// `baton.cmd` (packaged) or `baton.bat` (source checkout); the extensionless
+/// `baton` beside them is a PHP script that Windows cannot launch. Other
+/// platforms launch the name as written.
+#[derive(Debug, Clone)]
+pub(crate) struct LaunchPlatform {
+    windows: bool,
+    pathext: Option<std::ffi::OsString>,
+}
+
+/// Windows' own default when `PATHEXT` is unset.
+const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
+
+impl LaunchPlatform {
+    pub(crate) fn host() -> Self {
+        Self {
+            windows: cfg!(windows),
+            pathext: env::var_os("PATHEXT"),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn windows(pathext: Option<&str>) -> Self {
+        Self {
+            windows: true,
+            pathext: pathext.map(std::ffi::OsString::from),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unix() -> Self {
+        Self {
+            windows: false,
+            pathext: None,
+        }
+    }
+
+    /// The launchable spellings of `name`, in the host's lookup order.
+    fn command_names(&self, name: &str) -> Vec<String> {
+        if !self.windows {
+            return vec![name.to_string()];
+        }
+        let pathext = self
+            .pathext
+            .as_deref()
+            .and_then(std::ffi::OsStr::to_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(DEFAULT_PATHEXT);
+        let mut names = Vec::new();
+        for extension in pathext.split(';').map(str::trim) {
+            if extension.len() < 2 || !extension.starts_with('.') {
+                continue;
+            }
+            let candidate = format!("{name}{}", extension.to_ascii_lowercase());
+            if !names.contains(&candidate) {
+                names.push(candidate);
+            }
+        }
+        names
+    }
+
+    /// A configured path is used as written when it names a file with an
+    /// extension. On Windows an extensionless path is resolved through
+    /// `PATHEXT`, exactly as the shell would resolve it.
+    fn configured_candidates(&self, path: &Path) -> Vec<PathBuf> {
+        if !self.windows || path.extension().is_some() {
+            return vec![path.to_path_buf()];
+        }
+        let Some(file_name) = path.file_name().and_then(std::ffi::OsStr::to_str) else {
+            return vec![path.to_path_buf()];
+        };
+        self.command_names(file_name)
+            .into_iter()
+            .map(|name| path.with_file_name(name))
+            .collect()
+    }
+}
+
+/// The nearest directory at or above `start` that holds a `Baton.toml` — the
+/// same upward search Baton performs to find the project a path belongs to.
+pub(crate) fn baton_project_root(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|directory| directory.join("Baton.toml").is_file())
+        .map(Path::to_path_buf)
+}
+
+/// Remedy shown whenever no Baton could be found. It names every way to point
+/// the language server at Baton, so the person reading it never has to look up
+/// which one applies.
+pub(crate) const BATON_NOT_FOUND: &str = "Baton was not found. Set the Baton path in your editor's Doria settings (VS Code: doria.baton.path; JetBrains IDEs: Settings | Languages & Frameworks | Doria), set the DORIA_BATON_PATH environment variable, or add the directory that contains baton (baton.cmd on Windows) to PATH.";
+
 fn resolve_baton(
     explicit: Option<&str>,
     environment: Option<&std::ffi::OsStr>,
     current_executable: Option<&Path>,
     search_path: Option<&std::ffi::OsStr>,
+    platform: &LaunchPlatform,
 ) -> Result<PathBuf, String> {
     if let Some(path) = explicit.filter(|path| !path.trim().is_empty()) {
-        return resolve_requested_path(path, "configured Baton path");
+        return resolve_requested_path(path, "configured Baton path", platform);
     }
     if let Some(path) = environment.and_then(std::ffi::OsStr::to_str) {
         if !path.trim().is_empty() {
-            return resolve_requested_path(path, "DORIA_BATON_PATH");
+            return resolve_requested_path(path, "DORIA_BATON_PATH", platform);
         }
     }
+    let names = platform.command_names("baton");
     if let Some(directory) = current_executable.and_then(Path::parent) {
-        for name in executable_names("baton") {
+        for name in &names {
             let candidate = directory.join(name);
             if is_executable(&candidate) {
                 return Ok(candidate);
@@ -324,7 +421,7 @@ fn resolve_baton(
     }
     if let Some(path) = search_path {
         for directory in env::split_paths(path) {
-            for name in executable_names("baton") {
+            for name in &names {
                 let candidate = directory.join(name);
                 if is_executable(&candidate) {
                     return Ok(candidate);
@@ -332,10 +429,14 @@ fn resolve_baton(
             }
         }
     }
-    Err("Baton was not found; configure a Baton path, set DORIA_BATON_PATH, install it beside doria-lsp, or add baton to PATH".to_string())
+    Err(BATON_NOT_FOUND.to_string())
 }
 
-fn resolve_requested_path(value: &str, label: &str) -> Result<PathBuf, String> {
+fn resolve_requested_path(
+    value: &str,
+    label: &str,
+    platform: &LaunchPlatform,
+) -> Result<PathBuf, String> {
     let path = PathBuf::from(value.trim());
     let path = if path.is_absolute() {
         path
@@ -344,22 +445,17 @@ fn resolve_requested_path(value: &str, label: &str) -> Result<PathBuf, String> {
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
     };
-    if is_executable(&path) {
-        Ok(path)
-    } else {
-        Err(format!(
-            "{label} is not an executable file: {}",
-            path.display()
-        ))
+    if let Some(found) = platform
+        .configured_candidates(&path)
+        .into_iter()
+        .find(|candidate| is_executable(candidate))
+    {
+        return Ok(found);
     }
-}
-
-fn executable_names(name: &str) -> Vec<String> {
-    if cfg!(windows) {
-        vec![format!("{name}.exe"), name.to_string()]
-    } else {
-        vec![name.to_string()]
-    }
+    Err(format!(
+        "The {label} is not an executable file: {}. Point it at the baton launcher (baton.cmd on Windows).",
+        path.display()
+    ))
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -442,6 +538,8 @@ mod tests {
                 fs::set_permissions(candidate, fs::Permissions::from_mode(0o755)).unwrap();
             }
         }
+        // Extensionless launchers: the Unix lookup rule, on every host.
+        let unix = LaunchPlatform::unix();
         let executable = sibling.parent().unwrap().join("doria-lsp");
         assert_eq!(
             resolve_baton(
@@ -449,6 +547,7 @@ mod tests {
                 Some(environment.as_os_str()),
                 Some(&executable),
                 Some(path.parent().unwrap().as_os_str()),
+                &unix,
             )
             .unwrap(),
             explicit
@@ -459,6 +558,7 @@ mod tests {
                 Some(environment.as_os_str()),
                 Some(&executable),
                 Some(path.parent().unwrap().as_os_str()),
+                &unix,
             )
             .unwrap(),
             environment
@@ -468,16 +568,106 @@ mod tests {
                 None,
                 None,
                 Some(&executable),
-                Some(path.parent().unwrap().as_os_str())
+                Some(path.parent().unwrap().as_os_str()),
+                &unix,
             )
             .unwrap(),
             sibling
         );
         assert_eq!(
-            resolve_baton(None, None, None, Some(path.parent().unwrap().as_os_str())).unwrap(),
+            resolve_baton(
+                None,
+                None,
+                None,
+                Some(path.parent().unwrap().as_os_str()),
+                &unix,
+            )
+            .unwrap(),
             path
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    fn launcher(directory: &Path, name: &str) -> PathBuf {
+        let path = directory.join(name);
+        fs::create_dir_all(directory).unwrap();
+        fs::write(&path, b"launcher").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn windows_finds_the_cmd_and_bat_launchers_baton_ships_as() {
+        let root = env::temp_dir().join(format!("doria-baton-pathext-{}", std::process::id()));
+        // Packaged toolchain: only baton.cmd. Source checkout: an extensionless
+        // PHP script (unlaunchable on Windows) beside baton.bat.
+        let packaged = root.join("toolchain/bin");
+        let cmd = launcher(&packaged, "baton.cmd");
+        let source = root.join("baton-php/bin");
+        launcher(&source, "baton");
+        let bat = launcher(&source, "baton.bat");
+        let windows = LaunchPlatform::windows(Some(".COM;.EXE;.BAT;.CMD"));
+
+        for (directory, expected) in [(&packaged, &cmd), (&source, &bat)] {
+            assert_eq!(
+                resolve_baton(None, None, None, Some(directory.as_os_str()), &windows).unwrap(),
+                *expected,
+                "PATH lookup in {}",
+                directory.display()
+            );
+            let lsp = directory.join("doria-lsp.exe");
+            assert_eq!(
+                resolve_baton(None, None, Some(&lsp), None, &windows).unwrap(),
+                *expected,
+                "lookup beside doria-lsp in {}",
+                directory.display()
+            );
+        }
+
+        // An unset PATHEXT falls back to Windows' own default.
+        assert_eq!(
+            resolve_baton(
+                None,
+                None,
+                None,
+                Some(packaged.as_os_str()),
+                &LaunchPlatform::windows(None)
+            )
+            .unwrap(),
+            cmd
+        );
+
+        // A configured path without an extension resolves like the shell would.
+        let configured = source.join("baton");
+        assert_eq!(
+            resolve_baton(configured.to_str(), None, None, None, &windows).unwrap(),
+            bat
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_missing_baton_names_every_remedy() {
+        let empty = env::temp_dir().join(format!("doria-baton-missing-{}", std::process::id()));
+        fs::create_dir_all(&empty).unwrap();
+        for platform in [LaunchPlatform::unix(), LaunchPlatform::windows(None)] {
+            let error =
+                resolve_baton(None, None, None, Some(empty.as_os_str()), &platform).unwrap_err();
+            assert_eq!(error, BATON_NOT_FOUND);
+        }
+        for remedy in [
+            "doria.baton.path",
+            "Languages & Frameworks | Doria",
+            "DORIA_BATON_PATH",
+            "baton.cmd",
+        ] {
+            assert!(BATON_NOT_FOUND.contains(remedy), "missing {remedy}");
+        }
+        fs::remove_dir_all(empty).unwrap();
     }
 
     #[test]

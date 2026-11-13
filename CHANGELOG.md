@@ -6,6 +6,31 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Completion knows where the cursor is while code is still being typed.
+  After `$this->`, `$this->x`, or `f($this->`, before the statement has its
+  `;`, it offers only the receiver's members; it used to offer every keyword
+  and global name, so typing `x` could insert `xor`. A `$` name offers only
+  the variables in scope, including `$this` in an instance method, and `::`
+  offers only static names. Members such as `toString`, `length`, and `share`
+  are no longer offered as bare names, `__construct` and `__destruct` are no
+  longer offered after `->` (the compiler rejects calling them, E0414), and a
+  site with nothing valid yet returns an empty list that the editor asks for
+  again on the next keystroke.
+- Names declared in project files that are not open are no longer reported as
+  unknown when Baton was not found or the project sits below the opened
+  folder. On Windows the server finds the `baton.cmd` and `baton.bat` launchers
+  through `PATHEXT`; a document opened inside a Baton project below a workspace
+  root has that project discovered; a project that cannot be loaded raises a
+  warning naming the cause and the remedy instead of an Info log line; and
+  changing the Baton or language-server path in the JetBrains or VS Code
+  settings restarts the server.
+- Hovering the class name in `new Application(...)` shows the constructor that
+  expression calls, such as `function Application::__construct(take
+  ApplicationConfig $config)`, with its documentation, including for classes in
+  files that are not open. Constructor signatures no longer end in `: void`,
+  and project classes declared in other files no longer read "Compiler-known
+  Doria class".
+
 - Pinned the compiler to `b02a8f02070cbcf492383c6f5f2bd393b26334a1`
   (Decision 0144). `List<T>` and `T[]` have `get(int $index): ?T`, with hover
   text for both. `??` after a value that is never null, such as an index read,

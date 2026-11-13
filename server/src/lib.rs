@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Write};
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::mpsc;
 use std::thread;
@@ -32,7 +33,7 @@ use analysis::{
     documentation_comment_template, AnalysisSnapshot, ImportCandidate, MissingCallable,
     MissingCallableTarget, SemanticCompletion, SemanticImport,
 };
-use baton_discovery::{DiscoveryRequest, ProjectDiscovery};
+use baton_discovery::{baton_project_root, DiscoveryRequest, ProjectDiscovery};
 use file_uri::file_uri_to_path;
 use project::{ProjectDocument, SourceEditPolicy};
 use string_surface::STRING_COMPANION_METHODS;
@@ -539,8 +540,56 @@ impl Server {
 
         let document = self.document_from_text(uri, text.to_string(), version);
         self.documents.insert(uri.to_string(), document);
+        self.adopt_document_project(uri);
         self.reanalyze_documents();
         self.publish_all_diagnostics(writer)
+    }
+
+    /// Discover the Baton project a document belongs to when no workspace root
+    /// covers it — for example when the editor opened a folder of several
+    /// projects, or a file from outside the opened folder. Without this the
+    /// document is analysed alongside the open buffers only, and every name
+    /// declared in an unopened file of its project is reported as unknown.
+    ///
+    /// A workspace root that already lies inside a Baton project is discovered
+    /// from that root, which also covers the members of a Baton workspace, so
+    /// documents under it need nothing more.
+    fn adopt_document_project(&mut self, uri: &str) {
+        let Some(directory) =
+            file_uri_to_path(uri).and_then(|path| path.parent().map(Path::to_path_buf))
+        else {
+            return;
+        };
+        let Some(project) = baton_project_root(&directory) else {
+            return;
+        };
+        let project_uri = normalize_root_uri(&file_uri::path_to_file_uri(&project));
+        if self
+            .workspace_roots
+            .iter()
+            .any(|root| root.uri == project_uri)
+        {
+            return;
+        }
+        let covered = self
+            .workspace_roots
+            .iter()
+            .filter(|root| uri_is_within(uri, &root.uri))
+            .any(|root| {
+                file_uri_to_path(&root.uri)
+                    .and_then(|root| baton_project_root(&root))
+                    .is_some()
+            });
+        if covered {
+            return;
+        }
+        self.workspace_roots.push(WorkspaceRoot {
+            package: tooling_package_name("workspace", &project_uri),
+            uri: project_uri.clone(),
+        });
+        self.workspace_roots
+            .sort_by(|left, right| left.uri.cmp(&right.uri));
+        self.schedule_project_refresh(&project_uri, Duration::ZERO);
     }
 
     fn on_type_formatting(&self, params: Option<&Value>) -> Value {
@@ -1183,95 +1232,17 @@ impl Server {
                 return semantic_completion_items(completions);
             }
         }
-        if let Some(completions) = document.analysis.member_completions_at_offset(offset) {
-            return semantic_completion_items(completions);
-        }
-        if let Some(completions) = document.analysis.static_completions_at_offset(offset) {
-            return semantic_completion_items(completions);
-        }
-
-        // An accessor with no member name is incomplete source, so preserve the
-        // compiler as the semantic authority by analyzing temporary call and
-        // property tokens at the cursor instead of guessing from nearby text.
-        if document.text[..offset].ends_with("->") {
-            const PLACEHOLDER: &str = "__doria_completion";
-            let analyze = |source: &str| {
-                self.analyze_temporary_project_overlay(&uri, source)
-                    .unwrap_or_else(|| {
-                        document
-                            .analysis
-                            .source_semantic_context()
-                            .cloned()
-                            .map_or_else(
-                                || {
-                                    AnalysisSnapshot::analyze_with_context(
-                                        &uri,
-                                        source,
-                                        document.analysis.compilation_context().clone(),
-                                    )
-                                },
-                                |source_context| {
-                                    AnalysisSnapshot::analyze_with_source_context(
-                                        &uri,
-                                        source,
-                                        source_context,
-                                    )
-                                },
-                            )
-                    })
-            };
-            let mut call_source = document.text.clone();
-            call_source.insert_str(offset, &format!("{PLACEHOLDER}()"));
-            if let Some(completions) = analyze(&call_source).assertion_completions_at_offset(offset)
-            {
-                return semantic_completion_items(completions);
+        match completion_site(&uri, &document.text, offset) {
+            CompletionSite::Member { start, end } => {
+                return self.member_access_completions(&uri, document, start, end, offset);
             }
-            let mut property_source = document.text.clone();
-            property_source.insert_str(offset, PLACEHOLDER);
-            if let Some(completions) =
-                analyze(&property_source).member_completions_at_offset(offset)
-            {
-                return semantic_completion_items(completions);
+            CompletionSite::Static { start, end } => {
+                return self.static_access_completions(&uri, document, start, end, offset);
             }
-        }
-        if document.text[..offset].ends_with("::") {
-            const PLACEHOLDER: &str = "__doria_completion";
-            let mut source = document.text.clone();
-            let suffix = document.text[offset..].trim_start();
-            let insertion = if suffix.starts_with(',') || suffix.starts_with('}') {
-                format!("{PLACEHOLDER} => 0")
-            } else {
-                PLACEHOLDER.to_string()
-            };
-            source.insert_str(offset, &insertion);
-            let analysis = self
-                .analyze_temporary_project_overlay(&uri, &source)
-                .unwrap_or_else(|| {
-                    AnalysisSnapshot::analyze_with_context(
-                        &uri,
-                        &source,
-                        document.analysis.compilation_context().clone(),
-                    )
-                });
-            if let Some(completions) = analysis.static_completions_at_offset(offset) {
-                return semantic_completion_items(completions);
+            CompletionSite::Variable { start, end } => {
+                return self.variable_completions(&uri, document, start, end, offset);
             }
-            // A trait adaptation needs its own complete parser production, not
-            // the expression recovery used by ordinary static access.
-            let mut source = document.text.clone();
-            source.insert_str(offset, "__doria_completion as __doria_completion_alias;");
-            let analysis = self
-                .analyze_temporary_project_overlay(&uri, &source)
-                .unwrap_or_else(|| {
-                    AnalysisSnapshot::analyze_with_context(
-                        &uri,
-                        &source,
-                        document.analysis.compilation_context().clone(),
-                    )
-                });
-            if let Some(completions) = analysis.static_completions_at_offset(offset) {
-                return semantic_completion_items(completions);
-            }
+            CompletionSite::Other => {}
         }
         let mut completion = completion_items_with_analysis(&document.analysis, offset);
         if let Some(items) = completion.get_mut("items").and_then(Value::as_array_mut) {
@@ -1313,6 +1284,180 @@ impl Server {
             }
         }
         completion
+    }
+
+    /// Analyze a repaired copy of `document` with the same project and source
+    /// context the document itself is analyzed with.
+    fn analyze_completion_source(
+        &self,
+        uri: &str,
+        document: &Document,
+        source: &str,
+    ) -> AnalysisSnapshot {
+        self.analyze_temporary_project_overlay(uri, source)
+            .unwrap_or_else(|| {
+                document
+                    .analysis
+                    .source_semantic_context()
+                    .cloned()
+                    .map_or_else(
+                        || {
+                            AnalysisSnapshot::analyze_with_context(
+                                uri,
+                                source,
+                                document.analysis.compilation_context().clone(),
+                            )
+                        },
+                        |source_context| {
+                            AnalysisSnapshot::analyze_with_source_context(
+                                uri,
+                                source,
+                                source_context,
+                            )
+                        },
+                    )
+            })
+    }
+
+    /// After `->` or `?->` only the receiver's members are valid, so this never
+    /// falls back to keywords or global names. While a member is being typed
+    /// the statement is unfinished, so the compiler analyzes the smallest
+    /// repair its parser accepts.
+    fn member_access_completions(
+        &self,
+        uri: &str,
+        document: &Document,
+        start: usize,
+        end: usize,
+        offset: usize,
+    ) -> Value {
+        let text = &document.text;
+        if let Some(completions) = document.analysis.member_completions_at_offset(offset) {
+            return replacing_completion_items(completions, text, start, offset);
+        }
+        // A compiler-owned expectation chain takes a call, not a property.
+        if let Some(source) = repaired_completion_source(
+            uri,
+            text,
+            start,
+            end,
+            &format!("{COMPLETION_PLACEHOLDER}()"),
+        ) {
+            if let Some(completions) = self
+                .analyze_completion_source(uri, document, &source)
+                .assertion_completions_at_offset(start)
+            {
+                return replacing_completion_items(completions, text, start, offset);
+            }
+        }
+        if let Some(source) =
+            repaired_completion_source(uri, text, start, end, COMPLETION_PLACEHOLDER)
+        {
+            if let Some(completions) = self
+                .analyze_completion_source(uri, document, &source)
+                .member_completions_at_offset(start)
+            {
+                return replacing_completion_items(completions, text, start, offset);
+            }
+        }
+        incomplete_completion_items()
+    }
+
+    /// After `::` only static members, enum cases, and trait-adaptation targets
+    /// are valid. Each production that can follow `::` is tried in turn, and
+    /// the compiler parser decides which one the surrounding code is.
+    fn static_access_completions(
+        &self,
+        uri: &str,
+        document: &Document,
+        start: usize,
+        end: usize,
+        offset: usize,
+    ) -> Value {
+        let text = &document.text;
+        if let Some(completions) = document.analysis.static_completions_at_offset(offset) {
+            return replacing_completion_items(completions, text, start, offset);
+        }
+        let productions = [
+            COMPLETION_PLACEHOLDER.to_string(),
+            // A match arm: `Suit::| => ...`.
+            format!("{COMPLETION_PLACEHOLDER} => 0"),
+            // A trait adaptation: `Trait::| as alias;`.
+            format!("{COMPLETION_PLACEHOLDER} as {COMPLETION_PLACEHOLDER}_alias"),
+        ];
+        for production in productions {
+            let Some(source) = repaired_completion_source(uri, text, start, end, &production)
+            else {
+                continue;
+            };
+            if let Some(completions) = self
+                .analyze_completion_source(uri, document, &source)
+                .static_completions_at_offset(start)
+            {
+                return replacing_completion_items(completions, text, start, offset);
+            }
+        }
+        incomplete_completion_items()
+    }
+
+    /// A `$` name is a variable, so only the variables visible at the cursor
+    /// are offered.
+    fn variable_completions(
+        &self,
+        uri: &str,
+        document: &Document,
+        start: usize,
+        end: usize,
+        offset: usize,
+    ) -> Value {
+        let text = &document.text;
+        let repaired;
+        let analysis = if doriac::parse_source(uri, text.as_str()).is_ok() {
+            &document.analysis
+        } else if let Some(source) =
+            repaired_completion_source(uri, text, start, end, &format!("${COMPLETION_PLACEHOLDER}"))
+        {
+            repaired = self.analyze_completion_source(uri, document, &source);
+            &repaired
+        } else {
+            return incomplete_completion_items();
+        };
+        let mut variables = analysis
+            .local_completions_at_offset(start)
+            .into_iter()
+            .map(|local| (local.label, local.detail))
+            .collect::<Vec<_>>();
+        if let Some(context) = analysis
+            .hierarchy_context_at_offset(start)
+            .filter(|context| context.method.is_some_and(|method| !method.is_static))
+        {
+            if !variables.iter().any(|(label, _)| label == "$this") {
+                variables.insert(
+                    0,
+                    (
+                        "$this".to_string(),
+                        format!("{} $this", context.class.qualified_name),
+                    ),
+                );
+            }
+        }
+        if variables.is_empty() {
+            return incomplete_completion_items();
+        }
+        let range = span_to_range(text, Span::new(start, offset));
+        json!({
+            "isIncomplete": false,
+            "items": variables
+                .into_iter()
+                .map(|(label, detail)| json!({
+                    "label": label,
+                    "kind": 6,
+                    "detail": detail,
+                    "filterText": label,
+                    "textEdit": { "range": range, "newText": label },
+                }))
+                .collect::<Vec<_>>(),
+        })
     }
 
     fn references(&self, params: Option<&Value>) -> Value {
@@ -1951,9 +2096,9 @@ impl Server {
                     if changed {
                         self.project_status_messages
                             .insert(update.root_uri.clone(), bounded.clone());
-                        messages.push(format!(
-                            "Doria project discovery unavailable for {}: {}. Open documents remain available in partial-project mode.",
-                            update.root_uri, bounded
+                        messages.extend(project_discovery_failure_notices(
+                            &update.root_uri,
+                            &bounded,
                         ));
                     }
                 }
@@ -1961,12 +2106,8 @@ impl Server {
         }
         self.reanalyze_documents();
         self.publish_all_diagnostics(writer)?;
-        for message in messages {
-            send_notification(
-                writer,
-                "window/logMessage",
-                json!({ "type": 3, "message": message }),
-            )?;
+        for (method, params) in messages {
+            send_notification(writer, method, params)?;
         }
         Ok(true)
     }
@@ -2408,6 +2549,42 @@ impl Server {
 
 fn normalize_root_uri(uri: &str) -> String {
     uri.trim_end_matches('/').to_string()
+}
+
+/// What to tell the person when project discovery fails for a root.
+///
+/// Every failure is logged. When the root belongs to a Baton project, the
+/// server can only analyse the buffers that are open, so every name declared in
+/// an unopened file is reported as unknown. That must never pass as an ordinary
+/// compiler error: it is raised as a visible warning that states the cause, its
+/// consequence, and the remedy. A root outside any Baton project is ordinary
+/// standalone editing and only gets the log line.
+fn project_discovery_failure_notices(root_uri: &str, message: &str) -> Vec<(&'static str, Value)> {
+    // Baton's and the resolver's messages may or may not end in a sentence.
+    let sentence = message.trim_end().trim_end_matches('.');
+    let mut notices = vec![(
+        "window/logMessage",
+        json!({
+            "type": 3,
+            "message": format!(
+                "Doria project discovery unavailable for {root_uri}: {sentence}. Open documents remain available in partial-project mode."
+            ),
+        }),
+    )];
+    let project = file_uri_to_path(root_uri).and_then(|path| baton_project_root(&path));
+    if let Some(project) = project {
+        notices.push((
+            "window/showMessage",
+            json!({
+                "type": 2,
+                "message": format!(
+                    "Doria could not load the Baton project at {}, so names declared in files that are not open are reported as unknown. {sentence}. After fixing it, refresh the project (JetBrains IDEs: Tools | Refresh Doria Project); a change to PATH or DORIA_BATON_PATH takes effect once the editor restarts.",
+                    project.display()
+                ),
+            }),
+        ));
+    }
+    notices
 }
 
 fn uri_is_within(uri: &str, root: &str) -> bool {
@@ -2925,6 +3102,10 @@ fn initialize_result() -> Value {
     })
 }
 
+/// The names valid where no receiver precedes the cursor: keywords, types,
+/// and global functions. Members such as `toString`, `length`, and `share`
+/// belong to a receiver, so they are offered only after `->`, where the
+/// receiver's type decides which apply.
 fn completion_items() -> Value {
     let keywords = [
         "class",
@@ -3115,12 +3296,6 @@ fn completion_items() -> Value {
         "detail": "compiler-known Doria interface",
         "documentation": "`interface Error` is the compiler-known checked-error contract. Nominal conformance, including through an Error subinterface, requires an externally accessible readonly stored `string $message`. Subinterfaces participate in throws coverage, ordered catches, and typed toThrow inspectors while preserving concrete Error identity.",
     }));
-    items.push(json!({
-        "label": "toString",
-        "kind": 2,
-        "detail": "function toString(): string",
-        "documentation": "The exact readonly instance method required by the compiler-known `Displayable` contract.",
-    }));
     items.extend(BUILTINS.iter().copied().map(|builtin| {
         json!({
             "label": builtin.name(),
@@ -3154,30 +3329,10 @@ fn completion_items() -> Value {
             ),
         })
     }));
-    items.extend(
-        analysis::string_property_completions()
-            .into_iter()
-            .map(|property| {
-                json!({
-                    "label": property.label,
-                    "kind": property.kind,
-                    "detail": property.detail,
-                    "documentation": property.documentation,
-                })
-            }),
-    );
     items.extend(STRING_COMPANION_METHODS.iter().map(|method| {
         json!({
             "label": format!("String::{}", method.name),
             "kind": 3,
-            "detail": method.signature,
-            "documentation": method.documentation,
-        })
-    }));
-    items.extend(SHARED_OWNERSHIP_METHODS.iter().map(|method| {
-        json!({
-            "label": method.name,
-            "kind": 2,
             "detail": method.signature,
             "documentation": method.documentation,
         })
@@ -3200,6 +3355,163 @@ fn completion_items() -> Value {
     json!({
         "isIncomplete": false,
         "items": items,
+    })
+}
+
+/// A member name no Doria program can declare, used to stand in for the name
+/// being typed so that the compiler can analyze the unfinished expression.
+const COMPLETION_PLACEHOLDER: &str = "__doria_completion";
+
+/// Where a completion request sits. It is read from compiler tokens, not from
+/// whether the buffer parses: while a name is being typed it usually does not,
+/// and the request must still know that `$this->x` wants a member of `$this`.
+/// `start..end` is the partial name around the cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletionSite {
+    /// A member name after `->` or `?->`.
+    Member { start: usize, end: usize },
+    /// A static member, enum case, or adaptation target after `::`.
+    Static { start: usize, end: usize },
+    /// A `$` variable name; `start` is the `$`.
+    Variable { start: usize, end: usize },
+    /// Anywhere else, where keywords and global names are valid.
+    Other,
+}
+
+fn completion_site(path: &str, text: &str, offset: usize) -> CompletionSite {
+    let Some(before) = text.get(..offset) else {
+        return CompletionSite::Other;
+    };
+    // A sentinel suffix makes the name at the cursor a token even when nothing
+    // has been typed after `->`, `::`, or `$`. Inside a comment or a string no
+    // token ends at the sentinel, so those positions stay `Other`.
+    const SENTINEL: &str = "__doria_site";
+    let Ok(tokens) = doriac::lex_source(path, format!("{before}{SENTINEL}")) else {
+        return CompletionSite::Other;
+    };
+    let mut significant = tokens
+        .iter()
+        .rev()
+        .filter(|token| token.kind != TokenKind::Eof);
+    let Some(name) = significant.next() else {
+        return CompletionSite::Other;
+    };
+    if name.span.end != offset + SENTINEL.len() {
+        return CompletionSite::Other;
+    }
+    let start = name.span.start;
+    let end = offset
+        + text[offset..]
+            .chars()
+            .take_while(|character| is_identifier_character(*character))
+            .map(char::len_utf8)
+            .sum::<usize>();
+    match &name.kind {
+        TokenKind::Variable(_) => CompletionSite::Variable { start, end },
+        TokenKind::Identifier(_) => match significant.next().map(|token| &token.kind) {
+            Some(TokenKind::Arrow | TokenKind::QuestionArrow) => {
+                CompletionSite::Member { start, end }
+            }
+            Some(TokenKind::DoubleColon) => CompletionSite::Static { start, end },
+            _ => CompletionSite::Other,
+        },
+        _ => CompletionSite::Other,
+    }
+}
+
+/// Replace the partial name `start..end` with `insertion` and finish the
+/// statement it sits in, choosing the smallest repair the compiler parser
+/// accepts: the text as it is, then a terminating `;`, then the brackets the
+/// statement still has open, then the same with the rest of the line dropped.
+/// Returns `None` when no repair parses, for example when an unrelated part
+/// of the file is broken.
+fn repaired_completion_source(
+    path: &str,
+    text: &str,
+    start: usize,
+    end: usize,
+    insertion: &str,
+) -> Option<String> {
+    let before = text.get(..start)?;
+    let after = text.get(end..)?;
+    let closers = unclosed_statement_groups(path, before);
+    let rest_of_file = &after[after.find('\n').unwrap_or(after.len())..];
+    let mut candidates = vec![
+        format!("{before}{insertion}{after}"),
+        format!("{before}{insertion};{after}"),
+    ];
+    if !closers.is_empty() {
+        candidates.push(format!("{before}{insertion}{closers};{after}"));
+    }
+    candidates.push(format!("{before}{insertion}{closers};{rest_of_file}"));
+    candidates
+        .into_iter()
+        .find(|candidate| doriac::parse_source(path, candidate.as_str()).is_ok())
+}
+
+/// The closing brackets for the parentheses and square brackets opened, and
+/// not yet closed, since the innermost open block.
+fn unclosed_statement_groups(path: &str, before: &str) -> String {
+    let Ok(tokens) = doriac::lex_source(path, before) else {
+        return String::new();
+    };
+    let mut open = Vec::new();
+    for token in &tokens {
+        match token.kind {
+            TokenKind::LeftParen => open.push(')'),
+            TokenKind::LeftBracket => open.push(']'),
+            TokenKind::LeftBrace => open.push('}'),
+            TokenKind::RightParen | TokenKind::RightBracket | TokenKind::RightBrace => {
+                open.pop();
+            }
+            _ => {}
+        }
+    }
+    let statement = open
+        .iter()
+        .rposition(|closer| *closer == '}')
+        .map_or(&open[..], |block| &open[block + 1..]);
+    statement.iter().rev().collect()
+}
+
+/// Items that replace the partial name `start..offset`, so every client
+/// filters and inserts them the same way.
+fn replacing_completion_items(
+    completions: Vec<SemanticCompletion>,
+    text: &str,
+    start: usize,
+    offset: usize,
+) -> Value {
+    if completions.is_empty() {
+        return incomplete_completion_items();
+    }
+    let range = span_to_range(text, Span::new(start, offset));
+    let items = completions
+        .into_iter()
+        .map(|completion| {
+            json!({
+                "label": completion.label,
+                "kind": completion.kind,
+                "detail": completion.detail,
+                "documentation": completion.documentation,
+                "filterText": completion.label,
+                "textEdit": { "range": range, "newText": completion.label },
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "isIncomplete": false,
+        "items": items,
+    })
+}
+
+/// Nothing valid is known yet at this site. Marking the list incomplete makes
+/// the client ask again on the next keystroke instead of filtering an
+/// unrelated list.
+fn incomplete_completion_items() -> Value {
+    json!({
+        "isIncomplete": true,
+        "items": [],
     })
 }
 
@@ -4743,6 +5055,26 @@ mod tests {
             .unwrap_or_else(|| panic!("completion item `{label}` should exist"))
             .clone()
     }
+    /// Completion items at the end of `marker` in `source`, which is opened
+    /// as typed: the statement around the cursor is unfinished.
+    fn completions_while_typing(source: &str, marker: &str) -> Vec<Value> {
+        let uri = "file:///typing.doria";
+        let offset = source.find(marker).expect("completion marker") + marker.len();
+        let position = byte_offset_to_position(source, offset);
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document::new(uri, source.to_string(), Some(1)),
+        );
+        server.completion(Some(&json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": position.line, "character": position.character },
+        })))["items"]
+            .as_array()
+            .expect("completion items")
+            .clone()
+    }
+
     fn completion_labels() -> Vec<String> {
         completion_items()["items"]
             .as_array()
@@ -5316,12 +5648,27 @@ function main(): void
             assert_eq!(item["detail"], method.signature);
             assert_eq!(item["documentation"], method.documentation);
         }
+        // String properties belong to a string receiver: they are offered after
+        // `->` while the statement is still being typed, never as bare names.
+        let members = completions_while_typing(
+            "function main(): void\n{\n    let $text = \"Doria\";\n    echo $text->\n}\n",
+            "$text->",
+        );
+        let member = |label: &str| {
+            members
+                .iter()
+                .find(|item| item["label"] == label)
+                .unwrap_or_else(|| panic!("string member `{label}` should be offered after `->`"))
+                .clone()
+        };
+        let bare = completion_labels();
         for property in string_surface::STRING_PROPERTIES {
-            let item = completion_item(property.name);
+            let item = member(property.name);
             assert_eq!(item["detail"], property.signature);
             assert_eq!(item["documentation"], property.documentation);
+            assert!(!bare.contains(&property.name.to_string()));
         }
-        let view = completion_item("byteRegion");
+        let view = member("byteRegion");
         let intrinsic =
             doriac::byte_intrinsics::member(&doriac::types::ResolvedType::String, "byteRegion")
                 .unwrap();
@@ -5418,7 +5765,10 @@ function main(): void
             "acquireReadonlyAccess",
             "acquireWritableAccess",
         ] {
-            assert_eq!(completion_item(member)["kind"], 2);
+            assert!(
+                !completion_labels().contains(&member.to_string()),
+                "`{member}` needs a shared receiver, so it is not a bare name"
+            );
             let source = format!("$value->{member}();");
             let hover = hover_at_offset(&source, source.find(member).unwrap())
                 .unwrap_or_else(|| panic!("{member} should provide member-call hover information"));
@@ -5439,6 +5789,174 @@ function main(): void
         assert!(
             hover_at_offset("share;", 1).is_none(),
             "an unrelated identifier must not receive ownership-method hover"
+        );
+    }
+
+    const TYPING_WINDOW: &str = r#"class Window
+{
+    internal writable int $left = 0;
+    internal writable int $top = 0;
+
+    function describe(): string
+    {
+        return "window";
+    }
+
+    writable function moveBy(int $columns, int $rows): void
+    {
+        $this->left += $columns;
+        TYPED
+    }
+}
+"#;
+
+    fn typed_in_window(typed: &str) -> (String, String) {
+        let marker = typed.to_string();
+        (TYPING_WINDOW.replace("TYPED", typed), marker)
+    }
+
+    fn labels_of(items: &[Value]) -> Vec<&str> {
+        items
+            .iter()
+            .filter_map(|item| item["label"].as_str())
+            .collect()
+    }
+
+    #[test]
+    fn typing_a_member_offers_only_that_receivers_members() {
+        // Each form is how the line looks mid-keystroke: no closing `;`, a
+        // partial name, or an open call. None of them parses as written.
+        for typed in [
+            "let writable $x = $this->",
+            "let writable $x = $this->x",
+            "$this->t",
+            "$this->moveBy(1, $this->",
+            "echo $this?->",
+        ] {
+            let (source, marker) = typed_in_window(typed);
+            assert!(doriac::parse_source("typing.doria", source.as_str()).is_err());
+            let items = completions_while_typing(&source, &marker);
+            let mut labels = labels_of(&items);
+            labels.sort_unstable();
+            assert_eq!(
+                labels,
+                ["describe", "left", "moveBy", "top"],
+                "after `{typed}`, keywords, globals, and `__construct` (E0414) are not members"
+            );
+        }
+
+        // The partial name is what the item replaces, so `x` never becomes
+        // the keyword `xor`.
+        let (source, marker) = typed_in_window("let writable $x = $this->x");
+        let items = completions_while_typing(&source, &marker);
+        let end = source.find(&marker).unwrap() + marker.len();
+        assert_eq!(
+            items[0]["textEdit"]["range"],
+            span_to_range(&source, Span::new(end - 1, end))
+        );
+    }
+
+    #[test]
+    fn a_member_of_an_unresolvable_receiver_is_an_empty_list_asked_again() {
+        let source = "function main(): void\n{\n    $missing->\n}\n";
+        let uri = "file:///typing.doria";
+        let offset = source.find("->").unwrap() + 2;
+        let position = byte_offset_to_position(source, offset);
+        let mut server = Server::default();
+        server.documents.insert(
+            uri.to_string(),
+            Document::new(uri, source.to_string(), Some(1)),
+        );
+        let response = server.completion(Some(&json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": position.line, "character": position.character },
+        })));
+        assert_eq!(response["items"], json!([]));
+        assert_eq!(response["isIncomplete"], true);
+    }
+
+    #[test]
+    fn typing_a_variable_offers_only_the_variables_in_scope() {
+        for typed in ["let $n = $col", "let $n = $this->left + $"] {
+            let (source, marker) = typed_in_window(typed);
+            let items = completions_while_typing(&source, &marker);
+            assert_eq!(
+                labels_of(&items),
+                ["$this", "$columns", "$rows"],
+                "after `{typed}`"
+            );
+            assert!(items.iter().all(|item| item["kind"] == 6));
+        }
+    }
+
+    #[test]
+    fn typing_a_static_member_offers_only_static_names() {
+        let source = "enum Suit\n{\n    case Hearts;\n    case Spades;\n}\n\nfunction main(): void\n{\n    let $suit = Suit::\n}\n";
+        let items = completions_while_typing(source, "Suit::");
+        let mut labels = labels_of(&items);
+        labels.sort_unstable();
+        assert_eq!(labels, ["Hearts", "Spades"]);
+    }
+
+    #[test]
+    fn the_completion_site_is_read_from_tokens_not_from_a_parse() {
+        let site = |source: &str| completion_site("site.doria", source, source.len());
+        assert_eq!(site("$this->"), CompletionSite::Member { start: 7, end: 7 });
+        assert_eq!(
+            site("$this?->na"),
+            CompletionSite::Member { start: 8, end: 10 }
+        );
+        assert_eq!(
+            site("Suit::He"),
+            CompletionSite::Static { start: 6, end: 8 }
+        );
+        assert_eq!(
+            site("echo $"),
+            CompletionSite::Variable { start: 5, end: 6 }
+        );
+        assert_eq!(
+            site("echo $va"),
+            CompletionSite::Variable { start: 5, end: 8 }
+        );
+        assert_eq!(site("let $x = xo"), CompletionSite::Other);
+        assert_eq!(site("// $this->"), CompletionSite::Other);
+        assert_eq!(site("echo \"$this->"), CompletionSite::Other);
+
+        // A partial name continues past the cursor when it is edited in place.
+        let source = "$this->toStr;";
+        assert_eq!(
+            completion_site("site.doria", source, 9),
+            CompletionSite::Member { start: 7, end: 12 }
+        );
+    }
+
+    #[test]
+    fn the_repair_is_the_smallest_one_the_parser_accepts() {
+        let repair = |source: &str, marker: &str| {
+            let start = source.find(marker).unwrap() + marker.len();
+            repaired_completion_source("repair.doria", source, start, start, "__p")
+        };
+        let body = |statement: &str| format!("function main(): void\n{{\n    {statement}\n}}\n");
+
+        // Already complete: unchanged apart from the placeholder.
+        assert_eq!(
+            repair(&body("echo $a->;"), "->").as_deref(),
+            Some(body("echo $a->__p;").as_str())
+        );
+        // A missing terminator.
+        assert_eq!(
+            repair(&body("echo $a->"), "->").as_deref(),
+            Some(body("echo $a->__p;").as_str())
+        );
+        // Open brackets close in order before the terminator.
+        assert_eq!(
+            repair(&body("echo f([$a->"), "->").as_deref(),
+            Some(body("echo f([$a->__p]);").as_str())
+        );
+        // An unrelated parse error elsewhere leaves nothing to analyze.
+        assert_eq!(
+            repair("function main(): void\n{\n    echo $a->\n", "->"),
+            None
         );
     }
 
@@ -10708,6 +11226,233 @@ describe("🧪 User", function (): void {
             server.project_discovery.pending_generation(&root_uri),
             Some(1)
         );
+    }
+
+    fn open_plain_document(server: &mut Server, uri: &str) {
+        server
+            .did_open(
+                Some(&json!({
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": "doria",
+                        "version": 1,
+                        "text": "function main(): void {}"
+                    }
+                })),
+                &mut Vec::new(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_project_below_the_opened_folder_is_discovered_from_its_document() {
+        let root =
+            std::env::temp_dir().join(format!("doria-lsp-nested-project-{}", std::process::id()));
+        let project = root.join("examples/greeter");
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(project.join("Baton.toml"), "manifest-version = 2\n").unwrap();
+        let folder_uri = normalize_root_uri(&file_uri::path_to_file_uri(&root));
+        let project_uri = normalize_root_uri(&file_uri::path_to_file_uri(&project));
+        let main_uri = file_uri::path_to_file_uri(&project.join("src/main.doria"));
+        let mut server = Server {
+            workspace_roots: vec![WorkspaceRoot {
+                uri: folder_uri.clone(),
+                package: "workspace/examples".to_string(),
+            }],
+            ..Server::default()
+        };
+
+        open_plain_document(&mut server, &main_uri);
+        open_plain_document(&mut server, &main_uri);
+
+        let roots = server
+            .workspace_roots
+            .iter()
+            .map(|root| root.uri.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(roots, [folder_uri.as_str(), project_uri.as_str()]);
+        assert_eq!(
+            server.project_discovery.pending_generation(&project_uri),
+            Some(1)
+        );
+        assert_eq!(
+            server.graph_location(&main_uri).0,
+            project_uri,
+            "the nearest project root owns the document"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn members_of_an_opened_baton_workspace_are_not_discovered_twice() {
+        let root =
+            std::env::temp_dir().join(format!("doria-lsp-workspace-member-{}", std::process::id()));
+        let member = root.join("members/app");
+        fs::create_dir_all(member.join("src")).unwrap();
+        fs::write(root.join("Baton.toml"), "manifest-version = 2\n").unwrap();
+        fs::write(member.join("Baton.toml"), "manifest-version = 2\n").unwrap();
+        let root_uri = normalize_root_uri(&file_uri::path_to_file_uri(&root));
+        let member_uri = normalize_root_uri(&file_uri::path_to_file_uri(&member));
+        let mut server = Server {
+            workspace_roots: vec![WorkspaceRoot {
+                uri: root_uri.clone(),
+                package: "workspace/root".to_string(),
+            }],
+            ..Server::default()
+        };
+
+        open_plain_document(
+            &mut server,
+            &file_uri::path_to_file_uri(&member.join("src/main.doria")),
+        );
+
+        assert_eq!(server.workspace_roots.len(), 1);
+        assert_eq!(
+            server.project_discovery.pending_generation(&member_uri),
+            None
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_project_that_cannot_load_is_a_visible_warning_naming_the_remedy() {
+        let root =
+            std::env::temp_dir().join(format!("doria-lsp-discovery-notice-{}", std::process::id()));
+        let project = root.join("project");
+        let loose = root.join("loose");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&loose).unwrap();
+        fs::write(project.join("Baton.toml"), "manifest-version = 2\n").unwrap();
+
+        let notices = project_discovery_failure_notices(
+            &file_uri::path_to_file_uri(&project),
+            baton_discovery::BATON_NOT_FOUND,
+        );
+        let methods = notices
+            .iter()
+            .map(|(method, _)| *method)
+            .collect::<Vec<_>>();
+        assert_eq!(methods, ["window/logMessage", "window/showMessage"]);
+        let warning = &notices[1].1;
+        assert_eq!(
+            warning["type"], 2,
+            "a warning, not an informational log line"
+        );
+        let text = warning["message"].as_str().unwrap();
+        for expected in [
+            "could not load the Baton project",
+            "reported as unknown",
+            "DORIA_BATON_PATH",
+            "Tools | Refresh Doria Project",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+
+        // A folder outside any Baton project is ordinary standalone editing.
+        let quiet = project_discovery_failure_notices(
+            &file_uri::path_to_file_uri(&loose),
+            "Error[B0301]: No Baton Project Found",
+        );
+        assert_eq!(quiet.len(), 1);
+        assert_eq!(quiet[0].0, "window/logMessage");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn new_expression_class_hover_shows_the_constructor_from_an_unopened_file() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("doria-lsp-constructor-hover-{nonce}"));
+        fs::create_dir_all(root.join("src")).unwrap();
+        // Only main.doria is opened; the classes it uses exist on disk alone,
+        // as when their files are not open in an editor tab.
+        fs::write(
+            root.join("src/ApplicationConfig.doria"),
+            "class ApplicationConfig { function __construct(string $name) {} }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/Application.doria"),
+            "class Application { function __construct(take ApplicationConfig $config) {} }\n",
+        )
+        .unwrap();
+        let main = "function start(Application $app): void {}\nfunction main(): void { let $app = new Application(new ApplicationConfig(\"demo\")); start($app); let $config = new ApplicationConfig(\"second\"); let $second = new Application($config); start($second); }\n";
+        let main_path = root.join("src/main.doria");
+        fs::write(&main_path, main).unwrap();
+        let root_uri = file_uri::path_to_file_uri(&root);
+        let main_uri = file_uri::path_to_file_uri(&main_path);
+        let mut server = stage31_server(&[&root_uri]);
+        server.projects.insert(
+            root_uri.clone(),
+            project::test_project(
+                &root,
+                &[
+                    "src/ApplicationConfig.doria",
+                    "src/Application.doria",
+                    "src/main.doria",
+                ],
+                project::PackageSource::Path,
+                &[],
+            ),
+        );
+        open_stage31_document(&mut server, &main_uri, main);
+        assert!(
+            server.documents[&main_uri]
+                .analysis
+                .diagnostics()
+                .is_empty(),
+            "{:?}",
+            server.documents[&main_uri].analysis.diagnostics()
+        );
+
+        let hover_text = |offset: usize| {
+            server
+                .hover(Some(&params_at(&main_uri, main, offset)))
+                .unwrap()["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let application_constructor =
+            "function Application::__construct(take ApplicationConfig $config)";
+        let created = hover_text(main.find("new Application(").unwrap() + "new ".len());
+        assert!(created.contains("class Application"), "{created}");
+        assert!(created.contains(application_constructor), "{created}");
+        assert!(
+            !created.contains("$config): void"),
+            "constructors render as declared: {created}"
+        );
+        assert!(
+            !created.contains("Compiler-known"),
+            "a project class is not compiler-known: {created}"
+        );
+
+        let nested = hover_text(main.find("new ApplicationConfig(").unwrap() + "new ".len());
+        assert!(
+            nested.contains("function ApplicationConfig::__construct(string $name)"),
+            "{nested}"
+        );
+        assert!(!nested.contains(application_constructor), "{nested}");
+
+        let in_type_position = hover_text(main.find("Application $app").unwrap());
+        assert!(
+            in_type_position.contains("class Application"),
+            "{in_type_position}"
+        );
+        assert!(
+            !in_type_position.contains("__construct"),
+            "only a `new` expression calls the constructor: {in_type_position}"
+        );
+
+        let arguments = main.find("new Application($config)").unwrap() + "new Application(".len();
+        let help = server.signature_help(Some(&params_at(&main_uri, main, arguments)));
+        assert_eq!(
+            help["signatures"][0]["label"], application_constructor,
+            "{help}"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -56,6 +56,14 @@ class DoriaLanguageClient {
     context.subscriptions.push(
       vscode.commands.registerCommand("doria.refreshProject", () => this.refreshProject()),
       vscode.workspace.onDidChangeWorkspaceFolders((event) => this.didChangeWorkspaceFolders(event)),
+      vscode.workspace.onDidChangeConfiguration((event) => {
+        if (
+          event.affectsConfiguration("doria.baton.path") ||
+          event.affectsConfiguration("doria.languageServer.path")
+        ) {
+          this.restart();
+        }
+      }),
       vscode.workspace.onDidOpenTextDocument((document) => this.didOpen(document)),
       vscode.workspace.onDidChangeTextDocument((event) => this.didChange(event)),
       vscode.workspace.onDidCloseTextDocument((document) => this.didClose(document)),
@@ -214,6 +222,29 @@ class DoriaLanguageClient {
             child.kill();
           }
         }, 1000);
+      });
+  }
+
+  // The server receives the language-server and Baton paths only when it
+  // starts, so a changed path takes effect through a restart. Unlike dispose(),
+  // this keeps the diagnostic collection for the replacement server.
+  restart() {
+    const child = this.process;
+    if (!child) {
+      this.start();
+      return Promise.resolve();
+    }
+    return this.sendRequest("shutdown", {})
+      .catch(() => undefined)
+      .then(() => {
+        this.sendNotification("exit", {});
+        this.resetServer(child, new Error("Doria language server restarted"));
+        setTimeout(() => {
+          if (!child.killed) {
+            child.kill();
+          }
+        }, 1000);
+        this.start();
       });
   }
 

@@ -1,7 +1,10 @@
 package dev.doria.intellij.settings
 
 import com.intellij.openapi.options.SearchableConfigurable
+import com.intellij.openapi.project.ProjectManager
+import com.intellij.platform.lsp.api.LspServerManager
 import com.intellij.ui.components.JBLabel
+import dev.doria.intellij.lsp.DoriaLspServerSupportProvider
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.Insets
@@ -77,8 +80,31 @@ class DoriaConfigurable : SearchableConfigurable {
 
     override fun apply() {
         val settings = DoriaSettings.getInstance().state
+        val before = settings.copy()
         settings.languageServerPath = languageServerPathField?.text.orEmpty().trim()
         settings.batonPath = batonPathField?.text.orEmpty().trim()
+        if (requiresServerRestart(before, settings)) {
+            restartLanguageServers()
+        }
+    }
+
+    /** Apply new paths now, instead of at the next IDE start. */
+    private fun restartLanguageServers() {
+        for (project in ProjectManager.getInstance().openProjects) {
+            if (!project.isDisposed) {
+                LspServerManager.getInstance(project)
+                    .stopAndRestartIfNeeded(DoriaLspServerSupportProvider::class.java)
+            }
+        }
+    }
+
+    companion object {
+        /**
+         * The language server receives both paths only when it starts, so a
+         * change to either takes effect only through a restart.
+         */
+        internal fun requiresServerRestart(before: DoriaSettings.State, after: DoriaSettings.State): Boolean =
+            before.languageServerPath != after.languageServerPath || before.batonPath != after.batonPath
     }
 
     override fun reset() {
