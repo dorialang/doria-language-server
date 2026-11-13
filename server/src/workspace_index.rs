@@ -2352,6 +2352,17 @@ fn completion_kind(kind: GlobalSymbolKind, qualified_name: &str) -> u32 {
     }
 }
 
+/// The completion item the index offers for a declaration.
+pub(crate) fn declaration_completion(
+    declaration: &doriac::names::GlobalSymbolDeclaration,
+) -> IndexedCompletion {
+    completion(
+        declaration.source_name.clone(),
+        declaration.kind,
+        &declaration.qualified_name,
+    )
+}
+
 fn completion(label: String, kind: GlobalSymbolKind, qualified_name: &str) -> IndexedCompletion {
     IndexedCompletion {
         label,

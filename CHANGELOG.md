@@ -6,6 +6,18 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Typing a lone `:` or `>`, as in `function render():` or `$a > $b`, no
+  longer opens completion. Both are trigger characters only so that `::`
+  and `->` do. At a type position (a return or parameter type, `catch (`,
+  `throws`, `is`) completion offers only types; after `new`, only classes it
+  can construct. `and`, `or`, `xor`, `is`, and `as` are offered only after a
+  complete operand, so they no longer head the list where an expression or
+  a type begins.
+- Signatures show parameters as declared, also for declarations in files
+  that are not open: defaults with their value, `int $width = 120` instead of
+  `int $width` (or `= ...` in the open file), and a constructor parameter's
+  role, `internal writable int $x = 0`. The compiler now reports each
+  parameter's default as authored.
 - On Windows, diagnostics and locations for project files that are not open
   use the same `file:///C:/...` URI the editor uses for that file. They were
   published under the verbatim `\\?\C:\...` path that path canonicalization

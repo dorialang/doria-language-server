@@ -1286,7 +1286,7 @@ function check_lsp_completion_vocabulary(): void
     );
 
     require_check(
-        preg_match('/let types = \[(.*?)\];/s', $lspText, $matches) === 1,
+        preg_match('/const BUILT_IN_TYPES: \[&str; \d+\] = \[(.*?)\];/s', $lspText, $matches) === 1,
         'LSP completion type list could not be found'
     );
     $lspTypeList = $matches[1];

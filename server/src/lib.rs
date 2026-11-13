@@ -1082,6 +1082,20 @@ impl Server {
         let Some((uri, document, offset)) = self.uri_document_and_offset(params) else {
             return completion_items();
         };
+        // `:` and `>` are trigger characters only so that `::` and `->` open
+        // completion. A lone `:` (a return type) or `>` (a comparison or a
+        // generic close) opens nothing.
+        let trigger = params
+            .and_then(|params| params.get("context"))
+            .filter(|context| context.get("triggerKind").and_then(Value::as_u64) == Some(2))
+            .and_then(|context| context.get("triggerCharacter"))
+            .and_then(Value::as_str);
+        let before = &document.text[..offset];
+        if (trigger == Some(":") && !before.ends_with("::"))
+            || (trigger == Some(">") && !before.ends_with("->"))
+        {
+            return json!({ "isIncomplete": false, "items": [] });
+        }
         let graph = self.document_index.graph_for(&uri);
         if let Some(completions) = document
             .analysis
@@ -1232,7 +1246,8 @@ impl Server {
                 return semantic_completion_items(completions);
             }
         }
-        match completion_site(&uri, &document.text, offset) {
+        let site = completion_site(&uri, &document.text, offset);
+        match site {
             CompletionSite::Member { start, end } => {
                 return self.member_access_completions(&uri, document, start, end, offset);
             }
@@ -1242,7 +1257,7 @@ impl Server {
             CompletionSite::Variable { start, end } => {
                 return self.variable_completions(&uri, document, start, end, offset);
             }
-            CompletionSite::Other => {}
+            CompletionSite::Type { .. } | CompletionSite::Other { .. } => {}
         }
         let mut completion = completion_items_with_analysis(&document.analysis, offset);
         if let Some(items) = completion.get_mut("items").and_then(Value::as_array_mut) {
@@ -1260,15 +1275,49 @@ impl Server {
                     }
                 }
             }
-            if constructor_parameter_role_completion_context(&document.text, offset)
-                && labels.insert("parameter".to_string())
-            {
+            let constructor_role_context =
+                constructor_parameter_role_completion_context(&document.text, offset);
+            if constructor_role_context && labels.insert("parameter".to_string()) {
                 items.push(json!({
                     "label": "parameter",
                     "kind": 14,
                     "detail": "Doria constructor-parameter role",
                     "documentation": "Declares a constructor-only input. It remains in the constructor signature and body but creates no property or object storage.",
                 }));
+            }
+            // While a declaration or statement is being typed the file does not
+            // parse, and the index has none of its declarations. Its own
+            // classes, interfaces, enums, and functions come from the smallest
+            // repair the compiler parser accepts.
+            if doriac::parse_source(uri.as_str(), document.text.as_str()).is_err() {
+                let (start, end) = identifier_around(&document.text, offset);
+                let placeholder = match site {
+                    // `new` takes a class and its arguments.
+                    CompletionSite::Type {
+                        new_expression: true,
+                        ..
+                    } => "__DoriaCompletionType()",
+                    CompletionSite::Type { .. } => "__DoriaCompletionType",
+                    _ => COMPLETION_PLACEHOLDER,
+                };
+                if let Some(source) =
+                    repaired_completion_source(&uri, &document.text, start, end, placeholder)
+                {
+                    let analysis = self.analyze_completion_source(&uri, document, &source);
+                    for declaration in &analysis.global_symbols().declarations {
+                        if declaration.name_span.source != analysis.source_id()
+                            || !labels.insert(declaration.source_name.clone())
+                        {
+                            continue;
+                        }
+                        let candidate = workspace_index::declaration_completion(declaration);
+                        items.push(json!({
+                            "label": candidate.label,
+                            "kind": candidate.kind,
+                            "detail": candidate.detail,
+                        }));
+                    }
+                }
             }
             for candidate in self.document_index.completions(&uri) {
                 if labels.insert(candidate.label.clone()) {
@@ -1281,6 +1330,32 @@ impl Server {
                         "insertTextFormat": if candidate.snippet { 2 } else { 1 },
                     }));
                 }
+            }
+            match site {
+                CompletionSite::Type {
+                    new_expression,
+                    parameter,
+                } => {
+                    items.retain(|item| {
+                        is_type_item(item, new_expression)
+                            || (parameter
+                                && item["kind"] == 14
+                                && item["label"].as_str().is_some_and(|label| {
+                                    PARAMETER_MODIFIERS.contains(&label)
+                                        || (constructor_role_context
+                                            && CONSTRUCTOR_PARAMETER_ROLES.contains(&label))
+                                }))
+                    });
+                }
+                CompletionSite::Other {
+                    after_operand: false,
+                } => items.retain(|item| {
+                    !(item["kind"] == 14
+                        && item["label"]
+                            .as_str()
+                            .is_some_and(|label| BINARY_OPERATOR_KEYWORDS.contains(&label)))
+                }),
+                _ => {}
             }
         }
         completion
@@ -3180,38 +3255,7 @@ fn completion_items() -> Value {
     let planned_keywords = [
         "async", "await", "unsafe", "extern", "get", "set", "spawn", "scope",
     ];
-    let types = [
-        "void",
-        "int",
-        "int8",
-        "int16",
-        "int32",
-        "int64",
-        "uint8",
-        "uint16",
-        "uint32",
-        "uint64",
-        "float",
-        "float32",
-        "float64",
-        "string",
-        "bool",
-        "mixed",
-        "List",
-        "Dictionary",
-        "Set",
-        "SortedDictionary",
-        "SortedSet",
-        "PriorityQueue",
-        "Deque",
-        "Bytes",
-        "SharedReference",
-        "WeakReference",
-        "WritableSharedReference",
-        "WritableWeakReference",
-        "ReadonlySharedReferenceAccess",
-        "WritableSharedReferenceAccess",
-    ];
+    let types = BUILT_IN_TYPES;
     let reserved_types = ["resource"];
     let integer_conversions = [
         ("Int::from", "int (the int64 alias)"),
@@ -3374,30 +3418,254 @@ enum CompletionSite {
     Static { start: usize, end: usize },
     /// A `$` variable name; `start` is the `$`.
     Variable { start: usize, end: usize },
-    /// Anywhere else, where keywords and global names are valid.
-    Other,
+    /// A type: a return or parameter type, or the class after `new`, which
+    /// must be a class. Before a parameter's type its modifiers are valid too.
+    Type {
+        new_expression: bool,
+        parameter: bool,
+    },
+    /// Anywhere else. A binary operator keyword such as `xor` is valid only
+    /// after a complete operand.
+    Other { after_operand: bool },
+}
+
+/// Whether a general-list item names a type usable at a type site: a class,
+/// interface, enum, record, or built-in type, but not a reserved name. After
+/// `new` only a class can be instantiated.
+fn is_type_item(item: &Value, new_expression: bool) -> bool {
+    let kind = item["kind"].as_u64().unwrap_or_default();
+    if new_expression {
+        return kind == 7
+            || (kind == 25
+                && item["label"]
+                    .as_str()
+                    .is_some_and(|label| !BUILT_IN_TYPES.contains(&label)));
+    }
+    matches!(kind, 7 | 8 | 13 | 22 | 25)
+        && item["detail"].as_str() != Some("Reserved Doria type name")
+}
+
+/// Built-in scalar, collection, and shared-ownership type names. None is a
+/// class that `new` constructs.
+const BUILT_IN_TYPES: [&str; 30] = [
+    "void",
+    "int",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "float",
+    "float32",
+    "float64",
+    "string",
+    "bool",
+    "mixed",
+    "List",
+    "Dictionary",
+    "Set",
+    "SortedDictionary",
+    "SortedSet",
+    "PriorityQueue",
+    "Deque",
+    "Bytes",
+    "SharedReference",
+    "WeakReference",
+    "WritableSharedReference",
+    "WritableWeakReference",
+    "ReadonlySharedReferenceAccess",
+    "WritableSharedReferenceAccess",
+];
+
+/// Modifiers any parameter may be declared with, before its type.
+const PARAMETER_MODIFIERS: [&str; 3] = ["take", "borrow", "writable"];
+
+/// Roles only a constructor parameter may be declared with.
+const CONSTRUCTOR_PARAMETER_ROLES: [&str; 3] = ["internal", "parameter", "override"];
+
+/// The identifier characters around `offset`: the partial name being typed.
+fn identifier_around(text: &str, offset: usize) -> (usize, usize) {
+    let start = offset
+        - text[..offset]
+            .chars()
+            .rev()
+            .take_while(|character| is_identifier_character(*character))
+            .map(char::len_utf8)
+            .sum::<usize>();
+    let end = offset
+        + text[offset..]
+            .chars()
+            .take_while(|character| is_identifier_character(*character))
+            .map(char::len_utf8)
+            .sum::<usize>();
+    (start, end)
+}
+
+/// Keywords that join two operands, so they never begin an expression.
+const BINARY_OPERATOR_KEYWORDS: [&str; 5] = ["and", "or", "xor", "is", "as"];
+
+/// Declaration modifiers that may precede a parameter's type.
+fn is_parameter_modifier(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Take
+            | TokenKind::Borrow
+            | TokenKind::Writable
+            | TokenKind::Internal
+            | TokenKind::Parameter
+            | TokenKind::Override
+            | TokenKind::Readonly
+    )
+}
+
+/// The type site `previous` (nearest token first) leaves the cursor at, if any.
+fn is_type_position(previous: &[&Token]) -> Option<CompletionSite> {
+    const TYPE: CompletionSite = CompletionSite::Type {
+        new_expression: false,
+        parameter: false,
+    };
+    let mut index = 0;
+    if matches!(
+        previous.first().map(|token| &token.kind),
+        Some(TokenKind::Question)
+    ) {
+        index += 1;
+    }
+    match &previous.get(index)?.kind {
+        TokenKind::New => {
+            return Some(CompletionSite::Type {
+                new_expression: true,
+                parameter: false,
+            })
+        }
+        // A return type: the `)` closes a declaration's parameter list, not a
+        // call in a ternary such as `$a ? f() : `.
+        TokenKind::Colon => {
+            if !matches!(
+                previous.get(index + 1).map(|token| &token.kind),
+                Some(TokenKind::RightParen)
+            ) {
+                return None;
+            }
+            let mut depth = 0_usize;
+            for (position, token) in previous.iter().enumerate().skip(index + 1) {
+                match token.kind {
+                    TokenKind::RightParen => depth += 1,
+                    TokenKind::LeftParen => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return opens_declared_parameters(previous, position).then_some(TYPE);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return None;
+        }
+        TokenKind::Throws | TokenKind::Is => return Some(TYPE),
+        TokenKind::LeftParen
+            if matches!(
+                previous.get(index + 1).map(|token| &token.kind),
+                Some(TokenKind::Catch)
+            ) =>
+        {
+            return Some(TYPE);
+        }
+        _ => {}
+    }
+    // A parameter type: after `(` or `,` of a function declaration's
+    // parameter list, past any parameter modifiers.
+    while previous
+        .get(index)
+        .is_some_and(|token| is_parameter_modifier(&token.kind))
+    {
+        index += 1;
+    }
+    if !matches!(
+        previous.get(index).map(|token| &token.kind),
+        Some(TokenKind::LeftParen | TokenKind::Comma)
+    ) {
+        return None;
+    }
+    let mut depth = 0_usize;
+    for (position, token) in previous.iter().enumerate().skip(index) {
+        match token.kind {
+            TokenKind::RightParen | TokenKind::RightBracket => depth += 1,
+            TokenKind::LeftBracket => depth = depth.checked_sub(1)?,
+            TokenKind::LeftParen if depth > 0 => depth -= 1,
+            TokenKind::LeftParen => {
+                return opens_declared_parameters(previous, position).then_some(
+                    CompletionSite::Type {
+                        new_expression: false,
+                        parameter: true,
+                    },
+                );
+            }
+            TokenKind::LeftBrace | TokenKind::RightBrace | TokenKind::Semicolon => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether the `(` at `position` in `previous` (nearest token first) opens a
+/// function, method, or closure declaration's parameter list.
+fn opens_declared_parameters(previous: &[&Token], position: usize) -> bool {
+    match previous.get(position + 1).map(|token| &token.kind) {
+        Some(TokenKind::Function | TokenKind::Fn) => true,
+        Some(TokenKind::Identifier(_)) => matches!(
+            previous.get(position + 2).map(|token| &token.kind),
+            Some(TokenKind::Function)
+        ),
+        _ => false,
+    }
+}
+
+/// Whether `token` completes an operand, so a binary operator may follow.
+fn ends_operand(token: Option<&Token>) -> bool {
+    matches!(
+        token.map(|token| &token.kind),
+        Some(
+            TokenKind::Identifier(_)
+                | TokenKind::Variable(_)
+                | TokenKind::IntLiteral(_)
+                | TokenKind::FloatLiteral(_)
+                | TokenKind::StringLiteral { .. }
+                | TokenKind::True
+                | TokenKind::False
+                | TokenKind::Null
+                | TokenKind::RightParen
+                | TokenKind::RightBracket
+        )
+    )
 }
 
 fn completion_site(path: &str, text: &str, offset: usize) -> CompletionSite {
+    const UNKNOWN: CompletionSite = CompletionSite::Other {
+        after_operand: false,
+    };
     let Some(before) = text.get(..offset) else {
-        return CompletionSite::Other;
+        return UNKNOWN;
     };
     // A sentinel suffix makes the name at the cursor a token even when nothing
     // has been typed after `->`, `::`, or `$`. Inside a comment or a string no
     // token ends at the sentinel, so those positions stay `Other`.
     const SENTINEL: &str = "__doria_site";
     let Ok(tokens) = doriac::lex_source(path, format!("{before}{SENTINEL}")) else {
-        return CompletionSite::Other;
+        return UNKNOWN;
     };
     let mut significant = tokens
         .iter()
         .rev()
         .filter(|token| token.kind != TokenKind::Eof);
     let Some(name) = significant.next() else {
-        return CompletionSite::Other;
+        return UNKNOWN;
     };
     if name.span.end != offset + SENTINEL.len() {
-        return CompletionSite::Other;
+        return UNKNOWN;
     }
     let start = name.span.start;
     let end = offset
@@ -3406,23 +3674,30 @@ fn completion_site(path: &str, text: &str, offset: usize) -> CompletionSite {
             .take_while(|character| is_identifier_character(*character))
             .map(char::len_utf8)
             .sum::<usize>();
+    let previous = significant.collect::<Vec<_>>();
     match &name.kind {
         TokenKind::Variable(_) => CompletionSite::Variable { start, end },
-        TokenKind::Identifier(_) => match significant.next().map(|token| &token.kind) {
+        TokenKind::Identifier(_) => match previous.first().map(|token| &token.kind) {
             Some(TokenKind::Arrow | TokenKind::QuestionArrow) => {
                 CompletionSite::Member { start, end }
             }
             Some(TokenKind::DoubleColon) => CompletionSite::Static { start, end },
-            _ => CompletionSite::Other,
+            _ => match is_type_position(&previous) {
+                Some(site) => site,
+                None => CompletionSite::Other {
+                    after_operand: ends_operand(previous.first().copied()),
+                },
+            },
         },
-        _ => CompletionSite::Other,
+        _ => UNKNOWN,
     }
 }
 
 /// Replace the partial name `start..end` with `insertion` and finish the
 /// statement it sits in, choosing the smallest repair the compiler parser
-/// accepts: the text as it is, then a terminating `;`, then the brackets the
-/// statement still has open, then the same with the rest of the line dropped.
+/// accepts: the text as it is, then a terminating `;`, then an empty body for
+/// a declaration header, then the brackets the statement still has open, then
+/// the same with the rest of the line dropped.
 /// Returns `None` when no repair parses, for example when an unrelated part
 /// of the file is broken.
 fn repaired_completion_source(
@@ -3439,6 +3714,8 @@ fn repaired_completion_source(
     let mut candidates = vec![
         format!("{before}{insertion}{after}"),
         format!("{before}{insertion};{after}"),
+        // A declaration header still missing its body, such as a return type.
+        format!("{before}{insertion} {{}}{after}"),
     ];
     if !closers.is_empty() {
         candidates.push(format!("{before}{insertion}{closers};{after}"));
@@ -5059,7 +5336,8 @@ mod tests {
     /// as typed: the statement around the cursor is unfinished.
     fn completions_while_typing(source: &str, marker: &str) -> Vec<Value> {
         let uri = "file:///typing.doria";
-        let offset = source.find(marker).expect("completion marker") + marker.len();
+        // The typed text is the last occurrence: the line being edited.
+        let offset = source.rfind(marker).expect("completion marker") + marker.len();
         let position = byte_offset_to_position(source, offset);
         let mut server = Server::default();
         server.documents.insert(
@@ -5918,9 +6196,51 @@ function main(): void
             site("echo $va"),
             CompletionSite::Variable { start: 5, end: 8 }
         );
-        assert_eq!(site("let $x = xo"), CompletionSite::Other);
-        assert_eq!(site("// $this->"), CompletionSite::Other);
-        assert_eq!(site("echo \"$this->"), CompletionSite::Other);
+        let unknown = CompletionSite::Other {
+            after_operand: false,
+        };
+        assert_eq!(site("let $x = xo"), unknown);
+        assert_eq!(site("// $this->"), unknown);
+        assert_eq!(site("echo \"$this->"), unknown);
+        assert_eq!(
+            site("if ($a x"),
+            CompletionSite::Other {
+                after_operand: true
+            }
+        );
+        assert_eq!(site("render(x"), unknown);
+
+        let type_site = CompletionSite::Type {
+            new_expression: false,
+            parameter: false,
+        };
+        let parameter_site = CompletionSite::Type {
+            new_expression: false,
+            parameter: true,
+        };
+        assert_eq!(site("writable function render(): "), type_site);
+        assert_eq!(site("function find(): ?Win"), type_site);
+        assert_eq!(site("function move(int $x, "), parameter_site);
+        assert_eq!(site("function move(take "), parameter_site);
+        assert_eq!(
+            site("function __construct(internal writable "),
+            parameter_site
+        );
+        assert_eq!(site("$f = fn("), parameter_site);
+        assert_eq!(site("} catch ("), type_site);
+        assert_eq!(site("function run(): void throws "), type_site);
+        assert_eq!(site("if ($value is "), type_site);
+        assert_eq!(
+            site("let $w = new "),
+            CompletionSite::Type {
+                new_expression: true,
+                parameter: false,
+            }
+        );
+        // A call's arguments and a ternary are expressions, not types.
+        assert_eq!(site("move(1, "), unknown);
+        assert_eq!(site("$a ? $b : "), unknown);
+        assert_eq!(site("$a ? f() : "), unknown);
 
         // A partial name continues past the cursor when it is edited in place.
         let source = "$this->toStr;";
@@ -5958,6 +6278,123 @@ function main(): void
             repair("function main(): void\n{\n    echo $a->\n", "->"),
             None
         );
+    }
+
+    fn completion_at(source: &str, marker: &str, context: Value) -> Value {
+        let uri = "file:///typing.doria";
+        // The typed text is the last occurrence: the line being edited.
+        let offset = source.rfind(marker).expect("completion marker") + marker.len();
+        let position = byte_offset_to_position(source, offset);
+        let mut server = Server::default();
+        open_stage31_document(&mut server, uri, source);
+        server.completion(Some(&json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": position.line, "character": position.character },
+            "context": context,
+        })))
+    }
+
+    #[test]
+    fn a_lone_colon_or_angle_bracket_opens_no_completion() {
+        let (source, marker) =
+            typed_in_window("$this->left += 1; }\n    writable function render():");
+        let response = completion_at(
+            &source,
+            &marker,
+            json!({ "triggerKind": 2, "triggerCharacter": ":" }),
+        );
+        assert_eq!(response["items"], json!([]));
+
+        let (source, marker) = typed_in_window("if ($columns >");
+        let response = completion_at(
+            &source,
+            &marker,
+            json!({ "triggerKind": 2, "triggerCharacter": ">" }),
+        );
+        assert_eq!(response["items"], json!([]));
+
+        // `->` still opens the receiver's members.
+        let (source, marker) = typed_in_window("$this->");
+        let response = completion_at(
+            &source,
+            &marker,
+            json!({ "triggerKind": 2, "triggerCharacter": ">" }),
+        );
+        assert!(!response["items"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_type_position_offers_only_types() {
+        // The file parsed before the edit, as it does in an editor; the edit
+        // being typed leaves it unparsable.
+        let uri = "file:///typing.doria";
+        let parsed = "class Window {}\ninterface Drawable {}\n\nclass Screen\n{\n    writable function render(): void {}\n}\n";
+        let source = "class Window {}\ninterface Drawable {}\n\nclass Screen\n{\n    writable function render(): \n}\n";
+        let mut server = Server::default();
+        open_stage31_document(&mut server, uri, parsed);
+        open_stage31_document(&mut server, uri, source);
+        let offset = source.find("render(): ").unwrap() + "render(): ".len();
+        let position = byte_offset_to_position(source, offset);
+        let items = server.completion(Some(&json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": position.line, "character": position.character },
+            "context": { "triggerKind": 1 },
+        })));
+        let items = items["items"].as_array().unwrap();
+        let labels = labels_of(items);
+        for expected in ["void", "int", "string", "List", "Window", "Drawable"] {
+            assert!(
+                labels.contains(&expected),
+                "`{expected}` is a type: {labels:?}"
+            );
+        }
+        for unexpected in [
+            "xor",
+            "function",
+            "writable",
+            "String::padStart",
+            "read_line",
+            "resource",
+        ] {
+            assert!(
+                !labels.contains(&unexpected),
+                "`{unexpected}` is not a type"
+            );
+        }
+
+        let source = "class Window {}\n\nfunction main(): void\n{\n    let $w = new \n}\n";
+        let items = completion_at(source, "new ", json!({ "triggerKind": 1 }));
+        let labels = labels_of(items["items"].as_array().unwrap());
+        assert!(labels.contains(&"Window"));
+        for unexpected in ["int", "List", "void", "xor"] {
+            assert!(
+                !labels.contains(&unexpected),
+                "`new {unexpected}` constructs nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn binary_operator_keywords_follow_only_a_complete_operand() {
+        let starts = completion_at(
+            "function main(): void\n{\n    let $n = x\n}\n",
+            "= x",
+            json!({ "triggerKind": 1 }),
+        );
+        let labels = labels_of(starts["items"].as_array().unwrap());
+        assert!(!labels.contains(&"xor") && !labels.contains(&"and"));
+        assert!(
+            labels.contains(&"new"),
+            "an expression can start with `new`"
+        );
+
+        let joins = completion_at(
+            "function main(): void\n{\n    let $a = true;\n    let $n = $a x\n}\n",
+            "$a x",
+            json!({ "triggerKind": 1 }),
+        );
+        let labels = labels_of(joins["items"].as_array().unwrap());
+        assert!(labels.contains(&"xor"));
     }
 
     #[test]
@@ -11370,7 +11807,7 @@ describe("🧪 User", function (): void {
         // as when their files are not open in an editor tab.
         fs::write(
             root.join("src/ApplicationConfig.doria"),
-            "class ApplicationConfig { function __construct(string $name) {} }\n",
+            "class ApplicationConfig { function __construct(string $name, internal writable int $width = 120, parameter int $height = 24) {} }\n",
         )
         .unwrap();
         fs::write(
@@ -11431,8 +11868,10 @@ describe("🧪 User", function (): void {
 
         let nested = hover_text(main.find("new ApplicationConfig(").unwrap() + "new ".len());
         assert!(
-            nested.contains("function ApplicationConfig::__construct(string $name)"),
-            "{nested}"
+            nested.contains(
+                "function ApplicationConfig::__construct(string $name, internal writable int $width = 120, parameter int $height = 24)"
+            ),
+            "an unopened declaration reads as written, roles and defaults included: {nested}"
         );
         assert!(!nested.contains(application_constructor), "{nested}");
 

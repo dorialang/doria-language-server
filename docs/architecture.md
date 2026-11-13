@@ -155,8 +155,12 @@ the buffer parses, because while a name is being typed it usually does not. A
 name after `->` or `?->` is a member site, after `::` a static site, and a `$`
 name a variable site. Each offers only what is valid there: the receiver's
 members, the static names of the class or enum, or the variables in scope.
+A return or parameter type, `catch (`, `throws`, and `is` are type sites
+that offer only types, and `new` offers only classes it can construct.
 Keywords and global names are offered only where no receiver precedes the
-cursor. To analyze an unfinished statement, the server replaces the partial
+cursor, and binary operator keywords (`and`, `or`, `xor`, `is`, `as`) only
+after a complete operand. `:` and `>` are trigger characters for `::` and
+`->` alone; a lone `:` or `>` returns no items. To analyze an unfinished statement, the server replaces the partial
 name with a placeholder and finishes the statement with the smallest repair the
 compiler parser accepts (the text as it is, a terminating `;`, then the
 brackets the statement still has open). When no repair parses or the receiver
