@@ -1286,9 +1286,10 @@ impl Server {
                 }));
             }
             // While a declaration or statement is being typed the file does not
-            // parse, and the index has none of its declarations. Its own
-            // classes, interfaces, enums, and functions come from the smallest
-            // repair the compiler parser accepts.
+            // parse, and the index has none of its declarations or imports.
+            // Its own classes, interfaces, enums, and functions, and the names
+            // it imports, come from the smallest repair the compiler parser
+            // accepts.
             if doriac::parse_source(uri.as_str(), document.text.as_str()).is_err() {
                 let (start, end) = identifier_around(&document.text, offset);
                 let placeholder = match site {
@@ -1316,6 +1317,18 @@ impl Server {
                             "kind": candidate.kind,
                             "detail": candidate.detail,
                         }));
+                    }
+                    for candidate in self
+                        .document_index
+                        .import_completions(analysis.global_symbols(), analysis.source_id())
+                    {
+                        if labels.insert(candidate.label.clone()) {
+                            items.push(json!({
+                                "label": candidate.label,
+                                "kind": candidate.kind,
+                                "detail": candidate.detail,
+                            }));
+                        }
                     }
                 }
             }
@@ -6328,8 +6341,8 @@ function main(): void
         // The file parsed before the edit, as it does in an editor; the edit
         // being typed leaves it unparsable.
         let uri = "file:///typing.doria";
-        let parsed = "class Window {}\ninterface Drawable {}\n\nclass Screen\n{\n    writable function render(): void {}\n}\n";
-        let source = "class Window {}\ninterface Drawable {}\n\nclass Screen\n{\n    writable function render(): \n}\n";
+        let parsed = "use Doria\\Std\\Time\\Deadline;\n\nclass Window {}\ninterface Drawable {}\n\nclass Screen\n{\n    writable function render(): void {}\n}\n";
+        let source = "use Doria\\Std\\Time\\Deadline;\n\nclass Window {}\ninterface Drawable {}\n\nclass Screen\n{\n    writable function render(): \n}\n";
         let mut server = Server::default();
         open_stage31_document(&mut server, uri, parsed);
         open_stage31_document(&mut server, uri, source);
@@ -6342,7 +6355,9 @@ function main(): void
         })));
         let items = items["items"].as_array().unwrap();
         let labels = labels_of(items);
-        for expected in ["void", "int", "string", "List", "Window", "Drawable"] {
+        for expected in [
+            "void", "int", "string", "List", "Window", "Drawable", "Deadline",
+        ] {
             assert!(
                 labels.contains(&expected),
                 "`{expected}` is a type: {labels:?}"
