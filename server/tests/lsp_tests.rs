@@ -2603,6 +2603,30 @@ fn preserves_php_readline_migration_guidance() {
 }
 
 #[test]
+fn a_php_string_call_names_both_padding_operations() {
+    let diagnostics = diagnostics_for_document(
+        "file:///padding.doria",
+        "function main(): void { echo str_pad(\"a\", 5); }",
+    );
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0461")
+        .unwrap_or_else(|| {
+            panic!("the string spelling diagnostic should be published: {diagnostics:?}")
+        });
+    let published = diagnostic.to_string();
+    for spelling in [
+        "String::padEnd($text, $length, $padding)",
+        "String::padStart($text, $length, $padding)",
+    ] {
+        assert!(
+            published.contains(spelling),
+            "{spelling} missing from {published}"
+        );
+    }
+}
+
+#[test]
 fn exposes_literal_brace_fix_data_at_original_source_span() {
     let text = "echo \"literal {word}\";";
     let diagnostics = diagnostics_for_document("file:///brace.doria", text);

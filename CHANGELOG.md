@@ -6,6 +6,10 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Pinned the compiler to `1d8d0f14c89d092667ee5ad92dd76150de9b639c`. A call
+  to a PHP string function now names its Doria spelling for 42 functions
+  instead of seven: `str_pad` reports `String::padEnd` and `String::padStart`,
+  and `strlen` reports `$text->byteLength` and `$text->length`.
 - Pinned the compiler to `76fb2952d78dae45352fec435f96f6b74e241fda`, which
   accepts every local declaration form in a `for` initializer (Decision 0143).
   `for (writable int $row = 0; ...)` no longer shows three parser errors. The
