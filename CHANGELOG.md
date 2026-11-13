@@ -6,6 +6,70 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Typing a lone `:` or `>`, as in `function render():` or `$a > $b`, no
+  longer opens completion. Both are trigger characters only so that `::`
+  and `->` do. At a type position (a return or parameter type, `catch (`,
+  `throws`, `is`) completion offers only types; after `new`, only classes it
+  can construct. `and`, `or`, `xor`, `is`, and `as` are offered only after a
+  complete operand, so they no longer head the list where an expression or
+  a type begins. While the file is mid-edit and does not parse, completion
+  still offers the classes it declares and the names it imports.
+- Completing with the cursor inside a name replaces the whole name, so
+  choosing `describe` at `$this->des|cribe` no longer leaves `cribe` behind.
+  An editor that supports insert-and-replace completion (JetBrains IDEs:
+  Enter inserts, Tab replaces) gets both ranges and applies its own choice.
+- Signatures show parameters as declared, also for declarations in files
+  that are not open: defaults with their value, `int $width = 120` instead of
+  `int $width` (or `= ...` in the open file), and a constructor parameter's
+  role, `internal writable int $x = 0`. The compiler now reports each
+  parameter's default as authored.
+- On Windows, diagnostics and locations for project files that are not open
+  use the same `file:///C:/...` URI the editor uses for that file. They were
+  published under the verbatim `\\?\C:\...` path that path canonicalization
+  returns, as `file:////%3F/C:/...`, which no editor matches. UNC shares map
+  to `file://server/share/...`.
+- Completion knows where the cursor is while code is still being typed.
+  After `$this->`, `$this->x`, or `f($this->`, before the statement has its
+  `;`, it offers only the receiver's members; it used to offer every keyword
+  and global name, so typing `x` could insert `xor`. A `$` name offers only
+  the variables in scope, including `$this` in an instance method, and `::`
+  offers only static names. Members such as `toString`, `length`, and `share`
+  are no longer offered as bare names, `__construct` and `__destruct` are no
+  longer offered after `->` (the compiler rejects calling them, E0414), and a
+  site with nothing valid yet returns an empty list that the editor asks for
+  again on the next keystroke.
+- Names declared in project files that are not open are no longer reported as
+  unknown when Baton was not found or the project sits below the opened
+  folder. On Windows the server finds the `baton.cmd` and `baton.bat` launchers
+  through `PATHEXT`; a document opened inside a Baton project below a workspace
+  root has that project discovered; a project that cannot be loaded raises a
+  warning naming the cause and the remedy instead of an Info log line; and
+  changing the Baton or language-server path in the JetBrains or VS Code
+  settings restarts the server.
+- Hovering the class name in `new Application(...)` shows the constructor that
+  expression calls, such as `function Application::__construct(take
+  ApplicationConfig $config)`, with its documentation, including for classes in
+  files that are not open. Constructor signatures no longer end in `: void`,
+  and project classes declared in other files no longer read "Compiler-known
+  Doria class".
+
+- Pinned the compiler to `b02a8f02070cbcf492383c6f5f2bd393b26334a1`
+  (Decision 0144). `List<T>` and `T[]` have `get(int $index): ?T`, with hover
+  text for both. `??` after a value that is never null, such as an index read,
+  is reported as E0782 in the editor instead of failing later in a build; its
+  help names `$sequence->get($index) ?? $fallback`.
+- Pinned the compiler to `65cbe7c534672c53c256c4c5a83f1f19525ffaf5`, where the
+  padding argument of `String::padStart` and `String::padEnd` defaults to one
+  space. Their hovers show `string $padding = " "`.
+- Pinned the compiler to `1d8d0f14c89d092667ee5ad92dd76150de9b639c`. A call
+  to a PHP string function now names its Doria spelling for 42 functions
+  instead of seven: `str_pad` reports `String::padEnd` and `String::padStart`,
+  and `strlen` reports `$text->byteLength` and `$text->length`.
+- Pinned the compiler to `76fb2952d78dae45352fec435f96f6b74e241fda`, which
+  accepts every local declaration form in a `for` initializer (Decision 0143).
+  `for (writable int $row = 0; ...)` no longer shows three parser errors. The
+  shared fixture `editors/fixtures/for-typed-initializer.doria` holds the
+  typed, grouped and `let` forms; the server reports no diagnostics for it.
 - Synchronized the language server with Stage 46, the terminal layer, and
   pinned the compiler to `61e314503a64cedf708d256b3c88c3d7db1cef60`. Hover explains the inline Copy values of
   `Doria\Std\Term` (`Size`, `Position`, `KeyModifiers`, `Style`) and the

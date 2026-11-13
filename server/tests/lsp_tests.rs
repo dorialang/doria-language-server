@@ -2603,6 +2603,77 @@ fn preserves_php_readline_migration_guidance() {
 }
 
 #[test]
+fn sequence_get_with_a_fallback_has_no_false_diagnostics() {
+    let source = r#"
+function main(): void
+{
+    List<string> $lines = ["alpha"];
+    int[] $numbers = [1, 2];
+    echo $lines->get(3) ?? "missing";
+    echo $numbers->get(-1) ?? 0;
+}
+"#;
+    let name = "sequence-get.doria";
+    doriac::check_source(name, source).unwrap();
+    assert_stored_source_diagnostics(name, source, None);
+}
+
+#[test]
+fn coalesce_after_an_index_read_names_get() {
+    let diagnostics = diagnostics_for_document(
+        "file:///index-coalesce.doria",
+        "function main(): void { List<string> $lines = [\"a\"]; echo $lines[3] ?? \"\"; }",
+    );
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0782")
+        .unwrap_or_else(|| panic!("E0782 should be published: {diagnostics:?}"));
+    let published = diagnostic.to_string();
+    assert!(
+        published.contains("$sequence->get($index) ?? $fallback"),
+        "{published}"
+    );
+}
+
+#[test]
+fn padding_without_a_padding_text_has_no_false_diagnostics() {
+    let source = r#"
+function main(): void
+{
+    echo String::padEnd("Doria", 8);
+    echo String::padStart("Doria", 8);
+}
+"#;
+    let name = "padding-default.doria";
+    doriac::check_source(name, source).unwrap();
+    assert_stored_source_diagnostics(name, source, None);
+}
+
+#[test]
+fn a_php_string_call_names_both_padding_operations() {
+    let diagnostics = diagnostics_for_document(
+        "file:///padding.doria",
+        "function main(): void { echo str_pad(\"a\", 5); }",
+    );
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0461")
+        .unwrap_or_else(|| {
+            panic!("the string spelling diagnostic should be published: {diagnostics:?}")
+        });
+    let published = diagnostic.to_string();
+    for spelling in [
+        "String::padEnd($text, $length, $padding)",
+        "String::padStart($text, $length, $padding)",
+    ] {
+        assert!(
+            published.contains(spelling),
+            "{spelling} missing from {published}"
+        );
+    }
+}
+
+#[test]
 fn exposes_literal_brace_fix_data_at_original_source_span() {
     let text = "echo \"literal {word}\";";
     let diagnostics = diagnostics_for_document("file:///brace.doria", text);
@@ -5176,6 +5247,14 @@ class Inspector {{
 fn seekable_file_fixture_preserves_compiler_diagnostics() {
     let source = include_str!("../../editors/fixtures/stage36a-seekable-files.doria");
     let name = "seekable-files.doria";
+    doriac::check_source(name, source).unwrap();
+    assert_stored_source_diagnostics(name, source, None);
+}
+
+#[test]
+fn typed_and_grouped_for_initializers_have_no_false_diagnostics() {
+    let source = include_str!("../../editors/fixtures/for-typed-initializer.doria");
+    let name = "for-typed-initializer.doria";
     doriac::check_source(name, source).unwrap();
     assert_stored_source_diagnostics(name, source, None);
 }

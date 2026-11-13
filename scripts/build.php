@@ -3,6 +3,11 @@
 
 declare(strict_types=1);
 
+// Checks include this file for its functions; only a direct run builds.
+if (PHP_SAPI !== 'cli' || realpath($_SERVER['SCRIPT_FILENAME'] ?? '') !== __FILE__) {
+    return;
+}
+
 $root = dirname(__DIR__);
 $target = $argv[1] ?? 'help';
 $compilerPath = null;
@@ -258,6 +263,9 @@ function build_vscode(string $root, ?string $compilerPath = null): void
 {
     $editor = $root . '/editors/vscode/doria';
     $dist = $root . '/dist';
+    // Named before anything is built, so a server this package cannot carry
+    // is reported before the build is paid for.
+    $target = vscode_target(server_target_triple($root));
     ensure_directory($dist);
 
     build_server($root, true, $compilerPath);
@@ -275,7 +283,7 @@ function build_vscode(string $root, ?string $compilerPath = null): void
     run_tool('npm', ['ci', '--ignore-scripts'], $editor);
     run_tool(
         'npm',
-        ['run', 'package', '--', '--target', vscode_target(), '--out', $vsix],
+        ['run', 'package', '--', '--target', $target, '--out', $vsix],
         $editor
     );
 
@@ -286,10 +294,10 @@ function build_vscode(string $root, ?string $compilerPath = null): void
 function build_intellij(string $root, ?string $compilerPath = null): void
 {
     $editor = $root . '/editors/intellij/doria';
+    $platform = intellij_platform_key(server_target_triple($root));
     build_server($root, true, $compilerPath);
     $server = server_artifact($root, true);
     $bundle = $root . '/target/intellij-lsp-bundle';
-    $platform = intellij_platform_key();
     $executable = PHP_OS_FAMILY === 'Windows' ? 'doria-lsp.exe' : 'doria-lsp';
     remove_stale_artifacts($bundle . '/*/doria-lsp*');
     install_executable($server, "{$bundle}/{$platform}/{$executable}");
@@ -300,11 +308,7 @@ function build_intellij(string $root, ?string $compilerPath = null): void
         '--no-daemon',
         "-PdoriaLspBundleDir={$bundle}",
     ];
-    $command = PHP_OS_FAMILY === 'Windows'
-        ? windows_command($gradle, $arguments)
-        : [$gradle, ...$arguments];
-
-    run_command($command, $editor);
+    run_tool($gradle, $arguments, $editor);
 
     $artifacts = glob($editor . '/build/distributions/*.zip') ?: [];
     if (count($artifacts) !== 1) {
@@ -342,52 +346,97 @@ function server_artifact(string $root, bool $release): string
     return ($metadata['target_directory'] ?? $root . '/target') . "/{$profile}/{$executable}";
 }
 
-function vscode_target(): string
+/**
+ * The Rust target `doria-lsp` is built for: the host of the toolchain this
+ * repository pins.
+ *
+ * An editor package is named for the server it carries, so the platform is
+ * asked of the toolchain that built that server. The PHP running this script
+ * says nothing about it: a 32-bit PHP on 64-bit Windows reports `i586` while
+ * Cargo builds an x86_64 server.
+ */
+function server_target_triple(string $root): string
 {
-    $platform = match (PHP_OS_FAMILY) {
-        'Windows' => 'win32',
-        'Darwin' => 'darwin',
-        'Linux' => 'linux',
-        default => throw new RuntimeException(
-            'VS Code packaging is unsupported on ' . PHP_OS_FAMILY
-        ),
-    };
-    $machine = strtolower(php_uname('m'));
-    $architecture = match ($machine) {
-        'x86_64', 'amd64' => 'x64',
-        'aarch64', 'arm64' => 'arm64',
-        'armv7l', 'armv7' => 'armhf',
-        default => throw new RuntimeException(
-            "VS Code packaging is unsupported on architecture {$machine}"
-        ),
-    };
-    if ($platform !== 'linux' && $architecture === 'armhf') {
-        throw new RuntimeException("VS Code packaging does not support {$platform}-armhf");
+    $requested = getenv('CARGO_BUILD_TARGET');
+    if ($requested !== false && $requested !== '') {
+        throw new RuntimeException(
+            "CARGO_BUILD_TARGET is set to '{$requested}', but this script builds and packages "
+                . 'the server for the toolchain host. Unset CARGO_BUILD_TARGET, then run this command again.'
+        );
     }
+
+    $version = capture_command(['rustc', '-vV'], $root);
+    if (preg_match('/^host:\s*(\S+)\s*$/m', $version, $match) !== 1) {
+        throw new RuntimeException(
+            "`rustc -vV` did not report a host target. Run `rustc -vV` in {$root} and check the Rust installation."
+        );
+    }
+
+    return $match[1];
+}
+
+/**
+ * The system and processor a Rust target names, in the target's own words.
+ *
+ * @return array{system: string, processor: string}
+ */
+function target_platform(string $triple): array
+{
+    $system = match (true) {
+        str_contains($triple, '-windows-') => 'windows',
+        str_contains($triple, '-apple-darwin') => 'macos',
+        str_contains($triple, '-linux-') => 'linux',
+        default => throw new RuntimeException(
+            "Editor packaging does not support the Rust target {$triple}: only Windows, macOS and Linux "
+                . 'servers are packaged. Build on one of those systems.'
+        ),
+    };
+
+    return ['system' => $system, 'processor' => explode('-', $triple, 2)[0]];
+}
+
+function vscode_target(string $triple): string
+{
+    ['system' => $system, 'processor' => $processor] = target_platform($triple);
+    $platform = match ($system) {
+        'windows' => 'win32',
+        'macos' => 'darwin',
+        'linux' => 'linux',
+    };
+    $architecture = match (true) {
+        $processor === 'x86_64' => 'x64',
+        $processor === 'aarch64' => 'arm64',
+        $system === 'linux' && str_starts_with($processor, 'armv7') => 'armhf',
+        default => throw new RuntimeException(
+            "VS Code packaging does not support the Rust target {$triple}. " . supported_hosts_advice($system)
+        ),
+    };
 
     return "{$platform}-{$architecture}";
 }
 
-function intellij_platform_key(): string
+function intellij_platform_key(string $triple): string
 {
-    $platform = match (PHP_OS_FAMILY) {
-        'Windows' => 'windows',
-        'Darwin' => 'macos',
-        'Linux' => 'linux',
-        default => throw new RuntimeException(
-            'IntelliJ packaging is unsupported on ' . PHP_OS_FAMILY
-        ),
-    };
-    $machine = strtolower(php_uname('m'));
-    $architecture = match ($machine) {
-        'x86_64', 'amd64' => 'x86_64',
-        'aarch64', 'arm64' => 'aarch64',
-        default => throw new RuntimeException(
-            "IntelliJ packaging is unsupported on architecture {$machine}"
-        ),
+    ['system' => $system, 'processor' => $processor] = target_platform($triple);
+    if (!in_array($processor, ['x86_64', 'aarch64'], true)) {
+        throw new RuntimeException(
+            "IntelliJ packaging does not support the Rust target {$triple}. " . supported_hosts_advice($system)
+        );
+    }
+
+    return "{$system}-{$processor}";
+}
+
+function supported_hosts_advice(string $system): string
+{
+    $vendor = match ($system) {
+        'windows' => 'pc-windows-msvc',
+        'macos' => 'apple-darwin',
+        'linux' => 'unknown-linux-gnu',
     };
 
-    return "{$platform}-{$architecture}";
+    return "Install a Rust toolchain whose host is x86_64-{$vendor} or aarch64-{$vendor} "
+        . '(`rustup set default-host <host>`, then `rustup toolchain install`), then run this command again.';
 }
 
 /**
@@ -470,31 +519,160 @@ function write_generated_file(string $path, string $contents): void
 /** @param list<string> $arguments */
 function run_tool(string $tool, array $arguments, string $workingDirectory): void
 {
-    $command = PHP_OS_FAMILY === 'Windows'
-        ? windows_command($tool, $arguments)
-        : [$tool, ...$arguments];
-    run_command($command, $workingDirectory);
+    run_command(tool_command($tool, $arguments), $workingDirectory);
 }
 
 /**
+ * The command that starts `$tool`, a name to find on PATH or a path to a
+ * file, with `$arguments`.
+ *
+ * The file is found here and started by its full path. On Windows `npm` and
+ * `gradlew` are batch files. A batch file that the command processor finds on
+ * PATH from a quoted name reads its own directory (`%~dp0`) as the working
+ * directory, so `npm.cmd` looked for npm inside the directory being built.
+ *
+ * The result is a list of arguments for a program, or on Windows a whole
+ * command line for a batch file; see `windows_batch_command_line`.
+ *
  * @param list<string> $arguments
- * @return list<string>
+ * @return list<string>|string
  */
-function windows_command(string $executable, array $arguments): array
+function tool_command(string $tool, array $arguments): array|string
+{
+    $executable = resolve_tool($tool);
+    if (PHP_OS_FAMILY !== 'Windows') {
+        return [$executable, ...$arguments];
+    }
+
+    $executable = str_replace('/', '\\', $executable);
+    $extension = strtolower(pathinfo($executable, PATHINFO_EXTENSION));
+
+    return in_array($extension, ['bat', 'cmd'], true)
+        ? windows_batch_command_line($executable, $arguments)
+        : [$executable, ...$arguments];
+}
+
+/**
+ * The file a tool name stands for: the first match on PATH, tried with each
+ * PATHEXT extension on Windows when the name has none. A tool given with a
+ * directory is the caller's choice of file and is returned unchanged. The
+ * working directory is never searched.
+ */
+function resolve_tool(string $tool): string
+{
+    if (is_absolute_path($tool) || strpbrk($tool, '/\\') !== false) {
+        return $tool;
+    }
+
+    $windows = PHP_OS_FAMILY === 'Windows';
+    $extensions = [''];
+    if ($windows && pathinfo($tool, PATHINFO_EXTENSION) === '') {
+        $configured = getenv('PATHEXT');
+        if ($configured === false || $configured === '') {
+            $configured = '.COM;.EXE;.BAT;.CMD';
+        }
+        $extensions = array_values(array_filter(explode(';', $configured)));
+    }
+
+    $path = getenv('PATH');
+    foreach (explode(PATH_SEPARATOR, $path === false ? '' : $path) as $directory) {
+        $directory = rtrim(trim($directory, '"'), '/\\');
+        if ($directory === '') {
+            continue;
+        }
+        foreach ($extensions as $extension) {
+            $candidate = $directory . DIRECTORY_SEPARATOR . $tool . $extension;
+            if (is_file($candidate) && ($windows || is_executable($candidate))) {
+                return $candidate;
+            }
+        }
+    }
+
+    throw new RuntimeException(
+        "'{$tool}' was not found on PATH. Install it, or add its directory to PATH "
+            . 'and open a new terminal, then run this command again.'
+    );
+}
+
+/**
+ * The Windows command line that runs a batch file with `$arguments`.
+ *
+ * A batch file runs inside the command processor, which reads one line of
+ * text, so this function writes that line itself: the file and every argument
+ * in double quotes, the whole line in one more pair, after `/s /c`. With `/s`
+ * the command processor removes exactly that outer pair and runs the rest
+ * unchanged.
+ *
+ * Handing the command processor a list of separately quoted arguments does
+ * not work. Without `/s` it removes the first and the last quote of the line,
+ * so the last argument loses its closing quote and takes in whatever the batch
+ * file wrote after `%*`. `gradlew.bat` ends its Java command with
+ * `%* & call :exitWithErrorLevel`, and that text became part of the last
+ * Gradle argument.
+ *
+ * @param list<string> $arguments
+ */
+function windows_batch_command_line(string $batchFile, array $arguments): string
 {
     $commandProcessor = getenv('COMSPEC');
     if ($commandProcessor === false || $commandProcessor === '') {
         $commandProcessor = 'cmd.exe';
     }
 
-    return [$commandProcessor, '/d', '/c', $executable, ...$arguments];
+    $line = implode(' ', array_map(windows_batch_argument(...), [$batchFile, ...$arguments]));
+
+    return '"' . $commandProcessor . '" /d /s /c "' . $line . '"';
 }
 
-/** @param list<string> $command */
-function run_command(array $command, string $workingDirectory): void
+/**
+ * One argument in double quotes for a batch file, which hands it on to a
+ * program. Backslashes at the end are doubled, because the program reads a
+ * backslash before the closing quote as part of the quote.
+ *
+ * A double quote, a percent sign or a line break cannot be passed through the
+ * command processor unchanged, so an argument that has one is refused.
+ */
+function windows_batch_argument(string $argument): string
+{
+    if (preg_match('/["%\r\n\0]/', $argument) === 1) {
+        throw new RuntimeException(
+            'cannot pass ' . var_export($argument, true) . ' to a Windows batch file: the command processor '
+                . 'rewrites double quotes, percent signs and line breaks. Remove that character from the '
+                . 'path or value, then run this command again.'
+        );
+    }
+
+    $trailing = strlen($argument) - strlen(rtrim($argument, '\\'));
+
+    return '"' . $argument . str_repeat('\\', $trailing) . '"';
+}
+
+/**
+ * Starts a command: a list of arguments for a program, or a whole Windows
+ * command line, which is passed on exactly as written.
+ *
+ * @param list<string>|string $command
+ * @param array<int, mixed> $descriptors
+ * @param-out array<int, resource> $pipes
+ * @return resource|false
+ */
+function start_command(array|string $command, array $descriptors, &$pipes, string $workingDirectory)
+{
+    return proc_open(
+        $command,
+        $descriptors,
+        $pipes,
+        $workingDirectory,
+        null,
+        is_string($command) ? ['bypass_shell' => true] : null
+    );
+}
+
+/** @param list<string>|string $command */
+function run_command(array|string $command, string $workingDirectory): void
 {
     fwrite(STDOUT, "\n> " . display_command($command) . "\n");
-    $process = proc_open(
+    $process = start_command(
         $command,
         [
             0 => ['file', 'php://stdin', 'r'],
@@ -514,10 +692,10 @@ function run_command(array $command, string $workingDirectory): void
     }
 }
 
-/** @param list<string> $command */
-function capture_command(array $command, string $workingDirectory): string
+/** @param list<string>|string $command */
+function capture_command(array|string $command, string $workingDirectory): string
 {
-    $process = proc_open(
+    $process = start_command(
         $command,
         [
             0 => ['file', 'php://stdin', 'r'],
@@ -543,9 +721,13 @@ function capture_command(array $command, string $workingDirectory): string
     return $output;
 }
 
-/** @param list<string> $command */
-function display_command(array $command): string
+/** @param list<string>|string $command */
+function display_command(array|string $command): string
 {
+    if (is_string($command)) {
+        return $command;
+    }
+
     return implode(' ', array_map(
         static fn (string $argument): string => preg_match('/^[A-Za-z0-9_\.\-\/:=]+$/', $argument) === 1
             ? $argument

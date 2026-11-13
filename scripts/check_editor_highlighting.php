@@ -479,7 +479,8 @@ function check_vscode_language_server_packaging(): void
     require_check(
         str_contains($builder, 'build_server($root, true, $compilerPath)')
             && str_contains($builder, "install_executable(\$server, \$bundledServer)")
-            && str_contains($builder, "'--target', vscode_target()"),
+            && str_contains($builder, '$target = vscode_target(server_target_triple($root))')
+            && str_contains($builder, "'--target', \$target,"),
         'VS Code packaging must build, bundle, and platform-target doria-lsp'
     );
     require_check(
@@ -542,7 +543,7 @@ function check_intellij_language_server_packaging(): void
     );
     require_check(
         str_contains($builder, 'build_intellij($root, $compilerPath)')
-            && str_contains($builder, 'intellij_platform_key()')
+            && str_contains($builder, 'intellij_platform_key(server_target_triple($root))')
             && str_contains($builder, '-PdoriaLspBundleDir='),
         'The developer IntelliJ build must bundle the compiler-matched host server'
     );
@@ -1285,7 +1286,7 @@ function check_lsp_completion_vocabulary(): void
     );
 
     require_check(
-        preg_match('/let types = \[(.*?)\];/s', $lspText, $matches) === 1,
+        preg_match('/const BUILT_IN_TYPES: \[&str; \d+\] = \[(.*?)\];/s', $lspText, $matches) === 1,
         'LSP completion type list could not be found'
     );
     $lspTypeList = $matches[1];

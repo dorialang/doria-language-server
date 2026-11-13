@@ -150,6 +150,24 @@ graphs. Shared dependencies contribute one source declaration, not duplicate
 declarations or edits. Generic arguments in contract lists retain ordinary type
 completion; unfinished declaration headers are recovered through the compiler parser.
 
+Completion reads where the cursor sits from compiler tokens, not from whether
+the buffer parses, because while a name is being typed it usually does not. A
+name after `->` or `?->` is a member site, after `::` a static site, and a `$`
+name a variable site. Each offers only what is valid there: the receiver's
+members, the static names of the class or enum, or the variables in scope.
+A return or parameter type, `catch (`, `throws`, and `is` are type sites
+that offer only types, and `new` offers only classes it can construct.
+Keywords and global names are offered only where no receiver precedes the
+cursor, and binary operator keywords (`and`, `or`, `xor`, `is`, `as`) only
+after a complete operand. `:` and `>` are trigger characters for `::` and
+`->` alone; a lone `:` or `>` returns no items. To analyze an unfinished statement, the server replaces the partial
+name with a placeholder and finishes the statement with the smallest repair the
+compiler parser accepts (the text as it is, a terminating `;`, then the
+brackets the statement still has open). When no repair parses or the receiver
+cannot be resolved, the list is empty and marked incomplete so the client asks
+again on the next keystroke. Site items carry a `textEdit` over the partial
+name, so every client filters and replaces them the same way.
+
 The post-Stage-34 constructor-parameter-role correction extends that projection,
 not the editor's semantic authority. Compiler-owned `constructor_parameters` and
 `property_families` identify promoted properties, inherited-property override
@@ -205,7 +223,20 @@ overrides exist only for language-server and compiler development.
 
 Both official clients expose one Baton path override. It is passed as
 `DORIA_BATON_PATH`; otherwise the server uses the version-matched installed
-component or `PATH`. Clients watch manifests, locks, Doria source creation and
+component or `PATH`. On Windows every candidate is tried with the `PATHEXT`
+extensions, so the `baton.cmd` launcher Baton ships as (and `baton.bat` from a
+source checkout) resolves; an override without an extension does too. Because
+the server reads both paths only when it starts, changing either setting
+restarts the server.
+
+Discovery runs at each workspace root and, when a document opens inside a
+Baton project below an opened folder, at that project too, so opening a folder
+of several projects analyzes each with its full source set. A Baton workspace
+root already covers its members and is not discovered twice. When discovery
+fails for a directory that contains `Baton.toml`, the server falls back to the
+open documents and shows a warning that names the failure and the remedy,
+because names declared in unopened files would otherwise be reported as unknown
+with no visible cause. Clients watch manifests, locks, Doria source creation and
 deletion, generated output, and private inventory changes, and they expose an
 explicit project refresh command without performing discovery on the UI thread.
 After discovery, the server maintains bounded watchers rooted at the exact

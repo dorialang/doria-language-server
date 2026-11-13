@@ -353,21 +353,7 @@ impl OpenDocumentIndex {
                 .push((known.source_name.clone(), known.id.clone(), known.kind));
         }
 
-        let imports = facts
-            .imports
-            .iter()
-            .map(|import| {
-                let target = facts
-                    .references
-                    .iter()
-                    .find(|reference| {
-                        reference.role == GlobalReferenceRole::ImportTarget
-                            && reference.source_span == import.target_span
-                    })
-                    .map(|reference| reference.symbol_id.clone());
-                (import, target)
-            })
-            .collect::<Vec<_>>();
+        let imports = import_targets(facts);
 
         for (import, target) in &imports {
             summary
@@ -1754,31 +1740,9 @@ impl OpenDocumentIndex {
             if target.as_ref().is_some_and(|target| !accepts(kind, target)) {
                 continue;
             }
-            let detail = target.as_ref().map_or_else(
-                || format!("Unresolved import `{source_target}`"),
-                |target| {
-                    format!(
-                        "Imported {} `{}`",
-                        kind_name(kind, &target.qualified_name),
-                        target.qualified_name
-                    )
-                },
-            );
             completions.insert(
                 alias.clone(),
-                IndexedCompletion {
-                    label: alias.clone(),
-                    kind: completion_kind(
-                        kind,
-                        target.as_ref().map_or(source_target.as_str(), |target| {
-                            target.qualified_name.as_str()
-                        }),
-                    ),
-                    detail,
-                    documentation: None,
-                    insert_text: None,
-                    snippet: false,
-                },
+                import_completion(alias, source_target, target.as_ref(), kind),
             );
         }
         for (name, symbol, kind) in &document.compiler_known {
@@ -2350,6 +2314,104 @@ fn completion_kind(kind: GlobalSymbolKind, qualified_name: &str) -> u32 {
         GlobalSymbolKind::CompilerKnownType => 25,
         GlobalSymbolKind::CompilerKnownAttribute => 7,
     }
+}
+
+/// Each import of `facts` with the symbol the compiler resolved its target to.
+fn import_targets(
+    facts: &doriac::names::GlobalSymbolFacts,
+) -> Vec<(&doriac::names::ImportFact, Option<GlobalSymbolId>)> {
+    facts
+        .imports
+        .iter()
+        .map(|import| {
+            let target = facts
+                .references
+                .iter()
+                .find(|reference| {
+                    reference.role == GlobalReferenceRole::ImportTarget
+                        && reference.source_span == import.target_span
+                })
+                .map(|reference| reference.symbol_id.clone());
+            (import, target)
+        })
+        .collect()
+}
+
+fn import_completion(
+    alias: &str,
+    source_target: &str,
+    target: Option<&GlobalSymbolId>,
+    kind: GlobalSymbolKind,
+) -> IndexedCompletion {
+    let detail = target.map_or_else(
+        || format!("Unresolved import `{source_target}`"),
+        |target| {
+            format!(
+                "Imported {} `{}`",
+                kind_name(kind, &target.qualified_name),
+                target.qualified_name
+            )
+        },
+    );
+    IndexedCompletion {
+        label: alias.to_string(),
+        kind: completion_kind(
+            kind,
+            target.map_or(source_target, |target| target.qualified_name.as_str()),
+        ),
+        detail,
+        documentation: None,
+        insert_text: None,
+        snippet: false,
+    }
+}
+
+impl OpenDocumentIndex {
+    /// The imports of one source in `facts`, offered the way an indexed
+    /// document's imports are. Used for a source that does not parse as
+    /// written, whose facts come from a repaired copy.
+    pub(crate) fn import_completions(
+        &self,
+        facts: &doriac::names::GlobalSymbolFacts,
+        source: doriac::source::SourceId,
+    ) -> Vec<IndexedCompletion> {
+        import_targets(facts)
+            .into_iter()
+            .filter(|(import, _)| import.alias_span.source == source)
+            .map(|(import, target)| {
+                let kind = target
+                    .as_ref()
+                    .and_then(|target| {
+                        facts
+                            .declarations
+                            .iter()
+                            .map(|declaration| (&declaration.id, declaration.kind))
+                            .chain(
+                                facts
+                                    .compiler_known
+                                    .iter()
+                                    .map(|known| (&known.id, known.kind)),
+                            )
+                            .find(|(id, _)| *id == target)
+                            .map(|(_, kind)| kind)
+                            .or_else(|| self.symbol_kinds.get(target).copied())
+                    })
+                    .unwrap_or(GlobalSymbolKind::Class);
+                import_completion(&import.alias, &import.target, target.as_ref(), kind)
+            })
+            .collect()
+    }
+}
+
+/// The completion item the index offers for a declaration.
+pub(crate) fn declaration_completion(
+    declaration: &doriac::names::GlobalSymbolDeclaration,
+) -> IndexedCompletion {
+    completion(
+        declaration.source_name.clone(),
+        declaration.kind,
+        &declaration.qualified_name,
+    )
 }
 
 fn completion(label: String, kind: GlobalSymbolKind, qualified_name: &str) -> IndexedCompletion {

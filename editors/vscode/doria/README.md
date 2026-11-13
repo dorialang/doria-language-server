@@ -126,7 +126,10 @@ No `.vscode/launch.json` is required. To keep an explicit profile:
 ```
 
 Baton is resolved from `doria.baton.path`, then `DORIA_BATON_PATH`, a
-version-matched installed component, then `PATH`.
+version-matched installed component, then `PATH` (on Windows through `PATHEXT`,
+which finds the `baton.cmd` launcher). Changing `doria.baton.path` or
+`doria.languageServer.path` restarts the language server. If a Baton project
+cannot be loaded, VS Code shows a warning naming the cause.
 Standalone source files can use the **Doria: Run standalone file** snippet,
 which runs the selected `program` through `doriac run`; that opt-in mode resolves
 the compiler from `doria.compiler.path`, `DORIAC_PATH`, Cargo's installed bin

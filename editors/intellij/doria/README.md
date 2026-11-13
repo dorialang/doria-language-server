@@ -201,7 +201,12 @@ On Windows, the executable name is `doria-lsp.exe`.
 The Doria settings page also provides one optional Baton path. It accepts
 `$PROJECT_DIR$` and is passed to the language server as `DORIA_BATON_PATH`.
 Otherwise `doria-lsp` resolves a version-matched sibling component or Baton on
-`PATH`. The LSP client registers project-structure watchers with the IDE, and
+`PATH`; on Windows it finds the `baton.cmd` launcher through `PATHEXT`. Changing
+either path restarts the language server. If a Baton project cannot be loaded,
+the IDE shows a warning naming the cause, because files that are not open would
+otherwise produce unknown-name errors; fix it and run **Tools | Refresh Doria
+Project**. A change to `PATH` or `DORIA_BATON_PATH` itself reaches the server
+only after the IDE restarts. The LSP client registers project-structure watchers with the IDE, and
 all Baton discovery runs off the UI thread. The language server consumes Baton's
 strict project JSON; the plugin does not parse manifests or locks.
 

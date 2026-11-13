@@ -376,6 +376,9 @@ pub(crate) struct AnalysisSnapshot {
     attribute_parameter_occurrences: Vec<AttributeParameterOccurrence>,
     symbols: Vec<Symbol>,
     occurrences: Vec<Occurrence>,
+    /// Class-name span in a `new` expression, and the constructor it calls.
+    constructor_references: Vec<(Span, usize)>,
+    parameter_presentation: ParameterPresentation,
     member_receivers: Vec<MemberReceiver>,
     static_receivers: Vec<StaticReceiver>,
     class_members: HashMap<String, Vec<ClassMemberCompletion>>,
@@ -1337,6 +1340,10 @@ impl AnalysisSnapshot {
                     markdown.push_str("\n\n");
                     markdown.push_str(documentation);
                 }
+                if let Some(constructor) = self.constructor_section(occurrence.span) {
+                    markdown.push_str("\n\n---\n\n");
+                    markdown.push_str(&constructor);
+                }
                 Some(SemanticHover::new(occurrence.span, markdown))
             });
         let semantic_hover = self.semantic_hover_at_offset(offset);
@@ -1354,6 +1361,23 @@ impl AnalysisSnapshot {
             (Some(hover), None) | (None, Some(hover)) => Some(hover),
             (None, None) => None,
         }
+    }
+
+    /// The constructor a `new` expression calls, for the hover on its class
+    /// name: the same signature and documentation the constructor's own hover
+    /// shows.
+    fn constructor_section(&self, class_name_span: Span) -> Option<String> {
+        let (_, constructor) = self
+            .constructor_references
+            .iter()
+            .find(|(span, _)| *span == class_name_span)?;
+        let constructor = self.symbols.get(*constructor)?;
+        let mut markdown = format!("```doria\n{}\n```", constructor.signature);
+        if let Some(documentation) = &constructor.documentation {
+            markdown.push_str("\n\n");
+            markdown.push_str(documentation);
+        }
+        Some(markdown)
     }
 
     pub(crate) fn semantic_hover_at_offset(&self, offset: usize) -> Option<SemanticHover> {
@@ -1615,6 +1639,7 @@ impl AnalysisSnapshot {
                     &candidate.signature,
                     &candidate.checked_effects,
                     &HashMap::new(),
+                    &self.parameter_presentation,
                 );
                 let mut documentation = callable_details_documentation(
                     Some(&candidate.signature),
@@ -1741,6 +1766,7 @@ impl AnalysisSnapshot {
                 .iter()
                 .filter(|member| {
                     surface.valid
+                        && !is_lifecycle_method(&member.name)
                         && matches!(
                             member.kind,
                             CompilerMemberKind::InstanceMethod
@@ -1778,6 +1804,7 @@ impl AnalysisSnapshot {
                         .iter()
                         .filter(|member| {
                             !member.is_static
+                                && !is_lifecycle_method(&member.completion.label)
                                 && (writable || !member.writable)
                                 && (!member.internal
                                     || context.current_class.as_deref() == Some(class_name))
@@ -1812,6 +1839,7 @@ impl AnalysisSnapshot {
             member,
             &HashMap::new(),
             self.property_backing_fields.get(&member.declaration),
+            &self.parameter_presentation,
         );
         if availability == MemberAvailability::RequiresTypeArguments {
             let condition = self
@@ -2415,6 +2443,8 @@ struct SnapshotBuilder<'a> {
     diagnostics: Vec<Diagnostic>,
     symbols: Vec<Symbol>,
     occurrences: Vec<Occurrence>,
+    constructor_references: Vec<(Span, usize)>,
+    parameter_presentation: ParameterPresentation,
     classes: HashMap<String, usize>,
     contract_types: HashMap<String, usize>,
     error_classes: HashSet<String>,
@@ -2470,6 +2500,10 @@ impl<'a> SnapshotBuilder<'a> {
             diagnostics,
             symbols: Vec::new(),
             occurrences: Vec::new(),
+            constructor_references: Vec::new(),
+            parameter_presentation: semantic_info
+                .map(ParameterPresentation::from_semantic_info)
+                .unwrap_or_default(),
             classes: HashMap::new(),
             contract_types: HashMap::new(),
             error_classes: HashSet::new(),
@@ -2617,6 +2651,8 @@ impl<'a> SnapshotBuilder<'a> {
             attribute_parameter_occurrences: self.attribute_parameter_occurrences,
             symbols: self.symbols,
             occurrences: self.occurrences,
+            constructor_references: self.constructor_references,
+            parameter_presentation: self.parameter_presentation,
             member_receivers: self.member_receivers,
             static_receivers: self.static_receivers,
             class_members: self.class_members,
@@ -3220,7 +3256,7 @@ impl<'a> SnapshotBuilder<'a> {
                     self.append_callable_source_documentation(&mut documentation, function);
                     let symbol = self.add_declaration_symbol(
                         selection_span,
-                        function_signature(function, None),
+                        function_signature(function, None, &self.parameter_presentation),
                         documentation,
                         SymbolKind::Plain,
                     );
@@ -3358,17 +3394,32 @@ impl<'a> SnapshotBuilder<'a> {
             }
         }
 
+        // Classes declared in project sources: they reach this file through the
+        // package graph, but they are the project's own classes, not
+        // compiler-known ones.
+        let source_declared_classes = info
+            .global_symbols
+            .declarations
+            .iter()
+            .filter(|declaration| declaration.kind == GlobalSymbolKind::Class)
+            .flat_map(|declaration| {
+                [
+                    declaration.qualified_name.clone(),
+                    declaration.source_name.clone(),
+                ]
+            })
+            .collect::<HashSet<_>>();
         for info in classes {
             let class_name = info.declaration_name;
             let inline_copy =
                 ClassType::new(class_name.clone(), info.arguments.clone()).inline_copy_type();
-            let mut documentation = Some(
-                inline_copy
-                    .map(inline_value_documentation)
-                    .unwrap_or_else(|| {
-                        "Compiler-known Doria class supplied by semantic analysis.".to_string()
-                    }),
-            );
+            let mut documentation = match inline_copy {
+                Some(inline_copy) => Some(inline_value_documentation(inline_copy)),
+                None if source_declared_classes.contains(&class_name) => None,
+                None => {
+                    Some("Compiler-known Doria class supplied by semantic analysis.".to_string())
+                }
+            };
             let mut interfaces = conformances
                 .iter()
                 .filter(|fact| {
@@ -3714,7 +3765,11 @@ impl<'a> SnapshotBuilder<'a> {
                             completion: SemanticCompletion {
                                 label: method.name.clone(),
                                 kind: 2,
-                                detail: function_signature(method, Some(&class.name)),
+                                detail: function_signature(
+                                    method,
+                                    Some(&class.name),
+                                    &self.parameter_presentation,
+                                ),
                                 documentation: phpdoc_before(self.text, method.span.start),
                             },
                             writable: method.writable_this,
@@ -3903,7 +3958,7 @@ impl<'a> SnapshotBuilder<'a> {
         let hierarchy_documentation = documentation.clone();
         let symbol = self.add_declaration_symbol(
             selection_span,
-            function_signature(method, Some(class_name)),
+            function_signature(method, Some(class_name), &self.parameter_presentation),
             documentation,
             SymbolKind::Plain,
         );
@@ -3924,7 +3979,7 @@ impl<'a> SnapshotBuilder<'a> {
                 name: method.name.clone(),
                 kind: MemberKind::Method,
                 declaration: method.span,
-                detail: function_signature(method, Some(class_name)),
+                detail: function_signature(method, Some(class_name), &self.parameter_presentation),
                 documentation: hierarchy_documentation,
                 access: hierarchy.access,
                 is_static: hierarchy.is_static,
@@ -4587,19 +4642,17 @@ impl<'a> SnapshotBuilder<'a> {
         span: Span,
         member_span: Option<Span>,
         args: &[doriac::ast::Argument],
-    ) -> bool {
-        let Some(info) = self.semantic_info else {
-            return false;
-        };
+    ) -> Option<usize> {
+        let info = self.semantic_info?;
         let Some(CallableTarget::Method {
             class_type,
             method_name,
             ..
         }) = info.call_target(span)
         else {
-            return false;
+            return None;
         };
-        let Some(member) = info
+        let member = info
             .class_member_surface(class_type)
             .filter(|surface| surface.valid)
             .and_then(|surface| {
@@ -4607,18 +4660,13 @@ impl<'a> SnapshotBuilder<'a> {
                     .members
                     .iter()
                     .find(|member| &member.name == method_name)
-            })
-        else {
-            return false;
-        };
-        let Some(signature) = &member.signature else {
-            return false;
-        };
+            })?;
+        let signature = member.signature.as_ref()?;
         if member_span.is_none()
             && class_type.inline_copy_type().is_some()
             && member.access == MemberAccess::Internal
         {
-            return false;
+            return None;
         }
         let bindings = info
             .generic_call_specializations
@@ -4639,6 +4687,7 @@ impl<'a> SnapshotBuilder<'a> {
             member,
             &bindings,
             info.property_backing_fields.get(&member.declaration),
+            &self.parameter_presentation,
         );
         if let Some(origin) = info.composition.origin(member.declaration) {
             append_documentation(
@@ -4698,7 +4747,7 @@ impl<'a> SnapshotBuilder<'a> {
             .last_mut()
             .expect("recorded class call")
             .signature = Some(completion.detail);
-        true
+        Some(symbol)
     }
 
     fn record_class_value_reference(
@@ -4735,6 +4784,7 @@ impl<'a> SnapshotBuilder<'a> {
             member,
             &HashMap::new(),
             info.property_backing_fields.get(&member.declaration),
+            &self.parameter_presentation,
         );
         self.record_member_occurrence(&member.declaring_class.name, name, kind, member_span, false);
         if let Some(occurrence) = self
@@ -5308,7 +5358,7 @@ impl<'a> SnapshotBuilder<'a> {
         self.declare_local_binding_with_documentation(
             &parameter.name,
             selection_span,
-            parameter_signature(parameter),
+            parameter_signature(parameter, &self.parameter_presentation),
             visibility_start,
             documentation,
         )
@@ -5537,6 +5587,7 @@ impl<'a> SnapshotBuilder<'a> {
                 }
                 if method_span.is_some_and(|member_span| {
                     self.record_class_call(*span, Some(member_span), args)
+                        .is_some()
                 }) {
                     return;
                 }
@@ -5678,7 +5729,10 @@ impl<'a> SnapshotBuilder<'a> {
                 if let Some(class_name) = class_name.as_deref() {
                     self.record_method_call_occurrence(class_name, method, *span, *member_span);
                 }
-                if self.record_class_call(*span, Some(*member_span), args) {
+                if self
+                    .record_class_call(*span, Some(*member_span), args)
+                    .is_some()
+                {
                     return;
                 }
                 if let Some(class_name) = class_name.as_deref() {
@@ -5697,17 +5751,25 @@ impl<'a> SnapshotBuilder<'a> {
                 for argument in args {
                     self.visit_expr(&argument.value, current_class, parent_class);
                 }
-                if let Some(symbol) = self.classes.get(&class_type.name).copied() {
-                    if let Some(name_span) =
-                        find_identifier_span(self.tokens, *span, &class_type.name)
-                    {
-                        self.record_reference(name_span, symbol);
-                    }
+                let name_span = find_identifier_span(self.tokens, *span, &class_type.name);
+                if let (Some(symbol), Some(name_span)) =
+                    (self.classes.get(&class_type.name).copied(), name_span)
+                {
+                    self.record_reference(name_span, symbol);
                 }
-                if let Some(symbol) = self.resolve_method(&class_type.name, "__construct") {
-                    self.record_call_signature(*span, args, symbol);
-                } else {
-                    self.record_class_call(*span, None, args);
+                // A constructor declared in this file resolves directly; one
+                // from another file of the package comes from the compiler's
+                // class member surface. Either way it is the constructor this
+                // `new` calls, which the hover on the class name shows.
+                let constructor = match self.resolve_method(&class_type.name, "__construct") {
+                    Some(symbol) => {
+                        self.record_call_signature(*span, args, symbol);
+                        Some(symbol)
+                    }
+                    None => self.record_class_call(*span, None, args),
+                };
+                if let (Some(name_span), Some(constructor)) = (name_span, constructor) {
+                    self.constructor_references.push((name_span, constructor));
                 }
             }
             Expr::PropertyAccess {
@@ -6648,6 +6710,13 @@ struct CompilerKnownMethodHover {
     documentation: String,
 }
 
+/// The compiler rejects a direct call to a constructor or destructor
+/// (E0414): an object is built with `new` and destroyed by the runtime, so
+/// neither is offered after `->`.
+fn is_lifecycle_method(name: &str) -> bool {
+    matches!(name, "__construct" | "__destruct")
+}
+
 fn interface_member_completions(
     facts: &ContractFacts,
     receiver: &ResolvedType,
@@ -6750,9 +6819,62 @@ fn interface_requirement_signature(
             &requirement.generic_parameters,
             &requirement.signature,
             &requirement.checked_effects,
-            bindings
+            bindings,
+            &ParameterPresentation::default(),
         )
     )
+}
+
+/// How the compiler says each authored parameter reads, keyed by the
+/// parameter's declaration span: its default as written, and for a
+/// constructor its role. Signatures render parameters from this so that a
+/// declaration in an unopened file reads the same as one in the open file.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ParameterPresentation {
+    defaults: HashMap<Span, String>,
+    roles: HashMap<Span, ConstructorParameterSemanticRole>,
+}
+
+impl ParameterPresentation {
+    fn from_semantic_info(info: &SemanticInfo) -> Self {
+        let defaults = info
+            .callable_signatures
+            .values()
+            .flat_map(|signature| &signature.parameters)
+            .chain(
+                info.class_member_surfaces
+                    .iter()
+                    .flat_map(|surface| &surface.members)
+                    .filter_map(|member| member.signature.as_ref())
+                    .flat_map(|signature| &signature.parameters),
+            )
+            .filter_map(|parameter| Some((parameter.declaration?, parameter.default.clone()?)))
+            .collect();
+        let roles = info
+            .constructor_parameters
+            .iter()
+            .map(|(span, parameter)| (*span, parameter.role.clone()))
+            .collect();
+        Self { defaults, roles }
+    }
+
+    fn default_of(&self, declaration: Span) -> Option<&str> {
+        self.defaults.get(&declaration).map(String::as_str)
+    }
+
+    /// The constructor role keyword a parameter is declared with, if any.
+    fn role_keyword(&self, declaration: Span) -> Option<&'static str> {
+        match self.roles.get(&declaration)? {
+            ConstructorParameterSemanticRole::Promoted {
+                access: MemberAccess::Internal,
+            } => Some("internal"),
+            ConstructorParameterSemanticRole::Promoted {
+                access: MemberAccess::External,
+            } => None,
+            ConstructorParameterSemanticRole::InheritedPropertyOverride { .. } => Some("override"),
+            ConstructorParameterSemanticRole::ConstructorOnly => Some("parameter"),
+        }
+    }
 }
 
 fn semantic_callable_signature(
@@ -6761,6 +6883,7 @@ fn semantic_callable_signature(
     signature: &CallableSignatureSemanticInfo,
     checked_effects: &[ResolvedType],
     bindings: &HashMap<String, ResolvedType>,
+    presentation: &ParameterPresentation,
 ) -> String {
     let display = |ty: &ResolvedType| {
         display_resolved_type(&doriac::types::substitute_resolved_type(ty, bindings))
@@ -6769,16 +6892,34 @@ fn semantic_callable_signature(
         .parameters
         .iter()
         .map(|parameter| {
-            let mode = if parameter.take {
-                "take "
-            } else if parameter.borrow {
-                "borrow "
-            } else if parameter.writable {
-                "writable "
-            } else {
-                ""
-            };
-            format!("{mode}{} ${}", display(&parameter.r#type), parameter.name)
+            // The same order the declaration is written in, and the same
+            // order the open-file signature renders.
+            let mut parts = Vec::new();
+            if parameter.borrow {
+                parts.push("borrow".to_string());
+            }
+            if let Some(role) = parameter
+                .declaration
+                .and_then(|declaration| presentation.role_keyword(declaration))
+            {
+                parts.push(role.to_string());
+            }
+            if parameter.take {
+                parts.push("take".to_string());
+            }
+            if parameter.writable {
+                parts.push("writable".to_string());
+            }
+            parts.push(display(&parameter.r#type));
+            parts.push(format!("${}", parameter.name));
+            let mut rendered = parts.join(" ");
+            if let Some(default) = &parameter.default {
+                rendered.push_str(" = ");
+                rendered.push_str(default);
+            } else if parameter.has_default {
+                rendered.push_str(" = ...");
+            }
+            rendered
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -6794,10 +6935,18 @@ fn semantic_callable_signature(
                 .join(", ")
         )
     };
+    // A constructor is declared without a return type and always returns void,
+    // so render it the way it is declared; the authored declaration hover shows
+    // the same signature.
+    let constructor = name == "__construct" || name.ends_with("::__construct");
+    let return_type = if constructor && matches!(signature.return_type, ResolvedType::Void) {
+        String::new()
+    } else {
+        format!(": {}", display(&signature.return_type))
+    };
     format!(
-        "function {name}{}({parameters}): {}{effects}",
+        "function {name}{}({parameters}){return_type}{effects}",
         type_parameter_signature(generic_parameters),
-        display(&signature.return_type)
     )
 }
 
@@ -6805,6 +6954,7 @@ fn class_surface_member_completion(
     member: &ClassMemberSurfaceEntry,
     bindings: &HashMap<String, ResolvedType>,
     backing_field: Option<&doriac::property_hooks::PropertyBackingField>,
+    presentation: &ParameterPresentation,
 ) -> SemanticCompletion {
     let mut modifiers = Vec::new();
     if member.access == MemberAccess::Internal {
@@ -6843,6 +6993,7 @@ fn class_surface_member_completion(
                 signature,
                 &member.checked_effects,
                 bindings,
+                presentation,
             ),
         )
     } else if let Some((kind, accessor)) = member.hooks.as_ref().and_then(|hooks| {
@@ -7337,6 +7488,16 @@ fn collection_method(
             String::new(),
             display_nullable_resolved_type(value),
             "Removes and returns the final value, or `null` when the list is empty.",
+        ),
+        (ResolvedType::List(value), "get") => (
+            "int $index".to_string(),
+            display_nullable_resolved_type(value),
+            "Returns the value at the given index, or `null` when the index is out of range. `$list[$index]` panics instead.",
+        ),
+        (ResolvedType::TypedArray(value), "get") => (
+            "int $index".to_string(),
+            display_nullable_resolved_type(value),
+            "Returns the value at the given index, or `null` when the index is out of range. `$array[$index]` panics instead.",
         ),
         (ResolvedType::List(value), "contains") => (
             format!("{} $value", display_resolved_type(value)),
@@ -8309,7 +8470,11 @@ fn nominal_condition_signature(condition: Option<&NominalCondition>) -> String {
     format!(" where ({bounds})")
 }
 
-fn function_signature(function: &FunctionDecl, container: Option<&str>) -> String {
+fn function_signature(
+    function: &FunctionDecl,
+    container: Option<&str>,
+    presentation: &ParameterPresentation,
+) -> String {
     let mut modifiers = Vec::new();
     if matches!(function.access, MemberAccess::Internal) {
         modifiers.push("internal");
@@ -8341,7 +8506,7 @@ fn function_signature(function: &FunctionDecl, container: Option<&str>) -> Strin
     let parameters = function
         .params
         .iter()
-        .map(parameter_signature)
+        .map(|parameter| parameter_signature(parameter, presentation))
         .collect::<Vec<_>>()
         .join(", ");
     let return_type = function
@@ -8415,7 +8580,7 @@ fn override_stub(function: &FunctionDecl) -> String {
     )
 }
 
-fn parameter_signature(parameter: &Param) -> String {
+fn parameter_signature(parameter: &Param, presentation: &ParameterPresentation) -> String {
     let mut parts = Vec::new();
     if parameter.borrow_span.is_some() {
         parts.push("borrow".to_string());
@@ -8447,7 +8612,10 @@ fn parameter_signature(parameter: &Param) -> String {
     parts.push(format!("${}", parameter.name));
     let mut rendered = parts.join(" ");
     if parameter.default.is_some() {
-        rendered.push_str(" = ...");
+        rendered.push_str(" = ");
+        // The compiler's text of the default; `...` only when the source
+        // did not reach semantic analysis.
+        rendered.push_str(presentation.default_of(parameter.span).unwrap_or("..."));
     }
     rendered
 }
@@ -8867,6 +9035,7 @@ mod tests {
             let deque = ResolvedType::Deque(Box::new(element));
             for (receiver, method) in [
                 (&list, "pop"),
+                (&list, "get"),
                 (&dictionary, "get"),
                 (&dictionary, "remove"),
                 (&sorted, "get"),
@@ -9081,6 +9250,8 @@ function main(): void {
                 writable: true,
                 borrow: false,
                 has_default: false,
+                default: None,
+                declaration: None,
             }],
             return_type: ResolvedType::Class(ClassType::new("Result", Vec::new())),
         };
@@ -9514,6 +9685,39 @@ function main(): void
                 assert_eq!(help[0].active_parameter, 1);
             }
         }
+    }
+
+    #[test]
+    fn new_expression_class_hover_shows_the_constructor_declared_in_the_same_file() {
+        let source = "class ApplicationConfig { function __construct(string $name, internal writable int $width = 120) {} }\n\
+            class Application {\n    /** Builds the application from its configuration. */\n    function __construct(take ApplicationConfig $config) {}\n}\n\
+            function main(): void { let $app = new Application(new ApplicationConfig(\"demo\")); }";
+
+        let created = hover(source, "Application(new", 0).markdown;
+        assert!(created.contains("class Application"), "{created}");
+        assert!(
+            created.contains("function Application::__construct(take ApplicationConfig $config)"),
+            "{created}"
+        );
+        assert!(
+            created.contains("Builds the application from its configuration."),
+            "the constructor's documentation travels with it: {created}"
+        );
+
+        // A default reads as written, the same as from an unopened file.
+        let nested = hover(source, "ApplicationConfig(\"demo", 0).markdown;
+        assert!(
+            nested.contains(
+                "function ApplicationConfig::__construct(string $name, internal writable int $width = 120)"
+            ),
+            "{nested}"
+        );
+
+        let declaration = hover(source, "Application {", 0).markdown;
+        assert!(
+            !declaration.contains("__construct"),
+            "the declaration itself is not a constructor call: {declaration}"
+        );
     }
 
     #[test]
@@ -10260,7 +10464,7 @@ function main(): void
             "{:?}",
             snapshot.diagnostics()
         );
-        let signature = "writable function Doria\\Std\\Io\\ReadinessSet::begin(take Doria\\Std\\Io\\TransferPlan $plan, ?Doria\\Std\\Time\\Deadline $deadline, ?Doria\\Std\\Concurrency\\CancellationToken $cancellation): Doria\\Std\\Io\\TransferGroup";
+        let signature = "writable function Doria\\Std\\Io\\ReadinessSet::begin(take Doria\\Std\\Io\\TransferPlan $plan, ?Doria\\Std\\Time\\Deadline $deadline = null, ?Doria\\Std\\Concurrency\\CancellationToken $cancellation = null): Doria\\Std\\Io\\TransferGroup";
         let offset = source.find("->begin").unwrap() + 2;
         let members = snapshot.member_completions_at_offset(offset).unwrap();
         let begin = members.iter().find(|item| item.label == "begin").unwrap();
@@ -14255,7 +14459,10 @@ function inspectString<T implements Transform<string>>(T $processor, string $inp
                     _ => None,
                 })
             }).unwrap();
-            assert_eq!(function_signature(method, Some("Resource")), expected);
+            assert_eq!(
+                function_signature(method, Some("Resource"), &ParameterPresentation::default()),
+                expected
+            );
             assert!(override_stub(method).starts_with("override consuming function finish(): int"));
         }
     }
