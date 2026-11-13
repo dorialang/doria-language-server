@@ -6,6 +6,11 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- On Windows, diagnostics and locations for project files that are not open
+  use the same `file:///C:/...` URI the editor uses for that file. They were
+  published under the verbatim `\\?\C:\...` path that path canonicalization
+  returns, as `file:////%3F/C:/...`, which no editor matches. UNC shares map
+  to `file://server/share/...`.
 - Completion knows where the cursor is while code is still being typed.
   After `$this->`, `$this->x`, or `f($this->`, before the statement has its
   `;`, it offers only the receiver's members; it used to offer every keyword

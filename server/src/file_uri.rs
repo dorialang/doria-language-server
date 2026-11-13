@@ -4,16 +4,32 @@ pub(crate) fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
     let encoded = uri.strip_prefix("file://")?;
     let decoded = percent_decode(encoded)?;
     #[cfg(windows)]
-    let decoded = decoded
-        .strip_prefix('/')
-        .filter(|path| path.as_bytes().get(1) == Some(&b':'))
-        .unwrap_or(&decoded)
-        .replace('/', "\\");
+    let decoded = match decoded.strip_prefix('/') {
+        Some(local) if local.as_bytes().get(1) == Some(&b':') => local.replace('/', "\\"),
+        Some(_) => decoded.replace('/', "\\"),
+        // `file://server/share/...` names a UNC share.
+        None => format!(r"\\{}", decoded.replace('/', "\\")),
+    };
     Some(PathBuf::from(decoded))
 }
 
 pub(crate) fn path_to_file_uri(path: &Path) -> String {
-    let path = path.to_string_lossy().replace('\\', "/");
+    let path = path.to_string_lossy();
+    // `canonicalize` on Windows returns verbatim paths, `\\?\C:\...` and
+    // `\\?\UNC\server\share\...`, which name the same files as `C:\...`
+    // and `\\server\share\...` but are not valid in a file URI.
+    let path = if let Some(share) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{share}")
+    } else if let Some(local) = path.strip_prefix(r"\\?\") {
+        local.to_string()
+    } else {
+        path.into_owned()
+    };
+    let path = path.replace('\\', "/");
+    // A UNC share's server is the URI authority: `file://server/share/...`.
+    if let Some(share) = path.strip_prefix("//") {
+        return format!("file://{}", percent_encode(share));
+    }
     let prefix = if path.starts_with('/') {
         "file://"
     } else {
@@ -72,6 +88,36 @@ mod tests {
         } else {
             PathBuf::from("/tmp/Doria Project/Zoë.doria")
         };
+        assert_eq!(file_uri_to_path(&path_to_file_uri(&path)), Some(path));
+    }
+
+    #[test]
+    fn verbatim_and_unc_windows_paths_become_ordinary_file_uris() {
+        // `canonicalize` produces these on Windows; the URI must be the one the
+        // editor uses for the same file.
+        let uri = |path: &str| path_to_file_uri(Path::new(path));
+        assert_eq!(
+            uri(r"\\?\C:\Users\Andrew Masiye\tui-win\src\Core\Action.doria"),
+            "file:///C:/Users/Andrew%20Masiye/tui-win/src/Core/Action.doria"
+        );
+        assert_eq!(
+            uri(r"C:\Users\Andrew Masiye\tui-win\src\Core\Action.doria"),
+            "file:///C:/Users/Andrew%20Masiye/tui-win/src/Core/Action.doria"
+        );
+        assert_eq!(
+            uri(r"\\?\UNC\build-host\projects\tui-win\main.doria"),
+            "file://build-host/projects/tui-win/main.doria"
+        );
+        assert_eq!(
+            uri(r"\\build-host\projects\tui-win\main.doria"),
+            "file://build-host/projects/tui-win/main.doria"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unc_file_uris_round_trip() {
+        let path = PathBuf::from(r"\\build-host\projects\Zoë.doria");
         assert_eq!(file_uri_to_path(&path_to_file_uri(&path)), Some(path));
     }
 
