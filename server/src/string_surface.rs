@@ -160,13 +160,13 @@ pub(crate) const STRING_COMPANION_METHODS: &[StringMember] = &[
     ),
     string_method!(
         "padStart",
-        "String::padStart(string $text, int $length, string $padding): string",
-        "Pads the beginning to an exact grapheme length."
+        "String::padStart(string $text, int $length, string $padding = \" \"): string",
+        "Pads the beginning to an exact grapheme length; the padding defaults to one space."
     ),
     string_method!(
         "padEnd",
-        "String::padEnd(string $text, int $length, string $padding): string",
-        "Pads the end to an exact grapheme length."
+        "String::padEnd(string $text, int $length, string $padding = \" \"): string",
+        "Pads the end to an exact grapheme length; the padding defaults to one space."
     ),
     string_method!(
         "fromBytes",

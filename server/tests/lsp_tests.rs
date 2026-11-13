@@ -2603,6 +2603,20 @@ fn preserves_php_readline_migration_guidance() {
 }
 
 #[test]
+fn padding_without_a_padding_text_has_no_false_diagnostics() {
+    let source = r#"
+function main(): void
+{
+    echo String::padEnd("Doria", 8);
+    echo String::padStart("Doria", 8);
+}
+"#;
+    let name = "padding-default.doria";
+    doriac::check_source(name, source).unwrap();
+    assert_stored_source_diagnostics(name, source, None);
+}
+
+#[test]
 fn a_php_string_call_names_both_padding_operations() {
     let diagnostics = diagnostics_for_document(
         "file:///padding.doria",

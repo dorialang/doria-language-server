@@ -6,6 +6,9 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Pinned the compiler to `65cbe7c534672c53c256c4c5a83f1f19525ffaf5`, where the
+  padding argument of `String::padStart` and `String::padEnd` defaults to one
+  space. Their hovers show `string $padding = " "`.
 - Pinned the compiler to `1d8d0f14c89d092667ee5ad92dd76150de9b639c`. A call
   to a PHP string function now names its Doria spelling for 42 functions
   instead of seven: `str_pad` reports `String::padEnd` and `String::padStart`,
