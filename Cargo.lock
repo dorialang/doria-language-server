@@ -222,7 +222,7 @@ dependencies = [
 [[package]]
 name = "doria-diagnostic-catalogue"
 version = "2026.3.1-canary"
-source = "git+https://github.com/dorialang/doria?rev=340947d0143b4848c79a7f3a4da753c362048185#340947d0143b4848c79a7f3a4da753c362048185"
+source = "git+https://github.com/dorialang/doria?rev=825fa04db206d0a13d1642bec58c2a186a5f188b#825fa04db206d0a13d1642bec58c2a186a5f188b"
 
 [[package]]
 name = "doria-language-server"
@@ -236,12 +236,12 @@ dependencies = [
 [[package]]
 name = "doria-terminal"
 version = "2026.3.1-canary"
-source = "git+https://github.com/dorialang/doria?rev=340947d0143b4848c79a7f3a4da753c362048185#340947d0143b4848c79a7f3a4da753c362048185"
+source = "git+https://github.com/dorialang/doria?rev=825fa04db206d0a13d1642bec58c2a186a5f188b#825fa04db206d0a13d1642bec58c2a186a5f188b"
 
 [[package]]
 name = "doria-time"
 version = "2026.3.1-canary"
-source = "git+https://github.com/dorialang/doria?rev=340947d0143b4848c79a7f3a4da753c362048185#340947d0143b4848c79a7f3a4da753c362048185"
+source = "git+https://github.com/dorialang/doria?rev=825fa04db206d0a13d1642bec58c2a186a5f188b#825fa04db206d0a13d1642bec58c2a186a5f188b"
 dependencies = [
  "libc",
 ]
@@ -249,7 +249,7 @@ dependencies = [
 [[package]]
 name = "doria-unicode"
 version = "2026.3.1-canary"
-source = "git+https://github.com/dorialang/doria?rev=340947d0143b4848c79a7f3a4da753c362048185#340947d0143b4848c79a7f3a4da753c362048185"
+source = "git+https://github.com/dorialang/doria?rev=825fa04db206d0a13d1642bec58c2a186a5f188b#825fa04db206d0a13d1642bec58c2a186a5f188b"
 dependencies = [
  "icu_casemap",
  "icu_locale_core",
@@ -261,7 +261,7 @@ dependencies = [
 [[package]]
 name = "doriac"
 version = "2026.3.1-canary"
-source = "git+https://github.com/dorialang/doria?rev=340947d0143b4848c79a7f3a4da753c362048185#340947d0143b4848c79a7f3a4da753c362048185"
+source = "git+https://github.com/dorialang/doria?rev=825fa04db206d0a13d1642bec58c2a186a5f188b#825fa04db206d0a13d1642bec58c2a186a5f188b"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
