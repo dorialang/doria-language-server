@@ -6,15 +6,20 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
-- Pinned the compiler to `57cf798b22230339953b27387d559ac5e70e0e7b`. A PHP
+- Pinned the compiler to `8ce9ee56d5cd0ab3ae5cda23dd49e991219c69ce`. A PHP
   string call with a named argument, such as `substr("abc", offset: 1)`, is no
   longer offered the rename quick fix to `String::slice("abc", offset: 1)`,
   which would fail with E0516; the E0461 error and its Doria spelling are
   unchanged.
+  A diagnostic's documentation link now opens the versioned page on the
+  documentation host, `https://docs.dorialang.org/v2026.3.1/diagnostics/<code>`,
+  in place of `https://dorialang.org/docs/diagnostics/<code>`. The compiler
+  builds the link; the server passes it through.
   The pin also carries changes that do not reach the editor: a terminal wait
   no longer reports a timeout early to a caller waiting indefinitely, and the
-  compiler's diagnostic catalogue holds per-code documentation entries
-  (Decision 0145, `doriac explain`), which the server does not show yet.
+  compiler's diagnostic catalogue holds a documentation entry for every code
+  in use (Decision 0145, `doriac explain`), which the server does not show
+  yet.
 - Typing a lone `:` or `>`, as in `function render():` or `$a > $b`, no
   longer opens completion. Both are trigger characters only so that `::`
   and `->` do. At a type position (a return or parameter type, `catch (`,

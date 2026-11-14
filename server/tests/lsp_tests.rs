@@ -1336,8 +1336,11 @@ function main(): void {}
 }
 
 #[test]
-fn retired_finalizer_diagnostic_remains_catalogued_but_is_never_published() {
-    assert!(doriac::diagnostics::CATALOGUED_CODES.contains(&"E0632"));
+fn retired_finalizer_diagnostic_is_never_published() {
+    assert!(matches!(
+        doriac::diagnostic_entries::lookup("E0632"),
+        Err(doriac::diagnostic_entries::LookupError::Retired("E0632"))
+    ));
     let diagnostics = diagnostics_for_document(
         "file:///fallible-finalizer.doria",
         r#"function main(): void { try {} finally { echo "cleanup"; } }"#,
