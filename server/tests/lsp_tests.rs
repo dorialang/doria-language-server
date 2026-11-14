@@ -2674,6 +2674,35 @@ fn a_php_string_call_names_both_padding_operations() {
 }
 
 #[test]
+fn a_php_string_rename_is_offered_only_when_the_arguments_fit_the_companion() {
+    // Positional arguments fit `String::slice`, so renaming the call is the
+    // compiler's machine-applicable fix.
+    let positional = "function main(): void { echo substr(\"abc\", 1); }";
+    let actions = code_actions_for_document("file:///slice.doria", positional);
+    assert_eq!(actions.len(), 1, "{actions:#?}");
+    let published = actions[0].to_string();
+    assert!(published.contains("String::slice"), "{published}");
+
+    // A named argument carries PHP's parameter name, which the companion does
+    // not declare: the rename would not compile (E0516), so the error stays and
+    // no fix is offered. (`offset` is used because `string`, PHP's usual first
+    // parameter name, is a Doria type keyword and cannot name an argument.)
+    let named = "function main(): void { echo substr(\"abc\", offset: 1); }";
+    let diagnostics = diagnostics_for_document("file:///slice-named.doria", named);
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "E0461")
+        .unwrap_or_else(|| panic!("E0461 should be published: {diagnostics:#?}"));
+    assert_eq!(
+        diagnostic["data"]["fixes"],
+        serde_json::json!([]),
+        "{diagnostic:#}"
+    );
+    let actions = code_actions_for_document("file:///slice-named.doria", named);
+    assert!(actions.is_empty(), "{actions:#?}");
+}
+
+#[test]
 fn exposes_literal_brace_fix_data_at_original_source_span() {
     let text = "echo \"literal {word}\";";
     let diagnostics = diagnostics_for_document("file:///brace.doria", text);
