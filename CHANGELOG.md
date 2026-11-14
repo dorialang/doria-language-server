@@ -6,7 +6,7 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
-- Pinned the compiler to `825fa04db206d0a13d1642bec58c2a186a5f188b`. A PHP
+- Pinned the compiler to `57cf798b22230339953b27387d559ac5e70e0e7b`. A PHP
   string call with a named argument, such as `substr("abc", offset: 1)`, is no
   longer offered the rename quick fix to `String::slice("abc", offset: 1)`,
   which would fail with E0516; the E0461 error and its Doria spelling are
