@@ -1268,6 +1268,7 @@ impl Server {
             CompletionSite::Variable { start, end } => {
                 return self.variable_completions(&uri, document, start, end, offset);
             }
+            CompletionSite::Inert => return json!({ "isIncomplete": false, "items": [] }),
             CompletionSite::Type { .. } | CompletionSite::Other { .. } => {}
         }
         let mut completion = completion_items_with_analysis(&document.analysis, offset);
@@ -3504,6 +3505,11 @@ enum CompletionSite {
     /// Anywhere else. A binary operator keyword such as `xor` is valid only
     /// after a complete operand.
     Other { after_operand: bool },
+    /// Inside a comment or a string, or anywhere else the compiler's lexer
+    /// does not end a name at the cursor. Nothing completes here: offering
+    /// keywords while prose is typed lets Enter insert one the user never
+    /// meant.
+    Inert,
 }
 
 /// Whether a general-list item names a type usable at a type site: a class,
@@ -3721,15 +3727,14 @@ fn ends_operand(token: Option<&Token>) -> bool {
 }
 
 fn completion_site(path: &str, text: &str, offset: usize) -> CompletionSite {
-    const UNKNOWN: CompletionSite = CompletionSite::Other {
-        after_operand: false,
-    };
+    const UNKNOWN: CompletionSite = CompletionSite::Inert;
     let Some(before) = text.get(..offset) else {
         return UNKNOWN;
     };
     // A sentinel suffix makes the name at the cursor a token even when nothing
     // has been typed after `->`, `::`, or `$`. Inside a comment or a string no
-    // token ends at the sentinel, so those positions stay `Other`.
+    // token ends at the sentinel, and an unterminated one does not lex, so
+    // those positions are `Inert`.
     const SENTINEL: &str = "__doria_site";
     let Ok(tokens) = doriac::lex_source(path, format!("{before}{SENTINEL}")) else {
         return UNKNOWN;
@@ -6382,8 +6387,14 @@ function main(): void
             after_operand: false,
         };
         assert_eq!(site("let $x = xo"), unknown);
-        assert_eq!(site("// $this->"), unknown);
-        assert_eq!(site("echo \"$this->"), unknown);
+        assert_eq!(site("// $this->"), CompletionSite::Inert);
+        assert_eq!(site("echo \"$this->"), CompletionSite::Inert);
+        assert_eq!(site("/**\n * Represents a wi"), CompletionSite::Inert);
+        assert_eq!(
+            site("echo \"Terminating application: "),
+            CompletionSite::Inert
+        );
+        assert_eq!(site("echo \"done\"; // For demo"), CompletionSite::Inert);
         assert_eq!(
             site("if ($a x"),
             CompletionSite::Other {
@@ -6474,6 +6485,26 @@ function main(): void
             "position": { "line": position.line, "character": position.character },
             "context": context,
         })))
+    }
+
+    #[test]
+    fn nothing_completes_inside_comments_or_strings() {
+        // Typing prose must not open a keyword list: Enter at the end of the
+        // word would insert `writable` or `interface` the user never typed.
+        let source = "/**\n * Represents a window in the terminal user interface.\n */\nclass Window\n{\n    function run(): void\n    {\n        echo \"Terminating application: wi\";\n        $this->open(); // For demonstration, wi\n        ret\n    }\n}\n";
+        for marker in [
+            " * Represents a wi",
+            "Terminating application: wi",
+            "// For demonstration, wi",
+        ] {
+            assert!(
+                completions_while_typing(source, marker).is_empty(),
+                "`{marker}` should offer nothing"
+            );
+        }
+        // Code still completes: the statement being typed offers `return`.
+        let items = completions_while_typing(source, "        ret");
+        assert!(labels_of(&items).contains(&"return"));
     }
 
     #[test]

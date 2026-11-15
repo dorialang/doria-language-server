@@ -6,6 +6,12 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Completion offers nothing inside a comment or a string. Typing prose
+  opened the full keyword list, so Enter at the end of a word inserted
+  `writable`, `interface` or another keyword the user never typed. Replaying
+  the `tui` example one keystroke at a time, popups headed by an unwanted
+  keyword fell from 383 to 182, and words where Enter would insert a
+  different item from 7 to 1.
 - The JetBrains plugin ships a description for each of its intentions (Use
   import, Generate missing method, Generate missing function). Without them
   the IDE logged a SEVERE plugin error naming `DoriaImportIntention` and
