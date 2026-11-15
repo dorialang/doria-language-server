@@ -25,7 +25,6 @@ mod analysis;
 mod baton_discovery;
 mod file_uri;
 mod project;
-mod string_surface;
 mod workspace_graph;
 mod workspace_index;
 
@@ -34,9 +33,9 @@ use analysis::{
     MissingCallableTarget, SemanticCompletion, SemanticImport,
 };
 use baton_discovery::{baton_project_root, DiscoveryRequest, ProjectDiscovery};
+use doriac::string_surface::{self, StringMemberKind};
 use file_uri::file_uri_to_path;
 use project::{ProjectDocument, SourceEditPolicy};
-use string_surface::STRING_COMPANION_METHODS;
 use workspace_graph::{
     analyze_open_graph, analyze_project_graph, project_contains_source, GraphDocument, OpenSource,
 };
@@ -3447,14 +3446,18 @@ fn completion_items() -> Value {
             ),
         })
     }));
-    items.extend(STRING_COMPANION_METHODS.iter().map(|method| {
-        json!({
-            "label": format!("String::{}", method.name),
-            "kind": 3,
-            "detail": method.signature,
-            "documentation": method.documentation,
-        })
-    }));
+    items.extend(
+        string_surface::members(StringMemberKind::Companion)
+            .filter(|method| method.is_executable())
+            .map(|method| {
+                json!({
+                    "label": method.spelling(),
+                    "kind": 3,
+                    "detail": method.signature(),
+                    "documentation": method.documentation,
+                })
+            }),
+    );
     items.extend([
         json!({
             "label": "Int::toFloat",
@@ -4661,10 +4664,11 @@ fn intrinsic_companion_hover_at(tokens: &[Token], token_index: usize) -> Option<
     if companion != "String" {
         return None;
     }
-    let member = string_surface::string_companion_method(method)?;
+    let member = string_surface::companion(method)?;
     Some(format!(
         "```doria\n{}\n```\n\n{}",
-        member.signature, member.documentation
+        member.signature(),
+        member.documentation
     ))
 }
 
@@ -6023,10 +6027,14 @@ function main(): void
 
     #[test]
     fn completions_and_hover_expose_the_executable_string_surface() {
-        for method in STRING_COMPANION_METHODS {
-            let item = completion_item(&format!("String::{}", method.name));
-            assert_eq!(item["detail"], method.signature);
-            assert_eq!(item["documentation"], method.documentation);
+        for method in string_surface::members(StringMemberKind::Companion) {
+            if method.is_executable() {
+                let item = completion_item(&method.spelling());
+                assert_eq!(item["detail"], method.signature());
+                assert_eq!(item["documentation"], method.documentation);
+            } else {
+                assert!(!completion_labels().contains(&method.spelling()));
+            }
         }
         // String properties belong to a string receiver: they are offered after
         // `->` while the statement is still being typed, never as bare names.
@@ -6042,18 +6050,29 @@ function main(): void
                 .clone()
         };
         let bare = completion_labels();
-        for property in string_surface::STRING_PROPERTIES {
-            let item = member(property.name);
-            assert_eq!(item["detail"], property.signature);
-            assert_eq!(item["documentation"], property.documentation);
+        for property in string_surface::members(StringMemberKind::Property) {
             assert!(!bare.contains(&property.name.to_string()));
+            if !property.is_executable() {
+                // A pending member such as `codePoints` raises E0304.
+                assert!(members.iter().all(|item| item["label"] != property.name));
+                continue;
+            }
+            let item = member(property.name);
+            assert_eq!(item["detail"], property.signature());
+            assert_eq!(item["documentation"], property.documentation);
         }
+        assert_eq!(
+            members
+                .iter()
+                .filter(|item| item["label"] == "byteRegion")
+                .count(),
+            1
+        );
         let view = member("byteRegion");
         let intrinsic =
             doriac::byte_intrinsics::member(&doriac::types::ResolvedType::String, "byteRegion")
                 .unwrap();
         assert_eq!(view["kind"], 10);
-        assert_eq!(view["detail"], "Doria\\Std\\Io\\ByteRegion $byteRegion");
         assert_eq!(view["documentation"], intrinsic.documentation);
 
         let labels = completion_labels();

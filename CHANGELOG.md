@@ -6,12 +6,19 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
-- Pinned the compiler to `b0e4cb3e6c5dfb94baf28f652e75d5e6d3ddebee`. The
-  compiler accepts the String property `$text->displayWidth` (Decision 0146),
-  so it raises no error in the editor; PHP `mb_strwidth` reports E0461 with
-  the help "write `$text->displayWidth`". Hover and completion do not offer
-  `displayWidth` yet. A PHP
-  string call with a named argument, such as `substr("abc", offset: 1)`, is no
+- String hover and completion read the compiler's String surface table
+  (`doriac::string_surface`); the server's own copy is removed. After `->` on
+  a string, completion offers `displayWidth` (Decision 0146) and `graphemes`
+  (Decision 0147, an `Iterable<string>` of grapheme clusters) beside
+  `length`, `byteLength`, `isEmpty`, `bytes` and `byteRegion`, and hover
+  shows each one's declared signature and documentation. A member the
+  compiler accepts but does not run yet, `$text->codePoints`,
+  `String::compare` and `String::compareIgnoreCase`, is not offered. A
+  null-safe access such as `$text?->length` hovers as the declared
+  `int $length`.
+- Pinned the compiler to `2ac9a06869360f4be8252fc569230a2d43a4dc84`. PHP
+  `mb_strwidth` reports E0461 with the help "write `$text->displayWidth`". A
+  PHP string call with a named argument, such as `substr("abc", offset: 1)`, is no
   longer offered the rename quick fix to `String::slice("abc", offset: 1)`,
   which would fail with E0516; the E0461 error and its Doria spelling are
   unchanged.

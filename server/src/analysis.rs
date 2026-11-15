@@ -36,6 +36,7 @@ use doriac::semantics::{
     ObjectPathAccess, SemanticInfo,
 };
 use doriac::source::{SourceFile, SourceId, Span};
+use doriac::string_surface::{self, StringMemberKind};
 use doriac::symbols::{
     BindingKind, BindingOwnership, MemberKind as CompilerMemberKind, ReceiverMode,
 };
@@ -43,8 +44,6 @@ use doriac::testing::{SourceSemanticContext, TestSemanticFacts};
 use doriac::types::{
     ClassType, FunctionInvocationMode, ResolvedType, SharedHandleKind, TypeRef, TypeRegistry,
 };
-
-use crate::string_surface::{string_companion_method, string_property, STRING_PROPERTIES};
 
 mod property_hooks;
 use doriac::property_hooks::{member_callables, PropertyHookContext};
@@ -5671,10 +5670,10 @@ impl<'a> SnapshotBuilder<'a> {
                     return;
                 }
                 if matches!(qualifier, StaticQualifier::Class(class) if class == "String") {
-                    if let Some(member) = string_companion_method(method) {
+                    if let Some(member) = string_surface::companion(method) {
                         self.add_reference_symbol(
                             *member_span,
-                            member.signature.to_string(),
+                            member.signature(),
                             Some(member.documentation.to_string()),
                             SymbolKind::Plain,
                         );
@@ -5892,22 +5891,11 @@ impl<'a> SnapshotBuilder<'a> {
                     .is_some_and(|ty| matches!(non_nullable_type(ty), ResolvedType::String));
                 if is_string {
                     if let (Some(member), Some(property_span)) =
-                        (string_property(property), property_span)
+                        (string_surface::property(property), property_span)
                     {
-                        let return_type = self
-                            .semantic_info
-                            .and_then(|info| info.expression_type(*span))
-                            .map(display_resolved_type)
-                            .unwrap_or_else(|| {
-                                member
-                                    .signature
-                                    .split_once(' ')
-                                    .map_or("unknown", |(ty, _)| ty)
-                                    .to_string()
-                            });
                         self.add_reference_symbol(
                             property_span,
-                            format!("{return_type} ${property}"),
+                            member.signature(),
                             Some(member.documentation.to_string()),
                             SymbolKind::Variable,
                         );
@@ -7765,14 +7753,14 @@ fn byte_completions(
 }
 
 pub(crate) fn string_property_completions() -> Vec<SemanticCompletion> {
-    byte_completions(&ResolvedType::String, false, false)
-        .into_iter()
-        .chain(STRING_PROPERTIES.iter().map(|property| SemanticCompletion {
+    string_surface::members(StringMemberKind::Property)
+        .filter(|property| property.is_executable())
+        .map(|property| SemanticCompletion {
             label: property.name.to_string(),
             kind: 10,
-            detail: property.signature.to_string(),
+            detail: property.signature(),
             documentation: Some(property.documentation.to_string()),
-        }))
+        })
         .collect()
 }
 
@@ -12930,6 +12918,10 @@ function main(): void
     string $text = "Straße";
     int $length = $text->length;
     let $view = $text->byteRegion;
+    int $cells = $text->displayWidth;
+    foreach ($text->graphemes as string $grapheme) {
+        echo $grapheme;
+    }
     bool $found = String::containsIgnoreCase($text, "STRASSE");
     string $title = String::upperFirst("doria");
 }
@@ -12956,11 +12948,33 @@ function main(): void
             .unwrap();
         let intrinsic = byte_intrinsics::member(&ResolvedType::String, "byteRegion").unwrap();
         assert_eq!(view.kind, 10);
-        assert_eq!(view.detail, "Doria\\Std\\Io\\ByteRegion $byteRegion");
+        assert_eq!(
+            view.detail,
+            string_surface::property("byteRegion").unwrap().signature()
+        );
         assert_eq!(view.documentation.as_deref(), Some(intrinsic.documentation));
         assert!(hover.markdown.contains(&view.detail));
         assert!(hover.markdown.contains(intrinsic.documentation));
         assert!(completions.iter().any(|item| item.label == "bytes"));
+
+        for (property, signature) in [
+            ("displayWidth", "int $displayWidth"),
+            ("graphemes", "Iterable<string> $graphemes"),
+        ] {
+            let hover = snapshot
+                .hover_at_offset(source.find(&format!("->{property}")).unwrap() + 2)
+                .unwrap_or_else(|| panic!("`{property}` should have hover"));
+            assert!(hover.markdown.contains(signature), "{}", hover.markdown);
+            assert!(hover
+                .markdown
+                .contains(string_surface::property(property).unwrap().documentation));
+            // The view's classes live in a module source cannot name.
+            assert!(
+                !hover.markdown.contains("Doria\\Std\\Text"),
+                "{}",
+                hover.markdown
+            );
+        }
 
         let contains = snapshot
             .hover_at_offset(
