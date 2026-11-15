@@ -6,6 +6,10 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- The JetBrains plugin ships a description for each of its intentions (Use
+  import, Generate missing method, Generate missing function). Without them
+  the IDE logged a SEVERE plugin error naming `DoriaImportIntention` and
+  reported it as a plugin failure.
 - String hover and completion read the compiler's String surface table
   (`doriac::string_surface`); the server's own copy is removed. After `->` on
   a string, completion offers `displayWidth` (Decision 0146) and `graphemes`
