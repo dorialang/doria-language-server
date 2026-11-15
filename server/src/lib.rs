@@ -2722,18 +2722,36 @@ fn project_discovery_failure_notices(root_uri: &str, message: &str) -> Vec<(&'st
     )];
     let project = file_uri_to_path(root_uri).and_then(|path| baton_project_root(&path));
     if let Some(project) = project {
+        let fix = if cfg!(windows) && is_wsl_share_path(&project) {
+            // A Windows process reaches a WSL project only through the
+            // \\wsl.localhost share, where Windows cannot run Baton.
+            "The project is inside WSL and this language server runs on Windows, so Baton cannot run in the project. Open the project in an editor that runs the language server inside WSL (PhpStorm 2026.3 or later, or VS Code connected to WSL), with doria-lsp and baton installed in that distribution."
+        } else {
+            "After fixing it, refresh the project (JetBrains IDEs: Tools | Refresh Doria Project); a change to PATH or DORIA_BATON_PATH takes effect once the editor restarts."
+        };
         notices.push((
             "window/showMessage",
             json!({
                 "type": 2,
                 "message": format!(
-                    "Doria could not load the Baton project at {}, so names declared in files that are not open are reported as unknown. {sentence}. After fixing it, refresh the project (JetBrains IDEs: Tools | Refresh Doria Project); a change to PATH or DORIA_BATON_PATH takes effect once the editor restarts.",
+                    "Doria could not load the Baton project at {}, so names declared in files that are not open are reported as unknown. {sentence}. {fix}",
                     project.display()
                 ),
             }),
         ));
     }
     notices
+}
+
+/// Whether `path` is on the share Windows exposes a WSL distribution through,
+/// `\\wsl.localhost\<distribution>\...` or the older `\\wsl$\...`.
+fn is_wsl_share_path(path: &std::path::Path) -> bool {
+    let text = path.to_string_lossy().replace('/', "\\");
+    let text = text
+        .strip_prefix("\\\\?\\UNC\\")
+        .map_or(text.clone(), |rest| format!("\\\\{rest}"));
+    let lower = text.to_ascii_lowercase();
+    lower.starts_with("\\\\wsl.localhost\\") || lower.starts_with("\\\\wsl$\\")
 }
 
 fn uri_is_within(uri: &str, root: &str) -> bool {
@@ -6485,6 +6503,27 @@ function main(): void
             "position": { "line": position.line, "character": position.character },
             "context": context,
         })))
+    }
+
+    #[test]
+    fn a_wsl_share_is_recognized_in_every_spelling_windows_gives_it() {
+        use std::path::Path;
+        for path in [
+            r"\\wsl.localhost\Ubuntu-24.04\home\amasiye\tui",
+            r"\\WSL.LOCALHOST\Ubuntu-24.04\home",
+            r"\\wsl$\Ubuntu\home",
+            r"\\?\UNC\wsl.localhost\Ubuntu-24.04\home",
+            "//wsl.localhost/Ubuntu-24.04/home",
+        ] {
+            assert!(is_wsl_share_path(Path::new(path)), "{path}");
+        }
+        for path in [
+            r"C:\Users\Andrew Masiye\tui-win",
+            r"\\server\share\tui",
+            "/home/amasiye/tui",
+        ] {
+            assert!(!is_wsl_share_path(Path::new(path)), "{path}");
+        }
     }
 
     #[test]

@@ -530,10 +530,16 @@ function check_intellij_language_server_packaging(): void
             "IntelliJ packaging is missing the {$platform} language server"
         );
     }
+    // A local project prefers the bundled, compiler-matched server. A project
+    // in WSL or another environment cannot run a host binary, so only the
+    // local resolver carries this order.
+    $localStart = strpos($resolver, 'private fun resolveLocally(');
+    $local = $localStart === false ? '' : substr($resolver, $localStart);
     require_check(
         str_contains($resolver, 'resolve("bin").resolve(platform).resolve(executable)')
-            && strpos($resolver, 'bundledCandidate(') < strpos($resolver, 'cargoBinCandidates('),
-        'IntelliJ must resolve its bundled compiler-matched server before Cargo and PATH fallbacks'
+            && str_contains($local, 'bundledCandidate(')
+            && strpos($local, 'bundledCandidate(') < strpos($local, 'cargoBinCandidates('),
+        'IntelliJ must resolve its bundled compiler-matched server before Cargo and PATH fallbacks for a local project'
     );
     require_check(
         str_contains($gradle, "into 'bin'")

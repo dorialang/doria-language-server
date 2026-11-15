@@ -13,6 +13,7 @@ class DoriaLspServerPathResolverTest : TestCase() {
                 "CARGO_HOME" to "/cargo",
             ),
             "/home/test",
+            if (SystemInfo.isWindows) "doria-lsp.exe" else "doria-lsp",
         )
 
         assertEquals(
@@ -25,11 +26,25 @@ class DoriaLspServerPathResolverTest : TestCase() {
         val candidates = DoriaLspServerPathResolver.cargoBinCandidates(
             mapOf("CARGO_HOME" to "/cargo"),
             "/home/test",
+            if (SystemInfo.isWindows) "doria-lsp.exe" else "doria-lsp",
         )
 
         assertEquals(
             "/cargo/bin/${if (SystemInfo.isWindows) "doria-lsp.exe" else "doria-lsp"}",
             candidates.single().toString().replace('\\', '/'),
+        )
+    }
+
+    fun testOnlyBuild263AndLaterRunServersInsideTheProjectEnvironment() {
+        assertFalse(
+            DoriaLspServerPathResolver.platformRunsServersInProjectEnvironment(
+                com.intellij.openapi.util.BuildNumber.fromString("PS-262.11879.104")!!,
+            ),
+        )
+        assertTrue(
+            DoriaLspServerPathResolver.platformRunsServersInProjectEnvironment(
+                com.intellij.openapi.util.BuildNumber.fromString("PS-263.7307.215")!!,
+            ),
         )
     }
 

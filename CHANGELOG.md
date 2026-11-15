@@ -6,6 +6,18 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- A project inside WSL opened in a JetBrains IDE from build 263 (PhpStorm
+  2026.3) is served by the `doria-lsp` installed in that distribution
+  (`~/.cargo/bin/doria-lsp`, or a configured language server path inside
+  it). The IDE runs it there, so Baton discovery and file paths are the
+  distribution's own. The plugin used to hand WSL the Windows `doria-lsp.exe`,
+  which could not start (os error 2). When the distribution has no server, the
+  plugin reports how to install one. The Baton path setting applies only to
+  local projects; a WSL project finds `baton` on the distribution's PATH.
+  Earlier IDE builds still run the Windows server for a WSL project. Baton
+  cannot run on the `\\wsl.localhost` share, so the server's notice now
+  says to open WSL projects in PhpStorm 2026.3 or later, or in VS Code
+  connected to WSL.
 - The JetBrains plugin registers its five bundled file templates (Doria File,
   Class, Interface, Enum and Trait). Creating a Doria class or enum logged
   "Unknown bundled file template" as a SEVERE plugin error.
