@@ -6,6 +6,9 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- The JetBrains plugin registers its five bundled file templates (Doria File,
+  Class, Interface, Enum and Trait). Creating a Doria class or enum logged
+  "Unknown bundled file template" as a SEVERE plugin error.
 - Completion offers nothing inside a comment or a string. Typing prose
   opened the full keyword list, so Enter at the end of a word inserted
   `writable`, `interface` or another keyword the user never typed. Replaying

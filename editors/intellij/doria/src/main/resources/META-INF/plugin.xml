@@ -14,6 +14,12 @@
   <extensions defaultExtensionNs="com.intellij">
     <applicationService serviceImplementation="dev.doria.intellij.settings.DoriaSettings" />
 
+    <internalFileTemplate name="Doria File" />
+    <internalFileTemplate name="Doria Class" />
+    <internalFileTemplate name="Doria Interface" />
+    <internalFileTemplate name="Doria Enum" />
+    <internalFileTemplate name="Doria Trait" />
+
     <fileType
       name="Doria"
       language="doria"
