@@ -6,7 +6,11 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
-- Pinned the compiler to `8ce9ee56d5cd0ab3ae5cda23dd49e991219c69ce`. A PHP
+- Pinned the compiler to `b0e4cb3e6c5dfb94baf28f652e75d5e6d3ddebee`. The
+  compiler accepts the String property `$text->displayWidth` (Decision 0146),
+  so it raises no error in the editor; PHP `mb_strwidth` reports E0461 with
+  the help "write `$text->displayWidth`". Hover and completion do not offer
+  `displayWidth` yet. A PHP
   string call with a named argument, such as `substr("abc", offset: 1)`, is no
   longer offered the rename quick fix to `String::slice("abc", offset: 1)`,
   which would fail with E0516; the E0461 error and its Doria spelling are
