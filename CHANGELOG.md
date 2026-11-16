@@ -6,6 +6,37 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Completion asks the compiler what may be written at the cursor
+  (`doriac::syntax::completion_context`) and offers only the keywords its
+  parser accepts there. The server's token heuristics for completion sites,
+  type positions, operands and constructor parameters are removed, and so
+  is its own keyword list. Typing a statement no longer offers `class` or
+  `xor`; after a complete operand only operators are offered; after
+  `class Window` only `extends` and `implements`; at a name being declared
+  no existing name. Replaying the `tui` example one keystroke at a time,
+  popups headed by a keyword the user was not typing fell from 182 to 6,
+  each a tie where both words fit the typed prefix (`c` for `class` and
+  `const`), and no word ends with Enter inserting something else.
+  `break` and `continue` are offered only inside a loop, and constructor
+  roles (`internal`, `override`, `parameter`) only in a constructor's
+  parameters. After `?`, in type arguments and at every other type
+  position, types are offered, and after `new` only class types.
+  - Removed: the words the compiler does not lex as keywords are no longer
+    offered. These are `async`, `await`, `spawn` and `scope` (reserved) and
+    `unsafe`, `extern`, `get`, `set` and `declare` (not Doria words). The
+    "planned Doria keyword" detail is gone with them.
+  - Removed: `object` and `resource` are no longer offered, `void` only as
+    a return type, and `null` only where an expression may begin.
+- After `use`, `namespace` or a `\`, completion offers the next segment of
+  the names the document can reach: the package's namespaces and
+  declarations, and the compiler-known standard-library symbols. A
+  `namespace` declaration's name offers namespace segments only. It used to
+  offer the general list there.
+- Hover and signature help for `Doria\Std\Term` show the public
+  constructors `new Size(int $columns, int $rows)`,
+  `new Position(int $column, int $row)` and
+  `new KeyModifiers(bool $control, bool $alt, bool $shift)`, and static
+  completion on `KeyModifiers::` offers `none`.
 - A project inside WSL opened in a JetBrains IDE from build 263 (PhpStorm
   2026.3) is served by the `doria-lsp` installed in that distribution
   (`~/.cargo/bin/doria-lsp`, or a configured language server path inside

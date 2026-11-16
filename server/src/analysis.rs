@@ -7124,11 +7124,11 @@ pub(crate) const WATCH_KEY_DOCUMENTATION: &str = "**Identity:** Opaque, non-owni
 
 pub(crate) const WATCH_SOURCE_DOCUMENTATION: &str = "**Role:** Opaque value by which a Watchable source tells the runtime what to watch. It has no public constructor or member, and a program has no use for it: pass the source itself to TransferPlan::watch or andWatch. Copying it does not borrow the source or start a watch. Only the standard library implements Watchable; E0781 rejects a program's own implementation.";
 
-pub(crate) const TERMINAL_SIZE_DOCUMENTATION: &str = "**Terminal Size:** The columns and rows of the terminal window, read through readonly `columns` and `rows`. Returned by Console::getSize() and carried by TerminalEvent::Resized.";
+pub(crate) const TERMINAL_SIZE_DOCUMENTATION: &str = "**Terminal Size:** The columns and rows of the terminal window, read through readonly `columns` and `rows`. Built with `new Size(int $columns, int $rows)`, returned by Console::getSize(), and carried by TerminalEvent::Resized. A negative count panics, and a count above 16,777,215 is held as 16,777,215.";
 
-pub(crate) const TERMINAL_POSITION_DOCUMENTATION: &str = "**Terminal Position:** One cell of the terminal, column first and zero-based, with (0, 0) at the top left; read through readonly `column` and `row`. Returned by RawMode::getCursorPosition().";
+pub(crate) const TERMINAL_POSITION_DOCUMENTATION: &str = "**Terminal Position:** One cell of the terminal, column first and zero-based, with (0, 0) at the top left; read through readonly `column` and `row`. Built with `new Position(int $column, int $row)` and returned by RawMode::getCursorPosition(). A negative column or row panics, and one above 16,777,215 is held as 16,777,215.";
 
-pub(crate) const KEY_MODIFIERS_DOCUMENTATION: &str = "**Key Modifiers:** Which of Control, Alt, and Shift were held with a key, read through readonly `control`, `alt`, and `shift`. Carried by TerminalEvent::Key.";
+pub(crate) const KEY_MODIFIERS_DOCUMENTATION: &str = "**Key Modifiers:** Which of Control, Alt, and Shift were held with a key, read through readonly `control`, `alt`, and `shift`. Built with `new KeyModifiers(bool $control, bool $alt, bool $shift)`; `KeyModifiers::none` holds none. Carried by TerminalEvent::Key.";
 
 pub(crate) const TERMINAL_STYLE_DOCUMENTATION: &str = "**Style:** How one Console write looks. Start from Style::plain and build with withForeground, withBackground, withBold, withDim, withItalic, withUnderline, withReverse, and withStrikethrough; each returns a changed copy. A style belongs to one write and leaves nothing set on the terminal. A color the terminal cannot show is drawn as the nearest it can, and redirected output receives the text alone.";
 
@@ -10779,6 +10779,55 @@ function inspect({key} $key, ?{outcome} $outcome): void {{
                 "{needle}: {hover:?}"
             );
         }
+    }
+
+    #[test]
+    fn terminal_values_offer_their_public_constructors() {
+        let source = "use Doria\\Std\\Term\\{KeyModifiers, Position, Size};\n\nfunction main(): int\n{\n    let $size = new Size(80, 24);\n    let $at = new Position(column: 5, row: 2);\n    let $chord = new KeyModifiers(true, false, true);\n    let $none = KeyModifiers::none;\n    return $size->columns + $at->row;\n}\n";
+        let snapshot = AnalysisSnapshot::analyze("term-constructors.doria", source);
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
+        );
+        for (call, label) in [
+            ("new Size(", "(parameter int $columns, parameter int $rows)"),
+            (
+                "new Position(",
+                "(parameter int $column, parameter int $row)",
+            ),
+            (
+                "new KeyModifiers(",
+                "(parameter bool $control, parameter bool $alt, parameter bool $shift)",
+            ),
+        ] {
+            let offset = source.find(call).unwrap() + call.len();
+            let help = snapshot.signature_help_at_offset(offset).unwrap();
+            assert!(
+                help.iter().any(|signature| signature.label.contains(label)),
+                "{call}: {:?}",
+                help.iter()
+                    .map(|signature| &signature.label)
+                    .collect::<Vec<_>>()
+            );
+        }
+        let offset = source.find("KeyModifiers::none").unwrap() + "KeyModifiers::".len();
+        let labels = snapshot
+            .static_completions_at_offset(offset)
+            .unwrap()
+            .into_iter()
+            .map(|completion| completion.label)
+            .collect::<Vec<_>>();
+        assert!(labels.iter().any(|label| label == "none"), "{labels:?}");
+        // The factories behind the constructors are internal.
+        assert!(
+            !labels.iter().any(|label| label == "fromParts"),
+            "{labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|label| label == "fromBits"),
+            "{labels:?}"
+        );
     }
 
     #[test]

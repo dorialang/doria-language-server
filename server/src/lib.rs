@@ -19,6 +19,7 @@ use doriac::names::{
     CompilationContext, Edition, GlobalSymbolKind, PackageIdentity, SourceIdentity,
 };
 use doriac::source::{SourceId, Span};
+use doriac::syntax::CompletionContext;
 use doriac::testing::SourceSemanticContext;
 
 mod analysis;
@@ -1257,133 +1258,159 @@ impl Server {
                 return semantic_completion_items(completions);
             }
         }
-        let site = completion_site(&uri, &document.text, offset);
-        match site {
-            CompletionSite::Member { start, end } => {
+        // The compiler's parser says what may be written at the cursor and
+        // which keywords it accepts there.
+        let at = doriac::syntax::completion_context(&uri, &document.text, offset);
+        let start = at.replace.start;
+        let end = offset
+            + document.text[offset..]
+                .chars()
+                .take_while(|character| is_identifier_character(*character))
+                .map(char::len_utf8)
+                .sum::<usize>();
+        let names = match &at.context {
+            CompletionContext::None => return json!({ "isIncomplete": false, "items": [] }),
+            CompletionContext::Member => {
                 return self.member_access_completions(&uri, document, start, end, offset);
             }
-            CompletionSite::Static { start, end } => {
+            CompletionContext::Static { .. } => {
                 return self.static_access_completions(&uri, document, start, end, offset);
             }
-            CompletionSite::Variable { start, end } => {
+            CompletionContext::Variable => {
                 return self.variable_completions(&uri, document, start, end, offset);
             }
-            CompletionSite::Inert => return json!({ "isIncomplete": false, "items": [] }),
-            CompletionSite::Type { .. } | CompletionSite::Other { .. } => {}
+            CompletionContext::NamespacePath {
+                qualifier,
+                declarations_allowed,
+            } => {
+                return indexed_completion_items(self.document_index.namespace_path_completions(
+                    &uri,
+                    qualifier,
+                    *declarations_allowed,
+                ));
+            }
+            CompletionContext::TopLevel
+            | CompletionContext::Statement { .. }
+            | CompletionContext::Expression {
+                after_operand: false,
+            } => CompletionNames::All,
+            CompletionContext::MemberDeclaration => CompletionNames::Types,
+            CompletionContext::Type {
+                new_expression: true,
+                ..
+            } => CompletionNames::Classes,
+            CompletionContext::Type { .. } => CompletionNames::Types,
+            CompletionContext::Expression {
+                after_operand: true,
+            }
+            | CompletionContext::DeclarationName
+            | CompletionContext::Continuation => CompletionNames::None,
+        };
+        let mut items = Vec::new();
+        if names != CompletionNames::None {
+            items = self.name_completions(&uri, document, offset, &at, end, contract_context);
+            items.retain(|item| names.admits(item));
         }
-        let mut completion = completion_items_with_analysis(&document.analysis, offset);
-        if let Some(items) = completion.get_mut("items").and_then(Value::as_array_mut) {
-            let mut labels = items
+        let mut labels = items
+            .iter()
+            .filter_map(|item| item.get("label").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect::<HashSet<_>>();
+        items.extend(
+            at.keywords
                 .iter()
-                .filter_map(|item| item.get("label").and_then(Value::as_str))
-                .map(str::to_string)
-                .collect::<std::collections::HashSet<_>>();
-            if let Some((kind, depth)) = contract_context.filter(|(_, depth)| *depth > 0) {
-                for name in contract_argument_type_parameters(&document.text, offset, kind, depth) {
-                    if labels.insert(name.clone()) {
-                        items.push(
-                            json!({ "label": name, "kind": 25, "detail": "Doria type parameter" }),
-                        );
-                    }
+                .filter(|keyword| labels.insert((*keyword).to_string()))
+                .map(|keyword| keyword_completion_item(keyword)),
+        );
+        json!({ "isIncomplete": false, "items": items })
+    }
+
+    /// The names, but no keywords, valid where no receiver precedes the
+    /// cursor: types, functions, constants, locals, and the declarations and
+    /// imports of the project and of the document being typed.
+    fn name_completions(
+        &self,
+        uri: &str,
+        document: &Document,
+        offset: usize,
+        at: &doriac::syntax::CursorCompletion,
+        end: usize,
+        contract_context: Option<(GlobalSymbolKind, usize)>,
+    ) -> Vec<Value> {
+        let mut items = name_completion_items(&document.analysis, offset);
+        let mut labels = items
+            .iter()
+            .filter_map(|item| item.get("label").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect::<HashSet<_>>();
+        if let Some((kind, depth)) = contract_context.filter(|(_, depth)| *depth > 0) {
+            for name in contract_argument_type_parameters(&document.text, offset, kind, depth) {
+                if labels.insert(name.clone()) {
+                    items.push(
+                        json!({ "label": name, "kind": 25, "detail": "Doria type parameter" }),
+                    );
                 }
             }
-            let constructor_role_context =
-                constructor_parameter_role_completion_context(&document.text, offset);
-            if constructor_role_context && labels.insert("parameter".to_string()) {
-                items.push(json!({
-                    "label": "parameter",
-                    "kind": 14,
-                    "detail": "Doria constructor-parameter role",
-                    "documentation": "Declares a constructor-only input. It remains in the constructor signature and body but creates no property or object storage.",
-                }));
-            }
-            // While a declaration or statement is being typed the file does not
-            // parse, and the index has none of its declarations or imports.
-            // Its own classes, interfaces, enums, and functions, and the names
-            // it imports, come from the smallest repair the compiler parser
-            // accepts.
-            if doriac::parse_source(uri.as_str(), document.text.as_str()).is_err() {
-                let (start, end) = identifier_around(&document.text, offset);
-                let placeholder = match site {
-                    // `new` takes a class and its arguments.
-                    CompletionSite::Type {
-                        new_expression: true,
-                        ..
-                    } => "__DoriaCompletionType()",
-                    CompletionSite::Type { .. } => "__DoriaCompletionType",
-                    _ => COMPLETION_PLACEHOLDER,
-                };
-                if let Some(source) =
-                    repaired_completion_source(&uri, &document.text, start, end, placeholder)
+        }
+        // While a declaration or statement is being typed the file does not
+        // parse, and the index has none of its declarations or imports.
+        // Its own classes, interfaces, enums, and functions, and the names
+        // it imports, come from the smallest repair the compiler parser
+        // accepts.
+        if doriac::parse_source(uri, document.text.as_str()).is_err() {
+            let placeholder = match at.context {
+                // `new` takes a class and its arguments.
+                CompletionContext::Type {
+                    new_expression: true,
+                    ..
+                } => "__DoriaCompletionType()",
+                CompletionContext::Type { .. } => "__DoriaCompletionType",
+                _ => COMPLETION_PLACEHOLDER,
+            };
+            if let Some(source) =
+                repaired_completion_source(uri, &document.text, at.replace.start, end, placeholder)
+            {
+                let analysis = self.analyze_completion_source(uri, document, &source);
+                for declaration in &analysis.global_symbols().declarations {
+                    if declaration.name_span.source != analysis.source_id()
+                        || !labels.insert(declaration.source_name.clone())
+                    {
+                        continue;
+                    }
+                    let candidate = workspace_index::declaration_completion(declaration);
+                    items.push(json!({
+                        "label": candidate.label,
+                        "kind": candidate.kind,
+                        "detail": candidate.detail,
+                    }));
+                }
+                for candidate in self
+                    .document_index
+                    .import_completions(analysis.global_symbols(), analysis.source_id())
                 {
-                    let analysis = self.analyze_completion_source(&uri, document, &source);
-                    for declaration in &analysis.global_symbols().declarations {
-                        if declaration.name_span.source != analysis.source_id()
-                            || !labels.insert(declaration.source_name.clone())
-                        {
-                            continue;
-                        }
-                        let candidate = workspace_index::declaration_completion(declaration);
+                    if labels.insert(candidate.label.clone()) {
                         items.push(json!({
                             "label": candidate.label,
                             "kind": candidate.kind,
                             "detail": candidate.detail,
                         }));
                     }
-                    for candidate in self
-                        .document_index
-                        .import_completions(analysis.global_symbols(), analysis.source_id())
-                    {
-                        if labels.insert(candidate.label.clone()) {
-                            items.push(json!({
-                                "label": candidate.label,
-                                "kind": candidate.kind,
-                                "detail": candidate.detail,
-                            }));
-                        }
-                    }
                 }
-            }
-            for candidate in self.document_index.completions(&uri) {
-                if labels.insert(candidate.label.clone()) {
-                    items.push(json!({
-                        "label": candidate.label,
-                        "kind": candidate.kind,
-                        "detail": candidate.detail,
-                        "documentation": candidate.documentation,
-                        "insertText": candidate.insert_text,
-                        "insertTextFormat": if candidate.snippet { 2 } else { 1 },
-                    }));
-                }
-            }
-            match site {
-                CompletionSite::Type {
-                    new_expression,
-                    parameter,
-                } => {
-                    items.retain(|item| {
-                        is_type_item(item, new_expression)
-                            || (parameter
-                                && item["kind"] == 14
-                                && item["label"].as_str().is_some_and(|label| {
-                                    PARAMETER_MODIFIERS.contains(&label)
-                                        || (constructor_role_context
-                                            && CONSTRUCTOR_PARAMETER_ROLES.contains(&label))
-                                }))
-                    });
-                }
-                CompletionSite::Other {
-                    after_operand: false,
-                } => items.retain(|item| {
-                    !(item["kind"] == 14
-                        && item["label"]
-                            .as_str()
-                            .is_some_and(|label| BINARY_OPERATOR_KEYWORDS.contains(&label)))
-                }),
-                _ => {}
             }
         }
-        completion
+        for candidate in self.document_index.completions(uri) {
+            if labels.insert(candidate.label.clone()) {
+                items.push(json!({
+                    "label": candidate.label,
+                    "kind": candidate.kind,
+                    "detail": candidate.detail,
+                    "documentation": candidate.documentation,
+                    "insertText": candidate.insert_text,
+                    "insertTextFormat": if candidate.snippet { 2 } else { 1 },
+                }));
+            }
+        }
+        items
     }
 
     /// Analyze a repaired copy of `document` with the same project and source
@@ -3269,86 +3296,90 @@ fn initialize_result() -> Value {
     })
 }
 
-/// The names valid where no receiver precedes the cursor: keywords, types,
-/// and global functions. Members such as `toString`, `length`, and `share`
-/// belong to a receiver, so they are offered only after `->`, where the
-/// receiver's type decides which apply.
+/// Every keyword and every name valid where no receiver precedes the cursor,
+/// for a request that names no position.
 fn completion_items() -> Value {
-    let keywords = [
-        "class",
-        "interface",
-        "trait",
-        "extends",
-        "implements",
-        "function",
-        "let",
-        "take",
-        "borrow",
-        "writable",
-        "readonly",
-        "internal",
-        "return",
-        "echo",
-        "new",
-        "namespace",
-        "use",
-        "uses",
-        "as",
-        "include",
-        "declare",
-        "foreach",
-        "if",
-        "else",
-        "while",
-        "for",
-        "break",
-        "continue",
-        "static",
-        "self",
-        "parent",
-        "const",
-        "not",
-        "and",
-        "or",
-        "xor",
-        "true",
-        "false",
-        "null",
-        "throw",
-        "throws",
-        "try",
-        "catch",
-        "finally",
-        "when",
-        "given",
-        "is",
-        "default",
-        "do",
-        "fn",
-        "get",
-        "set",
-        "insteadof",
-        "shared",
-        "spawn",
-        "scope",
-        "enum",
-        "case",
-        "match",
-        "async",
-        "await",
-        "unsafe",
-        "extern",
-        "open",
-        "override",
-        "with",
-        "take",
-        "once",
-    ];
-    let planned_keywords = [
-        "async", "await", "unsafe", "extern", "get", "set", "spawn", "scope",
-    ];
-    let types = BUILT_IN_TYPES;
-    let reserved_types = ["resource"];
+    let mut items = name_completion_list();
+    items.extend(
+        doriac::lexer::KEYWORDS
+            .iter()
+            .map(|keyword| keyword_completion_item(keyword)),
+    );
+    json!({
+        "isIncomplete": false,
+        "items": items,
+    })
+}
+
+/// The item for a keyword the compiler accepts at the cursor. A keyword that
+/// names a type is offered as that type.
+fn keyword_completion_item(keyword: &str) -> Value {
+    if BUILT_IN_TYPES.contains(&keyword) {
+        return type_completion_item(keyword);
+    }
+    let mut item = json!({
+        "label": keyword,
+        "kind": 14,
+        "detail": "Doria keyword",
+    });
+    match keyword {
+        "resource" => {
+            item["kind"] = json!(25);
+            item["detail"] = json!("Reserved Doria type name");
+        }
+        "borrow" => {
+            item["documentation"] = json!(hover_description(&TokenKind::Borrow));
+        }
+        "fn" => {
+            item["detail"] = json!("Doria arrow-closure keyword");
+            item["documentation"] = json!("Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. The compiler checks closure signatures, captures, ownership, invocation mode, checked effects, and escape.");
+        }
+        "with" => {
+            item["detail"] = json!("Doria closure-capture keyword");
+            item["documentation"] = json!("Introduces an explicit closure capture list. A bare capture is readonly, `writable` requests exclusive writable access, and `take` transfers ownership. The compiler validates capture names, modes, ownership, lifetimes, and escape.");
+        }
+        "once" => {
+            item["detail"] = json!("Doria function-type invocation modifier");
+            item["documentation"] = json!("Marks a structural function type as consuming and one-shot. Calling a value of this type consumes the function value. The compiler infers and enforces closure invocation modes.");
+        }
+        "parameter" => {
+            item["detail"] = json!("Doria constructor-parameter role");
+            item["documentation"] = json!("Declares a constructor-only input. It remains in the constructor signature and body but creates no property or object storage.");
+        }
+        _ => {}
+    }
+    item
+}
+
+/// The item for a built-in type name.
+fn type_completion_item(ty: &str) -> Value {
+    let mut item = json!({
+        "label": ty,
+        "kind": 25,
+        "detail": "Doria type",
+    });
+    if let Some(documentation) = integer_type_description(ty) {
+        item["detail"] = json!("implemented Doria integer type");
+        item["documentation"] = json!(documentation);
+    }
+    if let Some(documentation) = scalar_runtime_type_description(ty) {
+        item["detail"] = json!("implemented Doria scalar type");
+        item["documentation"] = json!(documentation);
+    }
+    if let Some(documentation) = shared_ownership_type_description(ty) {
+        item["detail"] = json!("compiler-known Doria shared-ownership type");
+        item["documentation"] = json!(documentation);
+    }
+    item
+}
+
+/// The names, but no keywords, valid where no receiver precedes the cursor:
+/// types and global functions. Members such as `toString`, `length`, and
+/// `share` belong to a receiver, so they are offered only after `->`, where
+/// the receiver's type decides which apply. A built-in type that the lexer
+/// reads as a keyword, such as `int`, is offered only where the compiler
+/// accepts that keyword.
+fn name_completion_list() -> Vec<Value> {
     let integer_conversions = [
         ("Int::from", "int (the int64 alias)"),
         ("Int8::from", "int8"),
@@ -3361,65 +3392,11 @@ fn completion_items() -> Value {
         ("UInt64::from", "uint64"),
     ];
 
-    let mut items = Vec::new();
-    items.extend(keywords.into_iter().map(|keyword| {
-        let planned = planned_keywords.contains(&keyword);
-        let mut item = json!({
-            "label": keyword,
-            "kind": 14,
-            "detail": if planned { "planned Doria keyword" } else { "Doria keyword" },
-        });
-        match keyword {
-            "borrow" => {
-                item["documentation"] = json!(hover_description(&TokenKind::Borrow));
-            }
-            "fn" => {
-                item["detail"] = json!("Doria arrow-closure keyword");
-                item["documentation"] = json!("Declares an arrow closure. Parameters are explicitly typed and the return type is inferred from the expression body. Enclosing locals must be listed explicitly in a `with` clause. The compiler checks closure signatures, captures, ownership, invocation mode, checked effects, and escape.");
-            }
-            "with" => {
-                item["detail"] = json!("Doria closure-capture keyword");
-                item["documentation"] = json!("Introduces an explicit closure capture list. A bare capture is readonly, `writable` requests exclusive writable access, and `take` transfers ownership. The compiler validates capture names, modes, ownership, lifetimes, and escape.");
-            }
-            "once" => {
-                item["detail"] = json!("Doria function-type invocation modifier");
-                item["documentation"] = json!("Marks a structural function type as consuming and one-shot. Calling a value of this type consumes the function value. The compiler infers and enforces closure invocation modes.");
-            }
-            _ if planned => {
-                item["documentation"] =
-                    json!("Accepted planned Doria syntax; compiler support lands in a later stage.");
-            }
-            _ => {}
-        }
-        item
-    }));
-    items.extend(types.into_iter().map(|ty| {
-        let mut item = json!({
-            "label": ty,
-            "kind": 25,
-            "detail": "Doria type",
-        });
-        if let Some(documentation) = integer_type_description(ty) {
-            item["detail"] = json!("implemented Doria integer type");
-            item["documentation"] = json!(documentation);
-        }
-        if let Some(documentation) = scalar_runtime_type_description(ty) {
-            item["detail"] = json!("implemented Doria scalar type");
-            item["documentation"] = json!(documentation);
-        }
-        if let Some(documentation) = shared_ownership_type_description(ty) {
-            item["detail"] = json!("compiler-known Doria shared-ownership type");
-            item["documentation"] = json!(documentation);
-        }
-        item
-    }));
-    items.extend(reserved_types.into_iter().map(|ty| {
-        json!({
-            "label": ty,
-            "kind": 25,
-            "detail": "Reserved Doria type name",
-        })
-    }));
+    let mut items = BUILT_IN_TYPES
+        .into_iter()
+        .filter(|ty| doriac::lexer::keyword_kind(ty).is_none())
+        .map(type_completion_item)
+        .collect::<Vec<_>>();
     items.push(json!({
         "label": "Displayable",
         "kind": 8,
@@ -3491,43 +3468,36 @@ fn completion_items() -> Value {
             "documentation": "Truncates canonical `float`/`float64` toward zero to canonical `int`/`int64`; NaN, infinity, and out-of-range values panic.",
         }),
     ]);
-
-    json!({
-        "isIncomplete": false,
-        "items": items,
-    })
+    items
 }
 
 /// A member name no Doria program can declare, used to stand in for the name
 /// being typed so that the compiler can analyze the unfinished expression.
 const COMPLETION_PLACEHOLDER: &str = "__doria_completion";
 
-/// Where a completion request sits. It is read from compiler tokens, not from
-/// whether the buffer parses: while a name is being typed it usually does not,
-/// and the request must still know that `$this->x` wants a member of `$this`.
-/// `start..end` is the partial name around the cursor.
+/// Which names, besides the keywords the compiler accepts, a completion
+/// context admits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CompletionSite {
-    /// A member name after `->` or `?->`.
-    Member { start: usize, end: usize },
-    /// A static member, enum case, or adaptation target after `::`.
-    Static { start: usize, end: usize },
-    /// A `$` variable name; `start` is the `$`.
-    Variable { start: usize, end: usize },
-    /// A type: a return or parameter type, or the class after `new`, which
-    /// must be a class. Before a parameter's type its modifiers are valid too.
-    Type {
-        new_expression: bool,
-        parameter: bool,
-    },
-    /// Anywhere else. A binary operator keyword such as `xor` is valid only
-    /// after a complete operand.
-    Other { after_operand: bool },
-    /// Inside a comment or a string, or anywhere else the compiler's lexer
-    /// does not end a name at the cursor. Nothing completes here: offering
-    /// keywords while prose is typed lets Enter insert one the user never
-    /// meant.
-    Inert,
+enum CompletionNames {
+    /// Any name: an expression or statement may start here.
+    All,
+    /// Names of types: a class, interface, enum, record, or built-in type.
+    Types,
+    /// Classes, the only types `new` constructs.
+    Classes,
+    /// No names: only keywords may follow.
+    None,
+}
+
+impl CompletionNames {
+    fn admits(self, item: &Value) -> bool {
+        match self {
+            Self::All => true,
+            Self::Types => is_type_item(item, false),
+            Self::Classes => is_type_item(item, true),
+            Self::None => false,
+        }
+    }
 }
 
 /// Whether a general-list item names a type usable at a type site: a class,
@@ -3580,218 +3550,6 @@ const BUILT_IN_TYPES: [&str; 30] = [
     "ReadonlySharedReferenceAccess",
     "WritableSharedReferenceAccess",
 ];
-
-/// Modifiers any parameter may be declared with, before its type.
-const PARAMETER_MODIFIERS: [&str; 3] = ["take", "borrow", "writable"];
-
-/// Roles only a constructor parameter may be declared with.
-const CONSTRUCTOR_PARAMETER_ROLES: [&str; 3] = ["internal", "parameter", "override"];
-
-/// The identifier characters around `offset`: the partial name being typed.
-fn identifier_around(text: &str, offset: usize) -> (usize, usize) {
-    let start = offset
-        - text[..offset]
-            .chars()
-            .rev()
-            .take_while(|character| is_identifier_character(*character))
-            .map(char::len_utf8)
-            .sum::<usize>();
-    let end = offset
-        + text[offset..]
-            .chars()
-            .take_while(|character| is_identifier_character(*character))
-            .map(char::len_utf8)
-            .sum::<usize>();
-    (start, end)
-}
-
-/// Keywords that join two operands, so they never begin an expression.
-const BINARY_OPERATOR_KEYWORDS: [&str; 5] = ["and", "or", "xor", "is", "as"];
-
-/// Declaration modifiers that may precede a parameter's type.
-fn is_parameter_modifier(kind: &TokenKind) -> bool {
-    matches!(
-        kind,
-        TokenKind::Take
-            | TokenKind::Borrow
-            | TokenKind::Writable
-            | TokenKind::Internal
-            | TokenKind::Parameter
-            | TokenKind::Override
-            | TokenKind::Readonly
-    )
-}
-
-/// The type site `previous` (nearest token first) leaves the cursor at, if any.
-fn is_type_position(previous: &[&Token]) -> Option<CompletionSite> {
-    const TYPE: CompletionSite = CompletionSite::Type {
-        new_expression: false,
-        parameter: false,
-    };
-    let mut index = 0;
-    if matches!(
-        previous.first().map(|token| &token.kind),
-        Some(TokenKind::Question)
-    ) {
-        index += 1;
-    }
-    match &previous.get(index)?.kind {
-        TokenKind::New => {
-            return Some(CompletionSite::Type {
-                new_expression: true,
-                parameter: false,
-            })
-        }
-        // A return type: the `)` closes a declaration's parameter list, not a
-        // call in a ternary such as `$a ? f() : `.
-        TokenKind::Colon => {
-            if !matches!(
-                previous.get(index + 1).map(|token| &token.kind),
-                Some(TokenKind::RightParen)
-            ) {
-                return None;
-            }
-            let mut depth = 0_usize;
-            for (position, token) in previous.iter().enumerate().skip(index + 1) {
-                match token.kind {
-                    TokenKind::RightParen => depth += 1,
-                    TokenKind::LeftParen => {
-                        depth -= 1;
-                        if depth == 0 {
-                            return opens_declared_parameters(previous, position).then_some(TYPE);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            return None;
-        }
-        TokenKind::Throws | TokenKind::Is => return Some(TYPE),
-        TokenKind::LeftParen
-            if matches!(
-                previous.get(index + 1).map(|token| &token.kind),
-                Some(TokenKind::Catch)
-            ) =>
-        {
-            return Some(TYPE);
-        }
-        _ => {}
-    }
-    // A parameter type: after `(` or `,` of a function declaration's
-    // parameter list, past any parameter modifiers.
-    while previous
-        .get(index)
-        .is_some_and(|token| is_parameter_modifier(&token.kind))
-    {
-        index += 1;
-    }
-    if !matches!(
-        previous.get(index).map(|token| &token.kind),
-        Some(TokenKind::LeftParen | TokenKind::Comma)
-    ) {
-        return None;
-    }
-    let mut depth = 0_usize;
-    for (position, token) in previous.iter().enumerate().skip(index) {
-        match token.kind {
-            TokenKind::RightParen | TokenKind::RightBracket => depth += 1,
-            TokenKind::LeftBracket => depth = depth.checked_sub(1)?,
-            TokenKind::LeftParen if depth > 0 => depth -= 1,
-            TokenKind::LeftParen => {
-                return opens_declared_parameters(previous, position).then_some(
-                    CompletionSite::Type {
-                        new_expression: false,
-                        parameter: true,
-                    },
-                );
-            }
-            TokenKind::LeftBrace | TokenKind::RightBrace | TokenKind::Semicolon => return None,
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Whether the `(` at `position` in `previous` (nearest token first) opens a
-/// function, method, or closure declaration's parameter list.
-fn opens_declared_parameters(previous: &[&Token], position: usize) -> bool {
-    match previous.get(position + 1).map(|token| &token.kind) {
-        Some(TokenKind::Function | TokenKind::Fn) => true,
-        Some(TokenKind::Identifier(_)) => matches!(
-            previous.get(position + 2).map(|token| &token.kind),
-            Some(TokenKind::Function)
-        ),
-        _ => false,
-    }
-}
-
-/// Whether `token` completes an operand, so a binary operator may follow.
-fn ends_operand(token: Option<&Token>) -> bool {
-    matches!(
-        token.map(|token| &token.kind),
-        Some(
-            TokenKind::Identifier(_)
-                | TokenKind::Variable(_)
-                | TokenKind::IntLiteral(_)
-                | TokenKind::FloatLiteral(_)
-                | TokenKind::StringLiteral { .. }
-                | TokenKind::True
-                | TokenKind::False
-                | TokenKind::Null
-                | TokenKind::RightParen
-                | TokenKind::RightBracket
-        )
-    )
-}
-
-fn completion_site(path: &str, text: &str, offset: usize) -> CompletionSite {
-    const UNKNOWN: CompletionSite = CompletionSite::Inert;
-    let Some(before) = text.get(..offset) else {
-        return UNKNOWN;
-    };
-    // A sentinel suffix makes the name at the cursor a token even when nothing
-    // has been typed after `->`, `::`, or `$`. Inside a comment or a string no
-    // token ends at the sentinel, and an unterminated one does not lex, so
-    // those positions are `Inert`.
-    const SENTINEL: &str = "__doria_site";
-    let Ok(tokens) = doriac::lex_source(path, format!("{before}{SENTINEL}")) else {
-        return UNKNOWN;
-    };
-    let mut significant = tokens
-        .iter()
-        .rev()
-        .filter(|token| token.kind != TokenKind::Eof);
-    let Some(name) = significant.next() else {
-        return UNKNOWN;
-    };
-    if name.span.end != offset + SENTINEL.len() {
-        return UNKNOWN;
-    }
-    let start = name.span.start;
-    let end = offset
-        + text[offset..]
-            .chars()
-            .take_while(|character| is_identifier_character(*character))
-            .map(char::len_utf8)
-            .sum::<usize>();
-    let previous = significant.collect::<Vec<_>>();
-    match &name.kind {
-        TokenKind::Variable(_) => CompletionSite::Variable { start, end },
-        TokenKind::Identifier(_) => match previous.first().map(|token| &token.kind) {
-            Some(TokenKind::Arrow | TokenKind::QuestionArrow) => {
-                CompletionSite::Member { start, end }
-            }
-            Some(TokenKind::DoubleColon) => CompletionSite::Static { start, end },
-            _ => match is_type_position(&previous) {
-                Some(site) => site,
-                None => CompletionSite::Other {
-                    after_operand: ends_operand(previous.first().copied()),
-                },
-            },
-        },
-        _ => UNKNOWN,
-    }
-}
 
 /// Replace the partial name `start..end` with `insertion` and finish the
 /// statement it sits in, choosing the smallest repair the compiler parser
@@ -4101,31 +3859,6 @@ fn override_completion_context(text: &str, offset: usize) -> bool {
     line.is_empty() || "override".starts_with(line)
 }
 
-fn constructor_parameter_role_completion_context(text: &str, offset: usize) -> bool {
-    let Some(prefix) = text.get(..offset) else {
-        return false;
-    };
-    let Ok(tokens) = doriac::lex_source("<constructor-parameter-completion>", prefix) else {
-        return false;
-    };
-    let Some(open_index) = tokens.windows(3).rposition(|window| {
-        matches!(window[0].kind, TokenKind::Function)
-            && matches!(&window[1].kind, TokenKind::Identifier(name) if name == "__construct")
-            && matches!(window[2].kind, TokenKind::LeftParen)
-    }) else {
-        return false;
-    };
-    let mut depth = 0_usize;
-    for token in &tokens[open_index + 2..] {
-        match token.kind {
-            TokenKind::LeftParen => depth += 1,
-            TokenKind::RightParen => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-    depth == 1
-}
-
 fn named_argument_completion_context(text: &str, offset: usize) -> bool {
     let Some(prefix) = text.get(..offset) else {
         return false;
@@ -4277,11 +4010,10 @@ fn record_attribute_argument(
     }
 }
 
-fn completion_items_with_analysis(analysis: &AnalysisSnapshot, offset: usize) -> Value {
-    let mut completions = completion_items();
-    let Some(items) = completions.get_mut("items").and_then(Value::as_array_mut) else {
-        return completions;
-    };
+/// The names valid where no receiver precedes the cursor, with the locals in
+/// scope at `offset`.
+fn name_completion_items(analysis: &AnalysisSnapshot, offset: usize) -> Vec<Value> {
+    let mut items = name_completion_list();
     items.extend(
         analysis
             .local_completions_at_offset(offset)
@@ -4294,7 +4026,7 @@ fn completion_items_with_analysis(analysis: &AnalysisSnapshot, offset: usize) ->
                 })
             }),
     );
-    completions
+    items
 }
 
 fn scalar_runtime_type_description(name: &str) -> Option<&'static str> {
@@ -5507,16 +5239,18 @@ mod tests {
     }
 
     #[test]
-    fn completions_mark_accepted_planned_keywords() {
-        for keyword in [
-            "async", "await", "unsafe", "extern", "get", "set", "spawn", "scope",
-        ] {
-            let item = completion_item(keyword);
-            assert_eq!(item["detail"], "planned Doria keyword");
-            assert_eq!(
-                item["documentation"],
-                "Accepted planned Doria syntax; compiler support lands in a later stage."
-            );
+    fn completion_keywords_are_the_compiler_keyword_table() {
+        let labels = completion_labels();
+        for keyword in doriac::lexer::KEYWORDS {
+            assert!(labels.iter().any(|label| label == keyword), "{keyword}");
+        }
+        // Reserved words lex as `Reserved`, and the rest are not Doria
+        // words at all, so none of them can be written.
+        for word in doriac::lexer::RESERVED_WORDS
+            .iter()
+            .chain(&["unsafe", "extern", "get", "set", "declare"])
+        {
+            assert!(!labels.iter().any(|label| label == word), "{word}");
         }
         for keyword in ["open", "override", "insteadof"] {
             let item = completion_item(keyword);
@@ -6382,83 +6116,93 @@ function main(): void
     }
 
     #[test]
-    fn the_completion_site_is_read_from_tokens_not_from_a_parse() {
-        let site = |source: &str| completion_site("site.doria", source, source.len());
-        assert_eq!(site("$this->"), CompletionSite::Member { start: 7, end: 7 });
-        assert_eq!(
-            site("$this?->na"),
-            CompletionSite::Member { start: 8, end: 10 }
-        );
-        assert_eq!(
-            site("Suit::He"),
-            CompletionSite::Static { start: 6, end: 8 }
-        );
-        assert_eq!(
-            site("echo $"),
-            CompletionSite::Variable { start: 5, end: 6 }
-        );
-        assert_eq!(
-            site("echo $va"),
-            CompletionSite::Variable { start: 5, end: 8 }
-        );
-        let unknown = CompletionSite::Other {
-            after_operand: false,
+    fn completion_offers_what_the_compiler_accepts_at_the_cursor() {
+        let body = |statement: &str| format!("function main(): void\n{{\n    {statement}\n}}\n");
+        let labels = |source: &str, marker: &str| {
+            let mut labels = labels_of(&completions_while_typing(source, marker))
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            labels.sort_unstable();
+            labels
         };
-        assert_eq!(site("let $x = xo"), unknown);
-        assert_eq!(site("// $this->"), CompletionSite::Inert);
-        assert_eq!(site("echo \"$this->"), CompletionSite::Inert);
-        assert_eq!(site("/**\n * Represents a wi"), CompletionSite::Inert);
-        assert_eq!(
-            site("echo \"Terminating application: "),
-            CompletionSite::Inert
-        );
-        assert_eq!(site("echo \"done\"; // For demo"), CompletionSite::Inert);
-        assert_eq!(
-            site("if ($a x"),
-            CompletionSite::Other {
-                after_operand: true
-            }
-        );
-        assert_eq!(site("render(x"), unknown);
 
-        let type_site = CompletionSite::Type {
-            new_expression: false,
-            parameter: false,
-        };
-        let parameter_site = CompletionSite::Type {
-            new_expression: false,
-            parameter: true,
-        };
-        assert_eq!(site("writable function render(): "), type_site);
-        assert_eq!(site("function find(): ?Win"), type_site);
-        assert_eq!(site("function move(int $x, "), parameter_site);
-        assert_eq!(site("function move(take "), parameter_site);
+        // After a complete operand only an operator may follow.
         assert_eq!(
-            site("function __construct(internal writable "),
-            parameter_site
+            labels(&body("let $done = true x"), "true x"),
+            ["and", "is", "or", "xor"]
         );
-        assert_eq!(site("$f = fn("), parameter_site);
-        assert_eq!(site("} catch ("), type_site);
-        assert_eq!(site("function run(): void throws "), type_site);
-        assert_eq!(site("if ($value is "), type_site);
+        // After a class name only its clauses may follow.
         assert_eq!(
-            site("let $w = new "),
-            CompletionSite::Type {
-                new_expression: true,
-                parameter: false,
-            }
+            labels("class Window e", "Window e"),
+            ["extends", "implements"]
         );
-        // A call's arguments and a ternary are expressions, not types.
-        assert_eq!(site("move(1, "), unknown);
-        assert_eq!(site("$a ? $b : "), unknown);
-        assert_eq!(site("$a ? f() : "), unknown);
+        assert_eq!(labels("function main(): void ", "void "), ["throws"]);
+        // A name being declared takes no existing name.
+        let declared = labels(&body("let $w"), "$w");
+        assert!(declared.is_empty(), "{declared:?}");
 
-        // A partial name continues past the cursor when it is edited in place.
-        let source = "$this->toStr;";
-        assert_eq!(
-            completion_site("site.doria", source, 9),
-            CompletionSite::Member { start: 7, end: 12 }
+        // A type position offers types and the keywords the parser accepts
+        // there, but no function or operator.
+        let types = labels("function find(): ?Win", "?Win");
+        assert!(types.contains(&"int".to_string()), "{types:?}");
+        assert!(types.contains(&"List".to_string()), "{types:?}");
+        assert!(!types.contains(&"printf".to_string()), "{types:?}");
+        assert!(!types.contains(&"return".to_string()), "{types:?}");
+        // `new` constructs a class.
+        let constructed = labels(&body("let $w = new "), "new ");
+        assert!(
+            !constructed.contains(&"List".to_string()),
+            "{constructed:?}"
         );
+        assert!(
+            !constructed.contains(&"printf".to_string()),
+            "{constructed:?}"
+        );
+
+        // An operand position offers names and expression keywords.
+        let operand = labels(&body("let $x = "), "= ");
+        assert!(operand.contains(&"printf".to_string()), "{operand:?}");
+        assert!(operand.contains(&"new".to_string()), "{operand:?}");
+        assert!(!operand.contains(&"xor".to_string()), "{operand:?}");
+        assert!(!operand.contains(&"return".to_string()), "{operand:?}");
+    }
+
+    #[test]
+    fn a_namespace_path_offers_the_next_segment_of_reachable_names() {
+        let uri = "file:///workspace/main.doria";
+        let mut server = stage31_server(&["file:///workspace"]);
+        open_stage31_document(
+            &mut server,
+            "file:///workspace/window.doria",
+            "namespace App\\Ui;\n\nclass Window {}\n",
+        );
+        let mut at = |source: &str| {
+            // The document being typed does not parse.
+            open_stage31_document(&mut server, uri, source);
+            let mut labels = request_completion_labels(&server, uri, source, source.len())
+                .into_iter()
+                .collect::<Vec<_>>();
+            labels.sort_unstable();
+            labels
+        };
+
+        let std = at("use Doria\\Std\\");
+        assert!(std.contains(&"Term".to_string()), "{std:?}");
+        assert!(std.contains(&"Io".to_string()), "{std:?}");
+        assert!(!std.contains(&"printf".to_string()), "{std:?}");
+        let term = at("use Doria\\Std\\Term\\");
+        assert!(term.contains(&"Size".to_string()), "{term:?}");
+        assert!(term.contains(&"Console".to_string()), "{term:?}");
+        assert!(!term.contains(&"Term".to_string()), "{term:?}");
+        // The package's own namespaces are reachable too.
+        let root = at("use ");
+        assert!(root.contains(&"App".to_string()), "{root:?}");
+        assert!(root.contains(&"Doria".to_string()), "{root:?}");
+        assert_eq!(at("use App\\Ui\\"), ["Window"]);
+        // A namespace declaration names a namespace, so no declaration ends it.
+        assert_eq!(at("namespace App\\"), ["Ui"]);
+        assert!(at("namespace App\\Ui\\").is_empty());
     }
 
     #[test]
@@ -6602,9 +6346,9 @@ function main(): void
                 "`{expected}` is a type: {labels:?}"
             );
         }
+        // `function` begins a function type, so it is a type keyword here.
         for unexpected in [
             "xor",
-            "function",
             "writable",
             "String::padStart",
             "read_line",

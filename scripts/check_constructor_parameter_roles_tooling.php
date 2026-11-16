@@ -71,7 +71,8 @@ foreach ([
 }
 
 foreach ([
-    'constructor_parameter_role_completion_context',
+    // The compiler's parser says where a constructor role may be written.
+    'doriac::syntax::completion_context',
     'constructor_parameter_roles_drive_tokens_hovers_signatures_and_completion',
     'constructor_parameter_roles_keep_local_and_property_identities_distinct',
     'constructor_parameter_role_diagnostics_actions_and_utf16_ranges_are_compiler_owned',

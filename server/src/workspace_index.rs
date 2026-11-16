@@ -132,6 +132,7 @@ struct IndexedHierarchyMember {
 struct DocumentSummary {
     graphs: Vec<String>,
     package: PackageIdentity,
+    edition: doriac::names::Edition,
     namespace: Option<String>,
     declarations: Vec<(GlobalSymbolId, String, GlobalSymbolKind)>,
     imports: Vec<(String, String, Option<GlobalSymbolId>)>,
@@ -279,6 +280,7 @@ impl OpenDocumentIndex {
         let mut summary = DocumentSummary {
             graphs: vec![graph.to_string()],
             package: package.clone(),
+            edition: snapshot.compilation_context().edition,
             namespace: facts.namespace.clone(),
             declarations: Vec::new(),
             imports: Vec::new(),
@@ -1693,6 +1695,70 @@ impl OpenDocumentIndex {
 
     pub(crate) fn completions(&self, uri: &str) -> Vec<IndexedCompletion> {
         self.completions_matching(uri, true, |_, _| true)
+    }
+
+    /// The next segment of every name this document can import that starts
+    /// with `qualifier` (empty, or ending in `\`): a namespace, or the
+    /// declaration the qualified name ends in. The names are the package's
+    /// declarations and the compiler-known symbols of the document's edition.
+    pub(crate) fn namespace_path_completions(
+        &self,
+        uri: &str,
+        qualifier: &str,
+        declarations_allowed: bool,
+    ) -> Vec<IndexedCompletion> {
+        let Some(document) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let package_names = self
+            .documents
+            .values()
+            .filter(|summary| summary.package == document.package)
+            .flat_map(|summary| &summary.declarations)
+            .map(|(symbol, _, kind)| (symbol, *kind));
+        // The compiler's own table, which holds even while the document
+        // being typed does not parse.
+        let compiler_known = doriac::names::compiler_known_symbol_facts(document.edition);
+        let compiler_known = compiler_known
+            .iter()
+            .filter(|fact| {
+                fact.kind != GlobalSymbolKind::CompilerKnownAttribute
+                    && !doriac::compiler_known_test::is_future_member(&fact.id.qualified_name)
+            })
+            .map(|fact| (&fact.id, fact.kind));
+        let mut completions = HashMap::<String, IndexedCompletion>::new();
+        for (symbol, kind) in package_names.chain(compiler_known) {
+            let Some(rest) = symbol.qualified_name.strip_prefix(qualifier) else {
+                continue;
+            };
+            match rest.split_once('\\') {
+                Some((segment, _)) if !segment.is_empty() => {
+                    let namespace = format!("{qualifier}{segment}");
+                    completions
+                        .entry(segment.to_string())
+                        .or_insert_with(|| IndexedCompletion {
+                            label: segment.to_string(),
+                            kind: 9,
+                            detail: format!("namespace `{namespace}`"),
+                            documentation: None,
+                            insert_text: None,
+                            snippet: false,
+                        });
+                }
+                Some(_) => {}
+                // A name with no namespace is never written after a `\`, and
+                // a namespace declaration's name holds namespace segments only.
+                None if qualifier.is_empty() || !declarations_allowed => {}
+                None => {
+                    completions.entry(rest.to_string()).or_insert_with(|| {
+                        completion(rest.to_string(), kind, &symbol.qualified_name)
+                    });
+                }
+            }
+        }
+        let mut completions = completions.into_values().collect::<Vec<_>>();
+        completions.sort_by(|left, right| left.label.cmp(&right.label));
+        completions
     }
 
     pub(crate) fn contract_completions(

@@ -1272,24 +1272,19 @@ function check_intellij_lexer(): void
 
 function check_lsp_completion_vocabulary(): void
 {
-    global $acceptedKeywords, $plannedKeywords, $primitiveTypes, $reservedTypes, $plannedTypes, $wordOperators, $notKeywords, $lspServer, $lspSupportedTypes, $rejectedTypes;
+    global $primitiveTypes, $reservedTypes, $plannedTypes, $notKeywords, $lspServer, $lspSupportedTypes, $rejectedTypes;
     global $implementedIntegerTypes, $implementedStage14ScalarTypes;
 
     $lspText = read_text($lspServer);
-    $tokens = array_unique([...$acceptedKeywords, ...$wordOperators]);
-    sort($tokens);
-    foreach ($tokens as $token) {
-        require_check(str_contains($lspText, chr(34) . $token . chr(34)), 'LSP completion list is missing ' . $token);
+    // Completion keywords are the compiler's: its lexer's keyword table,
+    // filtered by what its parser accepts at the cursor. The server keeps
+    // no keyword vocabulary of its own.
+    foreach (['doriac::lexer::KEYWORDS', 'doriac::syntax::completion_context'] as $authority) {
+        require_check(str_contains($lspText, $authority), "LSP completion must take its keywords from {$authority}");
     }
-
-    foreach ($plannedKeywords as $keyword) {
-        require_check(str_contains($lspText, chr(34) . $keyword . chr(34)), 'LSP completion list is missing planned keyword ' . $keyword);
+    foreach (['let planned_keywords', 'let reserved_types', 'planned Doria keyword'] as $removed) {
+        require_check(!str_contains($lspText, $removed), "LSP must not keep its own keyword vocabulary ({$removed})");
     }
-    require_check(str_contains($lspText, 'planned Doria keyword'), 'LSP planned keyword completions must be clearly marked as planned');
-    require_check(
-        str_contains($lspText, 'Accepted planned Doria syntax; compiler support lands in a later stage.'),
-        'LSP planned keyword completions must explain that compiler support lands later'
-    );
 
     require_check(
         preg_match('/const BUILT_IN_TYPES: \[&str; \d+\] = \[(.*?)\];/s', $lspText, $matches) === 1,
@@ -1297,21 +1292,6 @@ function check_lsp_completion_vocabulary(): void
     );
     $lspTypeList = $matches[1];
 
-    require_check(
-        preg_match('/let reserved_types = \[(.*?)\];/s', $lspText, $reservedMatches) === 1,
-        'LSP completion reserved type list could not be found'
-    );
-    $lspReservedTypeList = $reservedMatches[1];
-    require_check(
-        preg_match('/let planned_keywords = \[(.*?)\];/s', $lspText, $plannedMatches) === 1,
-        'LSP planned keyword list could not be found'
-    );
-    foreach (['try', 'catch', 'throw', 'throws'] as $keyword) {
-        require_check(
-            !str_contains($plannedMatches[1], chr(34) . $keyword . chr(34)),
-            "LSP must classify {$keyword} as implemented checked-error syntax"
-        );
-    }
     require_check(
         str_contains($lspText, '"label": "Error"'),
         'LSP completion is missing the compiler-known Error interface'
@@ -1346,13 +1326,11 @@ function check_lsp_completion_vocabulary(): void
 
     sort($reservedTypes);
     foreach ($reservedTypes as $type) {
-        require_check(str_contains($lspReservedTypeList, chr(34) . $type . chr(34)), 'LSP completion reserved type list is missing ' . $type);
         require_check(!str_contains($lspTypeList, chr(34) . $type . chr(34)), 'LSP completion type list must not advertise reserved type ' . $type);
     }
 
     foreach ($rejectedTypes as $type) {
         require_check(!str_contains($lspTypeList, chr(34) . $type . chr(34)), 'LSP completion type list must not advertise rejected type ' . $type);
-        require_check(!str_contains($lspReservedTypeList, chr(34) . $type . chr(34)), 'LSP completion reserved type list must not advertise rejected type ' . $type);
     }
 
     $unsupportedTypes = array_diff(array_unique([...$primitiveTypes, ...$plannedTypes]), $lspSupportedTypes);
