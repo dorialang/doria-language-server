@@ -1369,42 +1369,27 @@ function check_lsp_completion_vocabulary(): void
 
 function check_intellij_class_name_vocabulary(): void
 {
-    global $acceptedKeywords, $plannedKeywords, $primitiveTypes, $reservedTypes, $wordOperators, $rejectedKeywords;
     global $intellijCreateClassAction, $intellijAutoloadNamespaceResolver;
     global $intellijDeclarationTemplates, $intellijPluginXml, $intellijBuildGradle;
 
     $actionText = read_text($intellijCreateClassAction);
     $autoloadText = read_text($intellijAutoloadNamespaceResolver);
-    require_check(
-        preg_match('/DORIA_RESERVED_NAME_SEGMENTS = setOf\((.*?)\n\s*\)/s', $actionText, $segmentMatches) === 1,
-        'IntelliJ class workflow reserved-name vocabulary could not be found'
-    );
+    $supertypesText = read_text(dirname($intellijCreateClassAction) . '/DoriaSupertypeCandidates.kt');
+    $serverText = read_text(dirname(__DIR__) . '/server/src/lib.rs');
+    $lspXml = read_text(dirname($intellijPluginXml) . '/doria-lsp.xml');
     require_check(
         preg_match('/DORIA_RESERVED_CLASS_NAMES = setOf\((.*?)\n\s*\)/s', $actionText, $classMatches) === 1,
         'IntelliJ class workflow reserved class-name vocabulary could not be found'
     );
 
-    $reservedSegments = array_unique([
-        ...$acceptedKeywords,
-        ...$plannedKeywords,
-        ...$primitiveTypes,
-        ...$reservedTypes,
-        ...$wordOperators,
-        ...$rejectedKeywords,
-        'static',
-        'spawn',
-        'scope',
-        'is',
-        'array',
-        'object',
-    ]);
-    foreach ($reservedSegments as $name) {
-        require_check(
-            str_contains($segmentMatches[1], '"' . $name . '"'),
-            'IntelliJ class workflow must reject reserved Doria name ' . $name
-        );
-    }
-
+    // The compiler's lexer is the only keyword authority: the dialog takes
+    // its keywords from the language server instead of keeping a copy.
+    require_check(
+        !str_contains($actionText, 'DORIA_RESERVED_NAME_SEGMENTS')
+            && str_contains($actionText, 'candidates?.keywords?.contains(value)')
+            && str_contains($serverText, 'let keywords = doriac::lexer::KEYWORDS;'),
+        'IntelliJ class workflow must take reserved words from the compiler lexer through the language server'
+    );
     foreach ([
         'Int', 'Int8', 'Int16', 'Int32', 'Int64',
         'UInt8', 'UInt16', 'UInt32', 'UInt64',
@@ -1415,15 +1400,18 @@ function check_intellij_class_name_vocabulary(): void
             'IntelliJ class workflow must reject compiler-reserved class name ' . $name
         );
     }
+
+    // Parent types are chosen from what the compiler lets the new file name.
     require_check(
-        str_contains($actionText, "fun isDoriaQualifiedClassName")
-            && str_contains($actionText, "isDoriaClassName(segments.last())"),
-        'IntelliJ class workflow must validate the terminal qualified type-name segment as a class name'
-    );
-    require_check(
-        str_contains($actionText, "if (!isDoriaQualifiedInterfaceName(interfaceName))")
-            && str_contains($actionText, 'value == "Displayable" || isDoriaQualifiedClassName(value)'),
-        'IntelliJ class workflow must accept Displayable in the interface picker without allowing it as a class name'
+        !str_contains($actionText, 'Messages.showInputDialog')
+            && str_contains($actionText, 'DoriaSupertypeSource.lookup(')
+            && str_contains($actionText, 'candidates.classes.forEach(parentModel::addElement)')
+            && str_contains($actionText, 'createPopupChooserBuilder(available)')
+            && str_contains($supertypesText, 'const val COMMAND = "doria.supertypeCandidates"')
+            && str_contains($lspXml, 'serviceImplementation="dev.doria.intellij.lsp.DoriaLspSupertypeSource"')
+            && str_contains($serverText, 'const SUPERTYPE_CANDIDATES_COMMAND: &str = "doria.supertypeCandidates";')
+            && str_contains($serverText, '.supertype_candidates(&TypeViewpoint {'),
+        'IntelliJ class workflow must list parent classes and interfaces from the language server'
     );
     foreach ($intellijDeclarationTemplates as $name => $path) {
         $templateText = read_text($path);
@@ -1442,7 +1430,7 @@ function check_intellij_class_name_vocabulary(): void
         'IntelliJ enum template must create a semantically non-empty Doria enum'
     );
     require_check(
-        str_contains($actionText, 'DoriaAutoloadNamespaceResolver.suggest(directory.virtualFile)')
+        str_contains($actionText, 'DoriaAutoloadNamespaceResolver.placement(directory.virtualFile)')
             && !str_contains($actionText, 'DoriaNamespaceSuggester')
             && !str_contains($autoloadText, 'DoriaLexer')
             && !str_contains($autoloadText, 'FileTypeIndex'),
@@ -1451,8 +1439,8 @@ function check_intellij_class_name_vocabulary(): void
     require_check(
         str_contains(read_text($intellijBuildGradle), "implementation 'org.tomlj:tomlj:")
             && str_contains($autoloadText, 'Toml.parse(source)')
-            && str_contains($autoloadText, '"autoload" to "namespaces"')
-            && str_contains($autoloadText, '"autoload-dev" to "namespaces"'),
+            && str_contains($autoloadText, '"autoload" to false')
+            && str_contains($autoloadText, '"autoload-dev" to true'),
         'IntelliJ namespace inference must read structured Baton.toml autoload mappings'
     );
     require_check(

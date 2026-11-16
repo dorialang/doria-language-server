@@ -2,6 +2,9 @@
   <extensions defaultExtensionNs="com.intellij">
     <platform.lsp.serverSupportProvider implementation="dev.doria.intellij.lsp.DoriaLspServerSupportProvider" />
     <notificationGroup id="Doria" displayType="BALLOON" />
+    <projectService
+      serviceInterface="dev.doria.intellij.actions.DoriaSupertypeSource"
+      serviceImplementation="dev.doria.intellij.lsp.DoriaLspSupertypeSource" />
     <enterHandlerDelegate implementation="dev.doria.intellij.documentation.DoriaDocumentationEnterHandler" />
     <intentionAction>
       <className>dev.doria.intellij.actions.DoriaImportIntention</className>

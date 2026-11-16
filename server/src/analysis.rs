@@ -1,5 +1,5 @@
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use doriac::ast::{
     Block, ClassDecl, ClassMember, ConstructorParameterRole, ControlFlowFinally, DoWhileStmt,
@@ -345,12 +345,22 @@ impl SemanticHover {
     }
 }
 
+/// What the compiler's package graph decides about one of its sources.
+#[derive(Debug, Clone)]
+pub(crate) struct GraphSourceFacts {
+    pub(crate) context: CompilationContext,
+    pub(crate) global_symbols: GlobalSymbolFacts,
+    /// The packages whose declarations the source may name.
+    pub(crate) visible_packages: BTreeSet<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AnalysisSnapshot {
     diagnostics: Vec<Diagnostic>,
     has_standalone_entry: bool,
     source_id: SourceId,
     compilation_context: CompilationContext,
+    visible_packages: BTreeSet<String>,
     global_symbols: GlobalSymbolFacts,
     contracts: doriac::semantics::contracts::ContractFacts,
     composition_origins: Vec<doriac::trait_composition::EffectiveMemberOrigin>,
@@ -463,7 +473,6 @@ pub(crate) struct HierarchyClass {
     pub(crate) qualified_name: String,
     pub(crate) type_parameters: Vec<String>,
     pub(crate) is_open: bool,
-    pub(crate) access: MemberAccess,
     pub(crate) ancestors: Vec<String>,
     pub(crate) body_span: Span,
 }
@@ -868,12 +877,16 @@ impl AnalysisSnapshot {
     pub(crate) fn from_graph_source(
         text: &str,
         source_id: SourceId,
-        context: CompilationContext,
         program: &Program,
         semantic_info: &SemanticInfo,
         diagnostics: Vec<Diagnostic>,
-        global_symbols: GlobalSymbolFacts,
+        facts: GraphSourceFacts,
     ) -> Self {
+        let GraphSourceFacts {
+            context,
+            global_symbols,
+            visible_packages,
+        } = facts;
         let source = SourceFile::with_id(source_id, context.source.0.clone(), text.to_string());
         let tokens = doriac::lexer::Lexer::new(&source).lex().unwrap_or_default();
         let directive_semantic_tokens = directive_semantic_tokens(program);
@@ -882,6 +895,7 @@ impl AnalysisSnapshot {
                 .build(program);
         snapshot.compilation_context = context;
         snapshot.global_symbols = global_symbols;
+        snapshot.visible_packages = visible_packages;
         snapshot.directive_semantic_tokens = directive_semantic_tokens;
         snapshot
     }
@@ -911,6 +925,17 @@ impl AnalysisSnapshot {
 
     pub(crate) fn compilation_context(&self) -> &CompilationContext {
         &self.compilation_context
+    }
+
+    /// Packages whose declarations this source may name, as the compiler's
+    /// package graph decides. A source analyzed outside a graph sees only its
+    /// own package.
+    pub(crate) fn visible_packages(&self) -> BTreeSet<String> {
+        if self.visible_packages.is_empty() {
+            BTreeSet::from([self.compilation_context.package.display_name().to_string()])
+        } else {
+            self.visible_packages.clone()
+        }
     }
 
     pub(crate) fn source_id(&self) -> SourceId {
@@ -2601,6 +2626,7 @@ impl<'a> SnapshotBuilder<'a> {
             .collect();
         AnalysisSnapshot {
             diagnostics: self.diagnostics,
+            visible_packages: BTreeSet::new(),
             has_standalone_entry: program.includes.is_empty()
                 && program.items.iter().any(|item| {
                     matches!(item, Item::Function(function) if doriac::names::source_name_is(&function.name, "main"))
@@ -3731,7 +3757,6 @@ impl<'a> SnapshotBuilder<'a> {
                     .map(|parameter| parameter.name.clone())
                     .collect(),
                 is_open: hierarchy.is_open,
-                access: class.access,
                 ancestors: hierarchy.ancestors.clone(),
                 body_span: class.span,
             });

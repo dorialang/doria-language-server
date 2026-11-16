@@ -6,22 +6,29 @@ import com.intellij.ide.fileTemplates.FileTemplateManager
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.LangDataKeys
+import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.ui.Messages
+import com.intellij.openapi.ui.ComboBox
 import com.intellij.openapi.ui.ValidationInfo
+import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.psi.PsiDirectory
 import com.intellij.psi.PsiFile
 import com.intellij.ui.DocumentAdapter
+import com.intellij.ui.SimpleListCellRenderer
 import com.intellij.ui.TitledSeparator
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextField
 import com.intellij.util.IncorrectOperationException
+import com.intellij.util.Alarm
 import com.intellij.util.PathUtilRt
+import com.intellij.util.ui.UIUtil
 import dev.doria.intellij.DoriaIcons
 import java.awt.BorderLayout
 import java.awt.Dimension
@@ -29,6 +36,7 @@ import java.awt.FlowLayout
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.Insets
+import javax.swing.DefaultComboBoxModel
 import javax.swing.DefaultListModel
 import javax.swing.JButton
 import javax.swing.JComponent
@@ -36,6 +44,7 @@ import javax.swing.JComboBox
 import javax.swing.JPanel
 import javax.swing.ListSelectionModel
 import javax.swing.event.DocumentEvent
+import javax.swing.text.JTextComponent
 
 class DoriaCreateClassAction : DumbAwareAction(
     "Doria Class",
@@ -113,20 +122,37 @@ private class DoriaCreateClassDialog(
     private val project: Project,
     private val directory: PsiDirectory,
 ) : DialogWrapper(project, true) {
+    private val placement = DoriaAutoloadNamespaceResolver.placement(directory.virtualFile)
     private val classNameField = JBTextField(42)
-    private val namespaceField = JComboBox(
-        listOfNotNull(DoriaAutoloadNamespaceResolver.suggest(directory.virtualFile)).toTypedArray(),
-    ).apply {
+    private val namespaceField = JComboBox(listOfNotNull(placement?.namespace).toTypedArray()).apply {
         isEditable = true
     }
     private val fileNameField = JBTextField(42)
     private val directoryField = JBTextField(directory.virtualFile.presentableUrl, 42)
     private val templateSelector = JComboBox(DoriaDeclarationTemplate.entries.toTypedArray())
-    private val parentField = JBTextField(42)
-    private val interfaceModel = DefaultListModel<String>()
-    private val interfaceList = JBList(interfaceModel)
+    private val parentModel = DefaultComboBoxModel<DoriaSupertype?>()
+    private val parentField = ComboBox(parentModel).apply {
+        renderer = SimpleListCellRenderer.create { label, value, _ ->
+            label.text = value?.headerText ?: "None"
+            label.toolTipText = value?.qualifiedName
+        }
+    }
+    private val interfaceModel = DefaultListModel<DoriaSupertype>()
+    private val interfaceList = JBList(interfaceModel).apply {
+        cellRenderer = SimpleListCellRenderer.create { label, value, _ ->
+            label.text = value.headerText
+            label.toolTipText = value.qualifiedName
+        }
+    }
     private val addInterfaceButton = JButton(AllIcons.General.Add)
     private val removeInterfaceButton = JButton(AllIcons.General.Remove)
+    private val parentTypeStatus = JBLabel().apply {
+        componentStyle = UIUtil.ComponentStyle.SMALL
+        foreground = UIUtil.getContextHelpForeground()
+    }
+    private val namespaceAlarm = Alarm(Alarm.ThreadToUse.SWING_THREAD, disposable)
+    private var lookup: DoriaSupertypeLookup? = null
+    private var lookupGeneration = 0
     private var updatingFileName = false
     private var fileNameWasEdited = false
 
@@ -140,22 +166,28 @@ private class DoriaCreateClassDialog(
     val fileBaseName: String
         get() = fileNameField.text.trim().removeSuffix(".doria")
 
+    private val namespace: String
+        get() = namespaceField.editor.item?.toString()?.trim().orEmpty()
+
     val namespaceDeclaration: String
-        get() = namespaceField.editor.item?.toString()?.trim().orEmpty().let { namespace ->
+        get() = namespace.let { namespace ->
             if (namespace.isEmpty()) "" else "namespace $namespace;\n\n"
         }
 
     val inheritanceClause: String
         get() = buildString {
             if (!template.supportsClassInheritance) return@buildString
-            val parent = parentField.text.trim()
-            if (parent.isNotEmpty()) append(" extends ").append(parent)
+            (parentField.selectedItem as? DoriaSupertype)?.let { append(" extends ").append(it.headerText) }
 
             val interfaces = interfaces()
             if (interfaces.isNotEmpty()) {
-                append(" implements ").append(interfaces.joinToString(", "))
+                append(" implements ").append(interfaces.joinToString(", ", transform = DoriaSupertype::headerText))
             }
         }
+
+    /** The language server's answer, once it has one. */
+    private val candidates: DoriaSupertypeCandidates?
+        get() = (lookup as? DoriaSupertypeLookup.Found)?.candidates
 
     init {
         title = "Create New Doria Class"
@@ -164,23 +196,30 @@ private class DoriaCreateClassDialog(
         classNameField.emptyText.text = "Type name"
         namespaceField.toolTipText = "Namespace inferred from the nearest Baton.toml autoload mapping"
         fileNameField.emptyText.text = "TypeName.doria"
-        parentField.emptyText.text = "Optional parent class"
+        parentField.toolTipText = "Open classes this package may extend"
         interfaceList.emptyText.text = "Choose interfaces to implement"
         interfaceList.selectionMode = ListSelectionModel.SINGLE_SELECTION
-        interfaceList.addListSelectionListener {
-            removeInterfaceButton.isEnabled = interfaceList.selectedIndex >= 0
-        }
-        addInterfaceButton.toolTipText = "Add interface"
-        addInterfaceButton.accessibleContext.accessibleName = "Add interface"
-        addInterfaceButton.addActionListener { addInterface() }
+        interfaceList.addListSelectionListener { updateTemplateControls() }
+        addInterfaceButton.toolTipText = "Add interfaces"
+        addInterfaceButton.accessibleContext.accessibleName = "Add interfaces"
+        addInterfaceButton.addActionListener { chooseInterfaces() }
         removeInterfaceButton.toolTipText = "Remove selected interface"
         removeInterfaceButton.accessibleContext.accessibleName = "Remove selected interface"
-        removeInterfaceButton.isEnabled = false
         removeInterfaceButton.addActionListener { removeSelectedInterface() }
         templateSelector.addActionListener { updateTemplateControls() }
+        // Spellings depend on the namespace the new type is declared in.
+        (namespaceField.editor.editorComponent as? JTextComponent)?.document?.addDocumentListener(
+            object : DocumentAdapter() {
+                override fun textChanged(event: DocumentEvent) {
+                    namespaceAlarm.cancelAllRequests()
+                    namespaceAlarm.addRequest(::requestSupertypes, NAMESPACE_SETTLE_MS)
+                }
+            },
+        )
+        namespaceField.addActionListener { requestSupertypes() }
         installFileNameSynchronization()
-        updateTemplateControls()
         init()
+        requestSupertypes()
     }
 
     override fun createCenterPanel(): JComponent = JPanel(GridBagLayout()).apply {
@@ -213,11 +252,21 @@ private class DoriaCreateClassDialog(
                 insets = Insets(4, 0, 4, 0)
             },
         )
+        add(
+            parentTypeStatus,
+            GridBagConstraints().apply {
+                gridx = 1
+                gridy = 9
+                weightx = 1.0
+                fill = GridBagConstraints.HORIZONTAL
+                insets = Insets(0, 0, 4, 0)
+            },
+        )
     }
 
     override fun getPreferredFocusedComponent(): JComponent = classNameField
 
-    override fun getInitialSize(): Dimension = Dimension(720, 540)
+    override fun getInitialSize(): Dimension = Dimension(720, 560)
 
     override fun doValidate(): ValidationInfo? {
         if (!isDoriaClassName(typeName)) {
@@ -229,25 +278,71 @@ private class DoriaCreateClassDialog(
         if (directory.findFile("$fileBaseName.doria") != null) {
             return ValidationInfo("$fileBaseName.doria already exists.", fileNameField)
         }
-
-        val namespace = namespaceField.editor.item?.toString()?.trim().orEmpty()
         if (namespace.isNotEmpty() && !isDoriaNamespaceName(namespace)) {
             return ValidationInfo("Enter a valid Doria namespace.", namespaceField)
-        }
-        if (template.supportsClassInheritance) {
-            val parent = parentField.text.trim()
-            if (parent.isNotEmpty() && !isDoriaQualifiedClassName(parent)) {
-                return ValidationInfo("Enter one valid Doria parent type.", parentField)
-            }
         }
         return null
     }
 
+    /** Asks the language server for the types this declaration may name. */
+    private fun requestSupertypes() {
+        val generation = ++lookupGeneration
+        val requestedNamespace = namespace
+        val fileName = "${fileBaseName.ifEmpty { "NewType" }}.doria"
+        lookup = null
+        parentTypeStatus.text = "Loading parent types from the Doria language server…"
+        updateTemplateControls()
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val result = DoriaSupertypeSource.lookup(
+                project,
+                directory.virtualFile,
+                fileName,
+                requestedNamespace,
+                placement?.development ?: false,
+            )
+            // The dialog is modal; its own updates must run while it is open.
+            ApplicationManager.getApplication().invokeLater(
+                { if (!isDisposed && generation == lookupGeneration) showSupertypes(result) },
+                ModalityState.any(),
+            )
+        }
+    }
+
+    private fun showSupertypes(result: DoriaSupertypeLookup) {
+        lookup = result
+        val selectedParent = (parentField.selectedItem as? DoriaSupertype)?.qualifiedName
+        val selectedInterfaces = interfaces().map(DoriaSupertype::qualifiedName)
+        parentModel.removeAllElements()
+        parentModel.addElement(null)
+        interfaceModel.clear()
+        when (result) {
+            is DoriaSupertypeLookup.Unavailable -> parentTypeStatus.text = result.reason
+            is DoriaSupertypeLookup.Found -> {
+                val candidates = result.candidates
+                candidates.classes.forEach(parentModel::addElement)
+                // Keep the author's choices, respelled for the current namespace.
+                parentModel.selectedItem = candidates.classes.firstOrNull { it.qualifiedName == selectedParent }
+                selectedInterfaces
+                    .mapNotNull { name -> candidates.interfaces.firstOrNull { it.qualifiedName == name } }
+                    .forEach(interfaceModel::addElement)
+                parentTypeStatus.text = when {
+                    candidates.packageName == null ->
+                        "This directory is in no Baton package, so no parent types are listed. " +
+                            "Create the type under a package's autoload directory to choose them."
+                    else -> ""
+                }
+            }
+        }
+        updateTemplateControls()
+    }
+
     private fun updateTemplateControls() {
         val enabled = template.supportsClassInheritance
-        parentField.isEnabled = enabled
-        interfaceList.isEnabled = enabled
-        addInterfaceButton.isEnabled = enabled
+        val candidates = candidates
+        parentField.isEnabled = enabled && candidates != null && candidates.classes.isNotEmpty()
+        interfaceList.isEnabled = enabled && candidates != null
+        addInterfaceButton.isEnabled = enabled && candidates != null &&
+            candidates.interfaces.any { it !in interfaces() }
         removeInterfaceButton.isEnabled = enabled && interfaceList.selectedIndex >= 0
     }
 
@@ -268,39 +363,37 @@ private class DoriaCreateClassDialog(
         })
     }
 
-    private fun addInterface() {
-        val interfaceName = Messages.showInputDialog(
-            project,
-            "Interface name:",
-            "Add Doria Interface",
-            DoriaIcons.FILE,
-        )?.trim() ?: return
-        if (!isDoriaQualifiedInterfaceName(interfaceName)) {
-            Messages.showErrorDialog(
-                project,
-                "Enter a valid Doria interface type.",
-                "Invalid Interface",
+    private fun chooseInterfaces() {
+        val selected = interfaces()
+        val available = candidates?.interfaces.orEmpty().filter { it !in selected }
+        if (available.isEmpty()) return
+        JBPopupFactory.getInstance()
+            .createPopupChooserBuilder(available)
+            .setTitle("Choose Interfaces")
+            .setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION)
+            .setRenderer(
+                SimpleListCellRenderer.create { label, value: DoriaSupertype, _ ->
+                    label.text = value.headerText
+                    label.toolTipText = value.qualifiedName
+                },
             )
-            return
-        }
-        if (interfaces().contains(interfaceName)) {
-            Messages.showErrorDialog(
-                project,
-                "$interfaceName is already selected.",
-                "Duplicate Interface",
-            )
-            return
-        }
-        interfaceModel.addElement(interfaceName)
-        interfaceList.selectedIndex = interfaceModel.size() - 1
+            .setNamerForFiltering(DoriaSupertype::label)
+            .setItemsChosenCallback { chosen ->
+                chosen.forEach(interfaceModel::addElement)
+                interfaceList.selectedIndex = interfaceModel.size() - 1
+                updateTemplateControls()
+            }
+            .createPopup()
+            .showUnderneathOf(addInterfaceButton)
     }
 
     private fun removeSelectedInterface() {
         val index = interfaceList.selectedIndex
         if (index >= 0) interfaceModel.remove(index)
+        updateTemplateControls()
     }
 
-    private fun interfaces(): List<String> =
+    private fun interfaces(): List<DoriaSupertype> =
         (0 until interfaceModel.size()).map(interfaceModel::getElementAt)
 
     private fun interfacePanel(): JComponent = JPanel(BorderLayout(0, 4)).apply {
@@ -350,45 +443,25 @@ private class DoriaCreateClassDialog(
         )
     }
 
+    /** A word the compiler's lexer reads as an identifier. Keywords come from the language server. */
+    private fun isDoriaIdentifier(value: String): Boolean =
+        DORIA_IDENTIFIER.matches(value) && candidates?.keywords?.contains(value) != true
+
+    private fun isDoriaClassName(value: String): Boolean =
+        isDoriaIdentifier(value) &&
+            value !in DORIA_RESERVED_CLASS_NAMES &&
+            !value.equals("__DoriaDisplayable", ignoreCase = true)
+
+    private fun isDoriaNamespaceName(value: String): Boolean =
+        DORIA_QUALIFIED_NAME.matches(value) && value.split('\\').all(::isDoriaIdentifier)
+
     private companion object {
+        const val NAMESPACE_SETTLE_MS = 300
         val DORIA_IDENTIFIER = Regex("[A-Za-z_][A-Za-z0-9_]*")
         val DORIA_QUALIFIED_NAME = Regex("""[A-Za-z_][A-Za-z0-9_]*(?:\\[A-Za-z_][A-Za-z0-9_]*)*""")
-        val DORIA_RESERVED_NAME_SEGMENTS = setOf(
-            "class", "interface", "implements", "namespace", "extends", "function",
-            "internal", "static", "self", "parent", "const", "let", "take", "borrow", "writable", "readonly", "return", "echo",
-            "new", "foreach", "as", "if", "else", "while", "for", "break", "continue",
-            "throw", "throws", "true", "false", "null", "void", "int", "int8", "int16",
-            "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float", "float32",
-            "float64", "string", "bool", "not", "and", "or", "xor", "async", "await",
-            "spawn", "scope", "trait", "enum", "match", "try", "catch", "mixed", "never",
-            "resource", "array", "object", "use", "uses", "include", "declare", "with",
-            "case", "when", "given", "finally", "unsafe", "extern", "open", "override", "is",
-            "default", "do", "fn", "once", "get", "set", "insteadof", "shared",
-            "goto", "require", "require_once", "include_once", "print", "instanceof",
-        )
         val DORIA_RESERVED_CLASS_NAMES = setOf(
             "Int", "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64",
             "Float", "Float32", "Float64", "Bool", "Displayable",
         )
-
-        fun isDoriaIdentifier(value: String): Boolean =
-            DORIA_IDENTIFIER.matches(value) && value !in DORIA_RESERVED_NAME_SEGMENTS
-
-        fun isDoriaClassName(value: String): Boolean =
-            isDoriaIdentifier(value) &&
-                value !in DORIA_RESERVED_CLASS_NAMES &&
-                !value.equals("__DoriaDisplayable", ignoreCase = true)
-
-        fun isDoriaNamespaceName(value: String): Boolean =
-            DORIA_QUALIFIED_NAME.matches(value) && value.split('\\').all(::isDoriaIdentifier)
-
-        fun isDoriaQualifiedClassName(value: String): Boolean {
-            if (!DORIA_QUALIFIED_NAME.matches(value)) return false
-            val segments = value.split('\\')
-            return segments.dropLast(1).all(::isDoriaIdentifier) && isDoriaClassName(segments.last())
-        }
-
-        fun isDoriaQualifiedInterfaceName(value: String): Boolean =
-            value == "Displayable" || isDoriaQualifiedClassName(value)
     }
 }

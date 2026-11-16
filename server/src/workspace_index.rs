@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::Path;
 
 use doriac::ast::MemberAccess;
 use doriac::attributes::{AttributeClassIdentity, AttributeClassSchema, AttributeSchemaParameter};
@@ -12,6 +13,7 @@ use crate::analysis::{
     ComposedSourcePresentation, HierarchyClass, HierarchyContext, HierarchyMember, MemberIdentity,
     MemberKind, MemberOccurrence,
 };
+use crate::workspace_graph::PackagePlacement;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct AliasIdentity {
@@ -134,6 +136,7 @@ struct DocumentSummary {
     package: PackageIdentity,
     edition: doriac::names::Edition,
     namespace: Option<String>,
+    visible_packages: BTreeSet<String>,
     declarations: Vec<(GlobalSymbolId, String, GlobalSymbolKind)>,
     imports: Vec<(String, String, Option<GlobalSymbolId>)>,
     compiler_known: Vec<(String, GlobalSymbolId, GlobalSymbolKind)>,
@@ -165,6 +168,40 @@ pub(crate) struct OpenDocumentIndex {
     source_uris: HashMap<(String, doriac::source::SourceId), String>,
     accessor_declarations: HashMap<(String, Span), Span>,
     accessor_references: HashMap<(String, Span), Vec<Span>>,
+    package_placements: HashMap<String, Vec<PackagePlacement>>,
+}
+
+/// Which packages a name lookup may reach from a document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackageReach {
+    /// The document's own package.
+    OwnPackage,
+    /// Every package the compiler lets the document name.
+    Visible,
+}
+
+/// A source position that may not exist yet: the package it belongs to,
+/// the packages it may name, and its namespace.
+#[derive(Debug, Clone)]
+pub(crate) struct TypeViewpoint<'a> {
+    pub(crate) graph: &'a str,
+    pub(crate) package: &'a str,
+    pub(crate) visible_packages: &'a BTreeSet<String>,
+    pub(crate) namespace: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SupertypeCandidate {
+    /// The spelling to write in the new declaration's header.
+    pub(crate) label: String,
+    pub(crate) qualified_name: String,
+    pub(crate) type_parameters: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SupertypeCandidates {
+    pub(crate) classes: Vec<SupertypeCandidate>,
+    pub(crate) interfaces: Vec<SupertypeCandidate>,
 }
 
 impl OpenDocumentIndex {
@@ -282,6 +319,7 @@ impl OpenDocumentIndex {
             package: package.clone(),
             edition: snapshot.compilation_context().edition,
             namespace: facts.namespace.clone(),
+            visible_packages: snapshot.visible_packages(),
             declarations: Vec::new(),
             imports: Vec::new(),
             compiler_known: Vec::new(),
@@ -1694,7 +1732,7 @@ impl OpenDocumentIndex {
     }
 
     pub(crate) fn completions(&self, uri: &str) -> Vec<IndexedCompletion> {
-        self.completions_matching(uri, true, |_, _| true)
+        self.completions_matching(uri, true, PackageReach::OwnPackage, |_, _| true)
     }
 
     /// The next segment of every name this document can import that starts
@@ -1766,7 +1804,7 @@ impl OpenDocumentIndex {
         uri: &str,
         kind: GlobalSymbolKind,
     ) -> Vec<IndexedCompletion> {
-        self.completions_matching(uri, false, |candidate, symbol| {
+        self.completions_matching(uri, false, PackageReach::Visible, |candidate, symbol| {
             candidate == kind
                 || (kind == GlobalSymbolKind::Interface
                     && candidate == GlobalSymbolKind::CompilerKnownType
@@ -1779,6 +1817,7 @@ impl OpenDocumentIndex {
         &self,
         uri: &str,
         include_unresolved: bool,
+        reach: PackageReach,
         accepts: impl Fn(GlobalSymbolKind, &GlobalSymbolId) -> bool,
     ) -> Vec<IndexedCompletion> {
         let Some(document) = self.documents.get(uri) else {
@@ -1825,11 +1864,17 @@ impl OpenDocumentIndex {
                 .or_insert_with(|| completion(name.clone(), *kind, &symbol.qualified_name));
         }
         for summary in self.documents.values() {
-            if summary.package != document.package {
+            if reach == PackageReach::OwnPackage && summary.package != document.package {
                 continue;
             }
             for (symbol, _, kind) in &summary.declarations {
-                if !accepts(*kind, symbol) {
+                if !accepts(*kind, symbol)
+                    || !self.reachable(
+                        document.package.display_name(),
+                        &document.visible_packages,
+                        symbol,
+                    )
+                {
                     continue;
                 }
                 let label = if summary.namespace == document.namespace {
@@ -2052,10 +2097,11 @@ impl OpenDocumentIndex {
         recovered_namespace: Option<&str>,
         recovered_imports: &[(String, String)],
     ) -> Option<String> {
-        let candidate_package = symbol_package(&candidate.class.identity)?;
-        if candidate.class.access == MemberAccess::Internal
-            && candidate_package != &document.package
-        {
+        if !self.reachable(
+            document.package.display_name(),
+            &document.visible_packages,
+            &candidate.class.identity,
+        ) {
             return None;
         }
         if let Some((_, alias)) = recovered_imports
@@ -2069,21 +2115,145 @@ impl OpenDocumentIndex {
         }) {
             return Some(alias);
         }
-        if candidate_package == &document.package {
-            let candidate_namespace = self
-                .documents
-                .get(&candidate.uri)
-                .and_then(|document| document.namespace.as_ref());
-            let current_namespace = recovered_namespace.or(document.namespace.as_deref());
-            return Some(
-                if candidate_namespace.map(String::as_str) == current_namespace {
-                    candidate.class.source_name.clone()
-                } else {
-                    candidate.class.qualified_name.clone()
-                },
-            );
+        Some(self.class_label(
+            candidate,
+            recovered_namespace.or(document.namespace.as_deref()),
+        ))
+    }
+
+    /// A class's spelling from `namespace`: its short name in its own
+    /// namespace, otherwise its qualified name, which is absolute.
+    fn class_label(&self, candidate: &IndexedHierarchyClass, namespace: Option<&str>) -> String {
+        let candidate_namespace = self
+            .documents
+            .get(&candidate.uri)
+            .and_then(|document| document.namespace.as_deref());
+        if candidate_namespace == namespace {
+            candidate.class.source_name.clone()
+        } else {
+            candidate.class.qualified_name.clone()
         }
-        None
+    }
+
+    /// Whether a source of `package` that may name `visible_packages` can
+    /// name `symbol`: the compiler's package visibility plus `internal`.
+    fn reachable(
+        &self,
+        package: &str,
+        visible_packages: &BTreeSet<String>,
+        symbol: &GlobalSymbolId,
+    ) -> bool {
+        let Some(owner) = symbol_package(symbol) else {
+            return true;
+        };
+        let owner = owner.display_name();
+        owner == package
+            || (visible_packages.contains(owner)
+                && self.symbol_access.get(symbol) != Some(&MemberAccess::Internal))
+    }
+
+    pub(crate) fn add_package_placements(
+        &mut self,
+        graph: &str,
+        placements: Vec<PackagePlacement>,
+    ) {
+        self.package_placements
+            .entry(graph.to_string())
+            .or_default()
+            .extend(placements);
+    }
+
+    /// The graph and package that own a source at `path`, which need not
+    /// exist yet: the package whose root holds it most closely.
+    pub(crate) fn placement_for(&self, path: &Path) -> Option<(&str, &PackagePlacement)> {
+        self.package_placements
+            .iter()
+            .flat_map(|(graph, placements)| {
+                placements
+                    .iter()
+                    .map(move |placement| (graph.as_str(), placement))
+            })
+            .filter(|(_, placement)| path.starts_with(&placement.root))
+            .max_by_key(|(_, placement)| placement.root.components().count())
+    }
+
+    /// The open classes a new class may extend and the interfaces it may
+    /// implement, spelled from the viewpoint's namespace. Editor completion
+    /// after `extends` and `implements` applies the same visibility.
+    pub(crate) fn supertype_candidates(
+        &self,
+        viewpoint: &TypeViewpoint<'_>,
+    ) -> SupertypeCandidates {
+        let mut classes = self
+            .hierarchy_classes
+            .get(viewpoint.graph)
+            .into_iter()
+            .flat_map(HashMap::values)
+            .filter(|candidate| candidate.class.is_open)
+            .filter(|candidate| {
+                self.reachable(
+                    viewpoint.package,
+                    viewpoint.visible_packages,
+                    &candidate.class.identity,
+                )
+            })
+            .map(|candidate| SupertypeCandidate {
+                label: self.class_label(candidate, viewpoint.namespace),
+                qualified_name: candidate.class.qualified_name.clone(),
+                type_parameters: candidate.class.type_parameters.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        let mut interfaces = HashMap::<String, SupertypeCandidate>::new();
+        let graph_documents = self
+            .documents
+            .values()
+            .filter(|summary| summary.graphs.iter().any(|graph| graph == viewpoint.graph));
+        for summary in graph_documents.clone() {
+            for (symbol, source_name, kind) in &summary.declarations {
+                if *kind != GlobalSymbolKind::Interface
+                    || !self.reachable(viewpoint.package, viewpoint.visible_packages, symbol)
+                {
+                    continue;
+                }
+                let label = if summary.namespace.as_deref() == viewpoint.namespace {
+                    source_name.clone()
+                } else {
+                    symbol.qualified_name.clone()
+                };
+                interfaces
+                    .entry(symbol.qualified_name.clone())
+                    .or_insert(SupertypeCandidate {
+                        label,
+                        qualified_name: symbol.qualified_name.clone(),
+                        type_parameters: Vec::new(),
+                    });
+            }
+        }
+        if let Some(edition) = graph_documents.map(|summary| summary.edition).next() {
+            for known in doriac::names::compiler_known_symbol_facts(edition) {
+                if known.kind == GlobalSymbolKind::CompilerKnownType
+                    && doriac::compiler_known_contracts::interfaces()
+                        .any(|interface| interface.name == known.id.qualified_name)
+                {
+                    interfaces.entry(known.id.qualified_name.clone()).or_insert(
+                        SupertypeCandidate {
+                            label: known.source_name.clone(),
+                            qualified_name: known.id.qualified_name.clone(),
+                            type_parameters: Vec::new(),
+                        },
+                    );
+                }
+            }
+        }
+
+        classes.sort_by(|left, right| left.label.cmp(&right.label));
+        let mut interfaces = interfaces.into_values().collect::<Vec<_>>();
+        interfaces.sort_by(|left, right| left.label.cmp(&right.label));
+        SupertypeCandidates {
+            classes,
+            interfaces,
+        }
     }
 
     pub(crate) fn test_symbols(&self, query: &str) -> Vec<IndexedTestSymbol> {

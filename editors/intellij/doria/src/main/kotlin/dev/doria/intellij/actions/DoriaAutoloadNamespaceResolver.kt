@@ -6,7 +6,10 @@ import org.tomlj.Toml
 import org.tomlj.TomlTable
 
 internal object DoriaAutoloadNamespaceResolver {
-    fun suggest(directory: VirtualFile): String? {
+    fun suggest(directory: VirtualFile): String? = placement(directory)?.namespace
+
+    /** The namespace and autoload scope Baton gives sources in `directory`. */
+    fun placement(directory: VirtualFile): SourcePlacement? {
         val manifest = nearestManifest(directory) ?: return null
         val source = try {
             VfsUtilCore.loadText(manifest)
@@ -14,7 +17,7 @@ internal object DoriaAutoloadNamespaceResolver {
             return null
         }
 
-        return infer(
+        return inferPlacement(
             pathSegments(manifest.parent),
             pathSegments(directory),
             mappings(source),
@@ -34,14 +37,14 @@ internal object DoriaAutoloadNamespaceResolver {
         val document = Toml.parse(source)
         if (document.hasErrors()) return emptyList()
 
-        return TABLE_NAMES.flatMap { (section, table) ->
+        return TABLE_NAMES.flatMap { (section, development) ->
             val sectionTable = document.get(section) as? TomlTable
-            val namespaceTable = sectionTable?.get(table) as? TomlTable
-            namespaceTable?.let(::readMappings).orEmpty()
+            val namespaceTable = sectionTable?.get(NAMESPACES) as? TomlTable
+            namespaceTable?.let { readMappings(it, development) }.orEmpty()
         }
     }
 
-    private fun readMappings(table: TomlTable): List<AutoloadMapping> =
+    private fun readMappings(table: TomlTable, development: Boolean): List<AutoloadMapping> =
         table.keySet().mapNotNull { prefix ->
             val path = when (val value = table.get(listOf(prefix))) {
                 is String -> value
@@ -51,14 +54,20 @@ internal object DoriaAutoloadNamespaceResolver {
 
             val namespace = namespaceSegments(prefix) ?: return@mapNotNull null
             val directory = mappingPathSegments(path) ?: return@mapNotNull null
-            AutoloadMapping(namespace, directory)
+            AutoloadMapping(namespace, directory, development)
         }
 
     internal fun infer(
         manifestDirectory: List<String>,
         targetDirectory: List<String>,
         mappings: List<AutoloadMapping>,
-    ): String? {
+    ): String? = inferPlacement(manifestDirectory, targetDirectory, mappings)?.namespace
+
+    internal fun inferPlacement(
+        manifestDirectory: List<String>,
+        targetDirectory: List<String>,
+        mappings: List<AutoloadMapping>,
+    ): SourcePlacement? {
         if (!targetDirectory.startsWith(manifestDirectory)) return null
 
         val matches = mappings.mapNotNull { mapping ->
@@ -66,17 +75,16 @@ internal object DoriaAutoloadNamespaceResolver {
             if (!targetDirectory.startsWith(root)) return@mapNotNull null
             val suffix = targetDirectory.drop(root.size)
             if (suffix.any { !DORIA_IDENTIFIER.matches(it) }) return@mapNotNull null
-            Match(mapping.namespace + suffix, mapping.directory.size)
+            Match(mapping.namespace + suffix, mapping.directory.size, mapping.development)
         }
         if (matches.isEmpty()) return null
 
         val longestPath = matches.maxOf(Match::pathLength)
-        val namespaces = matches.asSequence()
-            .filter { it.pathLength == longestPath }
-            .map { it.namespace.joinToString("\\") }
-            .distinct()
-            .toList()
-        return namespaces.singleOrNull()
+        val authoritative = matches.filter { it.pathLength == longestPath }
+        val namespace = authoritative.map { it.namespace.joinToString("\\") }.distinct().singleOrNull()
+            ?: return null
+        // Development scope only when every authoritative mapping is `autoload-dev`.
+        return SourcePlacement(namespace, development = authoritative.all(Match::development))
     }
 
     private fun namespaceSegments(prefix: String): List<String>? {
@@ -102,14 +110,20 @@ internal object DoriaAutoloadNamespaceResolver {
     internal data class AutoloadMapping(
         val namespace: List<String>,
         val directory: List<String>,
+        /** Whether `autoload-dev` declares the mapping. */
+        val development: Boolean,
     )
 
-    private data class Match(val namespace: List<String>, val pathLength: Int)
+    /** Where Baton places sources of a directory. */
+    internal data class SourcePlacement(val namespace: String, val development: Boolean)
+
+    private data class Match(val namespace: List<String>, val pathLength: Int, val development: Boolean)
 
     private const val MANIFEST_NAME = "Baton.toml"
+    private const val NAMESPACES = "namespaces"
     private val TABLE_NAMES = listOf(
-        "autoload" to "namespaces",
-        "autoload-dev" to "namespaces",
+        "autoload" to false,
+        "autoload-dev" to true,
     )
     private val DORIA_IDENTIFIER = Regex("[A-Za-z_][A-Za-z0-9_]*")
     private val WINDOWS_ABSOLUTE_PATH = Regex("^[A-Za-z]:[\\\\/]")

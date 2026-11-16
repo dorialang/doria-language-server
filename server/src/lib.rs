@@ -40,7 +40,14 @@ use project::{ProjectDocument, SourceEditPolicy};
 use workspace_graph::{
     analyze_open_graph, analyze_project_graph, project_contains_source, GraphDocument, OpenSource,
 };
-use workspace_index::{IndexedEdit, IndexedLocation, OpenDocumentIndex, SymbolTarget};
+use workspace_index::{
+    IndexedEdit, IndexedLocation, OpenDocumentIndex, SupertypeCandidate, SymbolTarget,
+    TypeViewpoint,
+};
+
+/// The workspace command an editor's new-type dialog uses to list the types
+/// the new declaration may extend and implement.
+const SUPERTYPE_CANDIDATES_COMMAND: &str = "doria.supertypeCandidates";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LspPosition {
@@ -451,6 +458,13 @@ impl Server {
                     self.schedule_all_project_refreshes(Duration::ZERO);
                     if let Some(id) = id {
                         send_response(writer, id, Value::Null)?;
+                    }
+                } else if command == Some(SUPERTYPE_CANDIDATES_COMMAND) {
+                    if let Some(id) = id {
+                        match self.supertype_candidates(message.get("params")) {
+                            Ok(candidates) => send_response(writer, id, candidates)?,
+                            Err(error) => send_error(writer, id, -32602, error)?,
+                        }
                     }
                 } else if let Some(id) = id {
                     send_error(
@@ -1696,6 +1710,76 @@ impl Server {
         test_document_symbols(&document.analysis, &document.text)
     }
 
+    /// The types a declaration about to be created at `uri` may extend and
+    /// implement, and the words the lexer reserves, for an editor's
+    /// new-type dialog. `development` says whether the file's directory is
+    /// mapped by `autoload-dev`.
+    fn supertype_candidates(&self, params: Option<&Value>) -> Result<Value, String> {
+        let argument = params
+            .and_then(|params| params.get("arguments"))
+            .and_then(Value::as_array)
+            .and_then(|arguments| arguments.first())
+            .ok_or("doria.supertypeCandidates needs one argument object")?;
+        let uri = argument
+            .get("uri")
+            .and_then(Value::as_str)
+            .ok_or("doria.supertypeCandidates needs the new file's `uri`")?;
+        let development = argument
+            .get("development")
+            .and_then(Value::as_bool)
+            .ok_or("doria.supertypeCandidates needs `development` as a boolean")?;
+        let namespace = argument
+            .get("namespace")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|namespace| !namespace.is_empty());
+        let path = file_uri_to_path(uri).ok_or_else(|| format!("`{uri}` is not a file URI"))?;
+        // The file does not exist yet; its directory does.
+        let path = path
+            .parent()
+            .and_then(|directory| directory.canonicalize().ok())
+            .zip(path.file_name())
+            .map_or(path.clone(), |(directory, name)| directory.join(name));
+        let keywords = doriac::lexer::KEYWORDS;
+        let Some((graph, placement)) = self.document_index.placement_for(&path) else {
+            return Ok(json!({
+                "package": Value::Null,
+                "classes": [],
+                "interfaces": [],
+                "keywords": keywords,
+            }));
+        };
+        let visible_packages = if development {
+            &placement.development_visible
+        } else {
+            &placement.main_visible
+        };
+        let candidates = self.document_index.supertype_candidates(&TypeViewpoint {
+            graph,
+            package: &placement.package,
+            visible_packages,
+            namespace,
+        });
+        let entries = |candidates: Vec<SupertypeCandidate>| {
+            candidates
+                .into_iter()
+                .map(|candidate| {
+                    json!({
+                        "label": candidate.label,
+                        "qualifiedName": candidate.qualified_name,
+                        "typeParameters": candidate.type_parameters,
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        Ok(json!({
+            "package": placement.package,
+            "classes": entries(candidates.classes),
+            "interfaces": entries(candidates.interfaces),
+            "keywords": keywords,
+        }))
+    }
+
     fn workspace_symbols(&self, params: Option<&Value>) -> Value {
         let query = params
             .and_then(|params| params.get("query"))
@@ -2533,6 +2617,7 @@ impl Server {
                     .insert(group.clone(), graph.incremental);
                 self.include_edges
                     .insert(group.clone(), graph.include_edges);
+                document_index.add_package_placements(&group, graph.packages);
                 for (uri, graph_document) in graph.documents {
                     document_index.add_document(&group, &uri, &graph_document.analysis);
                     if consumed.contains(&uri) || self.project_documents.contains_key(&uri) {
@@ -3280,7 +3365,7 @@ fn initialize_result() -> Value {
             },
             "codeActionProvider": true,
             "executeCommandProvider": {
-                "commands": ["doria.refreshProject"]
+                "commands": ["doria.refreshProject", SUPERTYPE_CANDIDATES_COMMAND]
             },
             "workspace": {
                 "workspaceFolders": {
@@ -13372,6 +13457,178 @@ class Broken extends Vendor\Missing {}
             rename["changes"][child_uri].as_array().map(Vec::len),
             Some(1)
         );
+    }
+
+    #[test]
+    fn new_type_supertypes_follow_compiler_package_visibility() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("doria-lsp-supertypes-{nonce}"));
+        let packages = [("app", "App"), ("base", "Lib"), ("deep", "Deep")];
+        for (directory, _) in packages {
+            fs::create_dir_all(root.join(directory).join("src")).unwrap();
+        }
+        let app_source = r#"namespace App;
+interface Local { function local(): int; }
+open class AppBase {}
+class Probe extends AppBase implements Local
+{
+    function local(): int { return 1; }
+}
+"#;
+        let base_source = r#"namespace Lib;
+interface ValueSource { function value(): int; }
+internal interface Hidden { function hidden(): int; }
+open class Base {}
+class Sealed {}
+internal open class InternalBase {}
+"#;
+        let deep_source = r#"namespace Deep;
+interface Buried { function buried(): int; }
+open class DeepBase {}
+"#;
+        let sources = [app_source, base_source, deep_source];
+        for ((directory, _), source) in packages.iter().zip(sources) {
+            fs::write(root.join(directory).join("src/Types.doria"), source).unwrap();
+        }
+        let package_root = |directory: &str| root.join(directory).canonicalize().unwrap();
+        let app_root = package_root("app");
+        let app_path = app_root.join("src/Types.doria");
+        let app_uri = file_uri::path_to_file_uri(&app_path);
+        let root_uri = file_uri::path_to_file_uri(&app_root);
+        let mut project = project::test_project(
+            &app_root,
+            &["src/Types.doria"],
+            project::PackageSource::Path,
+            &[],
+        );
+        let template = project.packages[0].clone();
+        let plan_template = project.tooling_build_plan.packages[0].clone();
+        // app depends on base, and base on deep: deep is transitive to app.
+        for (directory, dependency) in [("base", Some("acme/deep")), ("deep", None)] {
+            let identity = format!("acme/{directory}");
+            let directory_root = package_root(directory);
+            let mut package = template.clone();
+            package.package = identity.clone();
+            package.compiler_package = identity.clone();
+            package.root = directory_root.clone();
+            package.manifest = directory_root.join("Baton.toml");
+            package.source = project::PackageSource::Git;
+            package.dependencies.clear();
+            package.sources[0].identity = format!("{identity}:src/Types.doria");
+            package.sources[0].path = directory_root.join("src/Types.doria");
+            let mut plan = plan_template.clone();
+            plan.identity = identity.clone();
+            plan.root = directory_root.display().to_string();
+            plan.dependencies.clear();
+            plan.sources[0].identity = format!("{identity}:src/Types.doria");
+            plan.sources[0].path = "src/Types.doria".to_string();
+            if let Some(dependency) = dependency {
+                package.dependencies.push(project::ProjectDependency {
+                    package: dependency.to_string(),
+                    kind: doriac::build_plan::DependencyKind::Normal,
+                });
+                plan.dependencies.push(doriac::build_plan::Dependency {
+                    package: dependency.to_string(),
+                    kind: doriac::build_plan::DependencyKind::Normal,
+                });
+            }
+            project.packages.push(package);
+            project.tooling_build_plan.packages.push(plan);
+        }
+        project.packages[0]
+            .dependencies
+            .push(project::ProjectDependency {
+                package: "acme/base".to_string(),
+                kind: doriac::build_plan::DependencyKind::Normal,
+            });
+        project.tooling_build_plan.packages[0]
+            .dependencies
+            .push(doriac::build_plan::Dependency {
+                package: "acme/base".to_string(),
+                kind: doriac::build_plan::DependencyKind::Normal,
+            });
+
+        let mut server = stage31_server(&[&root_uri]);
+        server.projects.insert(root_uri.clone(), project);
+        open_stage31_document(&mut server, &app_uri, app_source);
+        assert!(
+            server.documents[&app_uri].analysis.diagnostics().is_empty(),
+            "{:?}",
+            server.documents[&app_uri].analysis.diagnostics()
+        );
+
+        let request = |uri: &str, namespace: &str| {
+            server
+                .supertype_candidates(Some(&json!({
+                    "command": SUPERTYPE_CANDIDATES_COMMAND,
+                    "arguments": [{ "uri": uri, "namespace": namespace, "development": false }],
+                })))
+                .unwrap()
+        };
+        let labels = |response: &Value, field: &str| {
+            response[field]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|candidate| candidate["label"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        let new_file = file_uri::path_to_file_uri(&app_root.join("src/Renderer.doria"));
+        let response = request(&new_file, "App");
+        assert_eq!(response["package"], "acme/app");
+        // Own-package types by short name in their namespace, a direct
+        // dependency's public types by absolute name, nothing from the
+        // transitive package, nothing internal to another package, and no
+        // class that is not open.
+        assert_eq!(labels(&response, "classes"), ["AppBase", "Lib\\Base"]);
+        let interfaces = labels(&response, "interfaces");
+        for expected in ["Local", "Lib\\ValueSource", "Displayable"] {
+            assert!(
+                interfaces.iter().any(|label| label == expected),
+                "{interfaces:?}"
+            );
+        }
+        for hidden in ["Lib\\Hidden", "Deep\\Buried"] {
+            assert!(
+                !interfaces.iter().any(|label| label == hidden),
+                "{interfaces:?}"
+            );
+        }
+        assert!(response["keywords"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|keyword| keyword == "class"));
+
+        // From another namespace the same package's types are absolute.
+        let response = request(&new_file, "App\\Rendering");
+        assert_eq!(labels(&response, "classes"), ["App\\AppBase", "Lib\\Base"]);
+
+        // A directory outside every package has no candidates.
+        let outside = file_uri::path_to_file_uri(&root.join("Loose.doria"));
+        let response = request(&outside, "");
+        assert_eq!(response["package"], Value::Null);
+        assert!(labels(&response, "classes").is_empty());
+        assert!(server
+            .supertype_candidates(Some(&json!({ "arguments": [{ "uri": new_file }] })))
+            .is_err());
+
+        // Editor completion in a header offers the same visible types.
+        let implements = app_source.find("Local\n").unwrap();
+        let completion = request_completion_labels(&server, &app_uri, app_source, implements);
+        assert!(completion.contains("Lib\\ValueSource"), "{completion:?}");
+        assert!(!completion.contains("Lib\\Hidden"), "{completion:?}");
+        assert!(!completion.contains("Deep\\Buried"), "{completion:?}");
+        let extends = app_source.find("AppBase implements").unwrap();
+        let completion = request_completion_labels(&server, &app_uri, app_source, extends);
+        assert!(completion.contains("Lib\\Base"), "{completion:?}");
+        assert!(!completion.contains("Lib\\Sealed"), "{completion:?}");
+        assert!(!completion.contains("Lib\\InternalBase"), "{completion:?}");
+        assert!(!completion.contains("Deep\\DeepBase"), "{completion:?}");
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

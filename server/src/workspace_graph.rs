@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
@@ -7,7 +7,8 @@ use doriac::build_plan::{
     SourceOrigin, SourceScope, TargetKind, BUILD_PLAN_SCHEMA_VERSION,
 };
 use doriac::compilation_graph::{
-    compilation_context, GraphCompleteness, GraphLoadOptions, ProjectStructureAuthority,
+    compilation_context, package_visible_packages, visible_packages, GraphCompleteness,
+    GraphLoadOptions, ProjectStructureAuthority,
 };
 use doriac::diagnostics::{Diagnostic, DiagnosticSource, LabelRole};
 use doriac::incremental::{CompilationSession, IncrementalFacts};
@@ -18,7 +19,7 @@ use doriac::source_provider::{
     ProvidedSource, SourceProvider, SourceProviderError, SourceRequest,
 };
 
-use crate::analysis::AnalysisSnapshot;
+use crate::analysis::{AnalysisSnapshot, GraphSourceFacts};
 use crate::file_uri::{file_uri_to_path, path_to_file_uri};
 use crate::project::{ProjectDocument, SourceEditPolicy};
 
@@ -39,9 +40,20 @@ pub(crate) struct GraphDocument {
     pub(crate) edit_policy: SourceEditPolicy,
 }
 
+/// Where a package's sources live and which packages they may name, so a
+/// source that does not exist yet can be placed in the graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PackagePlacement {
+    pub(crate) package: String,
+    pub(crate) root: PathBuf,
+    pub(crate) main_visible: BTreeSet<String>,
+    pub(crate) development_visible: BTreeSet<String>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ProjectGraphAnalysis {
     pub(crate) documents: HashMap<String, GraphDocument>,
+    pub(crate) packages: Vec<PackagePlacement>,
     pub(crate) source_uris: HashMap<String, String>,
     pub(crate) incremental: IncrementalFacts,
     pub(crate) include_edges: Vec<(SourceIdentity, SourceIdentity)>,
@@ -149,11 +161,17 @@ pub(crate) fn analyze_open_graph(
             })
             .cloned()
             .collect();
-        let facts = source_symbol_facts(&analysis.semantic_info.global_symbols, &source.identity);
+        let facts = GraphSourceFacts {
+            context: compilation_context(source),
+            global_symbols: source_symbol_facts(
+                &analysis.semantic_info.global_symbols,
+                &source.identity,
+            ),
+            visible_packages: visible_packages(&graph, source),
+        };
         let snapshot = AnalysisSnapshot::from_graph_source(
             &source.source.text,
             source.id,
-            compilation_context(source),
             analysis
                 .authored_sources
                 .get(&source.identity.0)
@@ -279,11 +297,17 @@ pub(crate) fn analyze_project_graph(
             })
             .cloned()
             .collect();
-        let facts = source_symbol_facts(&analysis.semantic_info.global_symbols, &source.identity);
+        let facts = GraphSourceFacts {
+            context: compilation_context(source),
+            global_symbols: source_symbol_facts(
+                &analysis.semantic_info.global_symbols,
+                &source.identity,
+            ),
+            visible_packages: visible_packages(&graph, source),
+        };
         let snapshot = AnalysisSnapshot::from_graph_source(
             &source.source.text,
             source.id,
-            compilation_context(source),
             analysis
                 .authored_sources
                 .get(&source.identity.0)
@@ -305,8 +329,19 @@ pub(crate) fn analyze_project_graph(
         );
     }
 
+    let packages = graph
+        .packages
+        .iter()
+        .map(|(package, node)| PackagePlacement {
+            package: package.clone(),
+            root: normalized_absolute(&node.canonical_root),
+            main_visible: package_visible_packages(&graph, package, false),
+            development_visible: package_visible_packages(&graph, package, true),
+        })
+        .collect();
     Ok(ProjectGraphAnalysis {
         documents,
+        packages,
         source_uris,
         incremental: update.facts,
         include_edges: graph

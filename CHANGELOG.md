@@ -6,6 +6,29 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- The IntelliJ **New > Doria Class** dialog lists the parent types the new
+  class may name. **Extends** is a list of open classes and **Implements**
+  adds interfaces from a searchable list; both used to be typed by hand,
+  so a typo, a final class or an unreachable type was accepted. The lists
+  come from the new `doria.supertypeCandidates` workspace command, which
+  applies the compiler's package visibility (`doriac`'s
+  `visible_packages`): the class's own package and its direct
+  dependencies, development dependencies under `autoload-dev`, and nothing
+  `internal` to another package. Types in the new file's namespace are
+  written by short name, others by their absolute name, and a generic type
+  is written with its parameter names for the author to replace. The
+  dialog's keyword check now uses the compiler lexer's keywords from the
+  same command. The compiler pin moves to doria 9116588, which makes the
+  visibility rule public.
+  - Removed: the dialog's own reserved-word list. Words the lexer does not
+    reserve, such as `goto`, `print`, `async`, `mixed` and `array`, are
+    accepted as names, as the compiler accepts them.
+  - Without a running language server, or in an IDE without LSP support,
+    the parent type lists are empty, names are checked only as identifiers,
+    and the dialog says why; the class can still be created.
+- Completion after `implements`, `uses` and `extends` offers the public
+  types of the package's direct dependencies by absolute name. It offered
+  only the package's own types and imported names before.
 - A compiler warning no longer stops analysis: it is published at Warning
   severity while hover, signature help, completion and navigation keep
   answering for the file. The compiler pin moves to doria f516aec, where

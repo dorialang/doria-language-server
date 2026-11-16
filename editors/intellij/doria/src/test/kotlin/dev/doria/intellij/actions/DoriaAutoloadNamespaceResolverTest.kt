@@ -31,6 +31,28 @@ class DoriaAutoloadNamespaceResolverTest {
     }
 
     @Test
+    fun reportsWhetherAutoloadDevPlacesTheDirectory() {
+        val mappings = mappings(
+            """
+            [autoload.namespaces]
+            "Acme\\" = "src/"
+
+            [autoload-dev.namespaces]
+            "Acme\\Tests\\" = "tests/"
+            """.trimIndent(),
+        )
+
+        assertEquals(
+            DoriaAutoloadNamespaceResolver.SourcePlacement("Acme\\Domain", development = false),
+            placement(listOf("project", "src", "Domain"), mappings),
+        )
+        assertEquals(
+            DoriaAutoloadNamespaceResolver.SourcePlacement("Acme\\Tests\\Unit", development = true),
+            placement(listOf("project", "tests", "Unit"), mappings),
+        )
+    }
+
+    @Test
     fun givesTheLongestMatchingDirectoryRootAuthority() {
         val mappings = mappings(
             """
@@ -125,4 +147,9 @@ class DoriaAutoloadNamespaceResolverTest {
         target: List<String>,
         mappings: List<DoriaAutoloadNamespaceResolver.AutoloadMapping>,
     ): String? = DoriaAutoloadNamespaceResolver.infer(listOf("project"), target, mappings)
+
+    private fun placement(
+        target: List<String>,
+        mappings: List<DoriaAutoloadNamespaceResolver.AutoloadMapping>,
+    ) = DoriaAutoloadNamespaceResolver.inferPlacement(listOf("project"), target, mappings)
 }
