@@ -10782,6 +10782,43 @@ function inspect({key} $key, ?{outcome} $outcome): void {{
     }
 
     #[test]
+    fn a_warning_keeps_the_semantic_data() {
+        // E0646, an unused closure capture, is a warning: it does not stop
+        // analysis, so hover, signature help and completion still answer.
+        let source = "class Counter\n{\n    function next(int $step): int\n    {\n        return $step;\n    }\n}\n\nfunction main(): void\n{\n    let $value = 1;\n    let $unused = fn() with ($value) => 1;\n    let $counter = new Counter();\n    echo $counter->next(2);\n}\n";
+        let snapshot = AnalysisSnapshot::analyze("warned.doria", source);
+        let diagnostics = snapshot.diagnostics();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "E0646"
+                    && diagnostic.severity == DiagnosticSeverity::Warning),
+            "{diagnostics:?}"
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error),
+            "{diagnostics:?}"
+        );
+        let call = source.find("->next(").unwrap() + "->".len();
+        let hover = snapshot
+            .hover_at_offset(call)
+            .expect("hover survives a warning");
+        assert!(hover.markdown.contains("next"), "{}", hover.markdown);
+        let arguments = source.find("->next(").unwrap() + "->next(".len();
+        assert!(snapshot.signature_help_at_offset(arguments).is_some());
+        let member = source.find("$counter->").unwrap() + "$counter->".len();
+        let labels = snapshot
+            .member_completions_at_offset(member)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|completion| completion.label)
+            .collect::<Vec<_>>();
+        assert!(labels.iter().any(|label| label == "next"), "{labels:?}");
+    }
+
+    #[test]
     fn terminal_values_offer_their_public_constructors() {
         let source = "use Doria\\Std\\Term\\{KeyModifiers, Position, Size};\n\nfunction main(): int\n{\n    let $size = new Size(80, 24);\n    let $at = new Position(column: 5, row: 2);\n    let $chord = new KeyModifiers(true, false, true);\n    let $none = KeyModifiers::none;\n    return $size->columns + $at->row;\n}\n";
         let snapshot = AnalysisSnapshot::analyze("term-constructors.doria", source);

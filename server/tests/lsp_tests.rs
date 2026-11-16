@@ -30,8 +30,13 @@ const READINESS_FORWARDING_CALLBACKS: [&str; 3] = [
 ];
 
 fn compiler_findings_for_publication(name: &str, source: &str) -> Vec<Diagnostic> {
-    let diagnostics =
-        doriac::check_source(name, source).expect_err("fixture must produce a diagnostic");
+    // A warning does not fail checking, so the compiler's findings are its
+    // errors on failure or its warnings on success.
+    let diagnostics = match doriac::check_source_with_warnings(name, source) {
+        Ok((_, warnings)) => warnings,
+        Err(errors) => errors,
+    };
+    assert!(!diagnostics.is_empty(), "fixture must produce a diagnostic");
     prepare_diagnostics(&diagnostics)
 }
 

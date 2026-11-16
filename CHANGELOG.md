@@ -6,6 +6,10 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- A compiler warning no longer stops analysis: it is published at Warning
+  severity while hover, signature help, completion and navigation keep
+  answering for the file. The compiler pin moves to doria f516aec, where
+  only an error fails checking.
 - Completion asks the compiler what may be written at the cursor
   (`doriac::syntax::completion_context`) and offers only the keywords its
   parser accepts there. The server's token heuristics for completion sites,
