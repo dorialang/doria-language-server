@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-const DORIA_COMPILER_AUTHORITY_REVISION = '9116588e39fec7720299c22840987fdde448714b';
+const DORIA_COMPILER_AUTHORITY_REVISION = '8d3c0191deef4e0a84d50d7167ea4cb9f6e47e20';
 
 function doria_compiler_revision(string $manifest): ?string
 {
