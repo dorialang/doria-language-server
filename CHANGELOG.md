@@ -6,6 +6,9 @@ This project follows the Doria toolchain CalVer.
 
 ## Unreleased
 
+- Diagnostics follow compiler 8d3c019: a `writable` foreach over a readonly
+  collection reports E0201 in the editor, and a promoted constructor
+  parameter may be `take writable` to own a writable property.
 - The IntelliJ **New > Doria Class** dialog lists the parent types the new
   class may name. **Extends** is a list of open classes and **Implements**
   adds interfaces from a searchable list; both used to be typed by hand,

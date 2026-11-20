@@ -2396,6 +2396,27 @@ fn pending_adapter_nonblocking_phases_preserve_compiler_diagnostics() {
 }
 
 #[test]
+fn writable_foreach_over_a_readonly_collection_is_reported_as_the_compiler_reports_it() {
+    let readonly = r#"
+class Scene
+{
+    function __construct(writable int $frames) {}
+    writable function update(): void { $this->frames++; }
+}
+class Game
+{
+    function __construct(internal take List<Scene> $scenes) {}
+    writable function update(): void { foreach ($this->scenes as writable Scene $scene) { $scene->update(); } }
+}
+function main(): void {}
+"#;
+    assert_lsp_diagnostic_matches_compiler("readonly-writable-foreach.doria", readonly, "E0201");
+    let writable = readonly.replace("internal take List", "internal take writable List");
+    let diagnostics = diagnostics_for_document("file:///writable-foreach.doria", &writable);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
 fn nullable_byte_member_errors_remain_compiler_owned() {
     for ty in [
         "Bytes",
